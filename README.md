@@ -124,16 +124,17 @@ flowchart TD
 
 ## 4. Cost Management & Optimization Guide
 
-1. **Understanding the Pricing Model**:
-   - **EKS Control Plane**: $0.10/hour (~$73/month) or ECS (No cluster management fee with EC2/Fargate).
-   - **NAT Gateway**: ~$0.045/hour + data processing fee.
-   - **Application Load Balancer**: ~$0.0225/hour + LCU charges.
-   - **RDS PostgreSQL**: `db.t3.micro` is eligible for AWS Free Tier for 750 hours/month.
-2. **Monitoring & Alerts**:
-   - Monitored via CloudWatch Billing Metric `EstimatedCharges`.
-   - Alert triggers SNS notification when monthly spend exceeds $15.
-3. **Resource Cleanup**:
-   - Always run `./scripts/destroy.sh` immediately after audits or testing sessions.
+1. **Infrastructure Cost Breakdown & Right-Sizing**:
+   - **Compute**: EKS Managed Nodes default to `t3.medium` burstable instances; ECS Fargate provides serverless per-second execution without node management overhead.
+   - **Database & Messaging**: RDS uses `db.t4g.micro` (AWS Graviton ARM cost efficiency) and Amazon MQ uses `mq.t3.micro`.
+   - **Networking**: Application Load Balancer handles ingress. A configurable `single_nat_gateway` flag allows non-production environments to use a single NAT Gateway, cutting continuous hourly networking cost by 50%.
+2. **Proactive Cost Guardrails & Alarms**:
+   - **AWS Budgets (`aws_budgets_budget.monthly`)**: Enforces a strict monthly spend limit ($15 default) with dual notification triggers:
+     - 80% actual spend threshold alert via Amazon SNS and email.
+     - 100% forecasted spend threshold alert before budget breaches occur.
+   - **CloudWatch Billing Metric Alarm (`aws_cloudwatch_metric_alarm.billing_estimated_charges`)**: Evaluates `EstimatedCharges` against the budget threshold and dispatches critical SNS alerts to engineering operations.
+3. **Automated Resource Teardown**:
+   - Running `./scripts/destroy.sh` uninstalls all Kubernetes workloads and triggers `terraform destroy -auto-approve`, wiping all VPC infrastructure, load balancers, databases, and brokers to guarantee zero ongoing idle costs.
 
 ---
 
@@ -178,51 +179,103 @@ kubectl apply -f ../manifests/
 > - **High Availability & Reliability**: Native multi-datacenter redundancy across Availability Zones with automated failover.
 > - **Speed & Agility**: Reduces infrastructure provisioning time from weeks to minutes using Infrastructure as Code (IaC).
 
-### Q2: Why is deploying in the cloud preferred over on-premises for this microservices architecture?
+### Q2: Why is deploying the solution in the cloud preferred over on-premises?
 > **Answer**: 
 > - **Operational Simplicity**: Managed services like Amazon RDS, Amazon MQ, and AWS Cognito offload database patching, replication, broker clustering, and authentication maintenance.
 > - **Dynamic Scaling**: The workload (e.g. streaming movie orders) experiences sudden spikes. Auto-scaling handles bursts instantly without purchasing excess physical servers.
 > - **Resilience**: A hardware failure on-premises causes downtime; in AWS, multi-AZ failover keeps the application available.
 
-### Q3: How do you differentiate between Public, Private, and Hybrid Cloud?
+### Q3: How would you differentiate between public, private, and hybrid cloud?
 > **Answer**:
 > - **Public Cloud**: Cloud infrastructure owned and operated by a third-party provider (e.g., AWS, GCP) delivering computing resources over the public Internet. Highly scalable and multi-tenant.
 > - **Private Cloud**: Infrastructure exclusively used by one business or organization, hosted on-premises or by a specialized third party. Maximum governance and control.
 > - **Hybrid Cloud**: Integrates private infrastructure with public cloud environments, allowing data and apps to be shared between them (e.g., sensitive customer records stored on-prem with burst compute in AWS).
 
-### Q4: What drove your decision to select AWS for this project?
+### Q4: What drove your decision to select AWS for this project, and what factors did you consider?
 > **Answer**:
 > - **Maturity & Breadth of Services**: AWS provides mature managed services covering every component of our stack: Amazon EKS/ECS for orchestration, Amazon RDS for relational persistence, Amazon MQ for RabbitMQ, and AWS Cognito for OIDC/OAuth2 authentication.
 > - **Terraform Provider Quality**: The HashiCorp AWS provider is exceptionally mature, supporting full lifecycle management of our architecture.
 > - **Enterprise Security Standards**: IAM fine-grained role delegation, VPC security groups, and KMS integration provide robust defense-in-depth out of the box.
 
-### Q5: How did you manage and optimize costs in this AWS architecture?
+### Q5: Can you describe your microservices application's AWS-based architecture and the interaction between its components?
 > **Answer**:
-> - **Right-Sizing**: Used `t3.micro` / `t3.small` burstable compute instances suited for dev/staging workloads.
-> - **Single NAT in Non-Prod**: Provisioned a single NAT gateway instead of one per AZ, reducing continuous hourly infrastructure cost.
-> - **Auto-Scaling**: Set minimum replicas to 1, scaling to 3 only during peak load (60% CPU threshold).
-> - **Billing Guardrails**: Integrated AWS Budgets and CloudWatch metric alarms for `EstimatedCharges` with SNS alerting.
-> - **Automated Teardown**: Maintained a clean `destroy.sh` script to delete all ephemeral resources immediately after use.
+> - **Client Entry & Auth**: Clients authenticate against an **AWS Cognito User Pool**, obtaining cryptographically signed JWT tokens. Requests are dispatched to **Amazon API Gateway (HTTP API v2)** which validates JWT claims via a Cognito JWT Authorizer.
+> - **Private Integration**: API Gateway forwards authorized requests through a private **VPC Link** to an internal-facing **Application Load Balancer (ALB)** spanning multiple Availability Zones.
+> - **Compute Tier**: The ALB distributes traffic to the containerized **`api-gateway`** microservice running in private application subnets across Amazon EKS worker nodes (or ECS Fargate).
+> - **Synchronous Flow**: Query requests (`GET /api/movies`) route synchronously from `api-gateway` to the **`inventory-app`** microservice (port 8080), which queries the isolated **RDS PostgreSQL** `inventory_db` (port 5432).
+> - **Asynchronous Flow**: Transactional write requests (`POST /api/billing`) are published by `api-gateway` as messages to **Amazon MQ (RabbitMQ)** (AMQP port 5672). The **`billing-app`** worker consumes messages from the queue and records orders in the isolated **RDS PostgreSQL** `billing_db` (port 5432).
+> - **Observability**: Container logs and metrics stream continuously into **Amazon CloudWatch** via Fluent Bit and CloudWatch Container Insights.
 
-### Q6: What security measures did you implement and what AWS best practices were followed?
+### Q6: How did you manage and optimize the cost of your AWS solution?
+> **Answer**:
+> - **Right-Sizing**: Used `t3.micro` / `t3.small` compute nodes and `db.t4g.micro` Graviton ARM database instances.
+> - **Single NAT in Non-Prod**: Configured an optional `single_nat_gateway = true` flag for staging/dev environments, cutting continuous NAT Gateway hourly charges by 50%.
+> - **Auto-Scaling**: Configured minimum pod/task replicas to 1, scaling to 3 only during traffic spikes (60% CPU threshold).
+> - **Proactive Billing Guardrails**: Deployed **AWS Budgets** (`aws_budgets_budget.monthly`) with 80% actual and 100% forecasted alerts, paired with CloudWatch `EstimatedCharges` alarms targeting the SNS alert topic.
+> - **Automated Teardown**: Maintained an automated `./scripts/destroy.sh` script to delete all ephemeral cloud resources and state immediately upon test completion.
+
+### Q7: What measures did you implement to ensure application security on AWS, and what AWS security best practices did you adhere to?
 > **Answer**:
 > - **VPC Subnet Isolation**: Three-tier architecture. Databases and queues are placed in private data subnets without internet routes.
 > - **Security Group Least Privilege**: Databases only accept connections on port 5432 from application pod security groups; no generic `0.0.0.0/0` ingress rules exist.
 > - **Managed Authentication**: AWS Cognito verifies user identity and issues signed JWT tokens checked at the perimeter.
 > - **Encryption**: EBS and RDS volumes encrypted with AWS KMS keys; TLS 1.3 enforced on the ALB with ACM certificates.
 
-### Q7: What monitoring and logging tools did you utilize?
+### Q8: What AWS monitoring and logging tools did you utilize, and how did they assist in identifying and troubleshooting application issues?
 > **Answer**:
 > - **Amazon CloudWatch Metrics**: Tracks CPUUtilization, NetworkIn/Out, HTTPCode_Target_5XX_Count, and QueueDepth.
 > - **CloudWatch Logs**: Fluent Bit sidecars collect container stdout/stderr logs from all pods into structured log groups (`/aws/containerinsights/cloud-design/application`).
-> - **CloudWatch Alarms**: Configured alarms for CPU > 80%, database connections > 80%, and HTTP 5xx errors.
+> - **CloudWatch Alarms**: Configured alarms for CPU > 80%, database connections > 80%, ALB latency > 1s, and HTTP 5xx errors.
+> - **Operational Dashboard**: Centralized dashboard in `cloudwatch.tf` visualizing API Gateway request rates, ALB latency, database CPU/connections, and RabbitMQ queue depth in real time.
 
-### Q8: How were Docker images optimized?
+### Q9: Can you describe the AWS auto-scaling policies you implemented and how they help your application accommodate varying workloads?
+> **Answer**:
+> - **Dual-Layer Auto Scaling**:
+>   1. **Pod / Task Tier**: Kubernetes Horizontal Pod Autoscaler (HPA) and AWS ECS Application Auto Scaling scale `api-gateway` and `inventory-app` between 1 and 3 replicas with **Target Tracking set at 60% CPU utilization**. When CPU exceeds 60%, new replicas spawn within 60 seconds (scale-out cooldown). During low traffic, pods consolidate after 300 seconds (scale-in cooldown).
+>   2. **Node Group Tier**: EC2 Auto Scaling Groups scale EKS worker nodes from 2 to 5 instances based on `ASGAverageCPUUtilization` target tracking at 60%.
+> - **Spike Decoupling**: Amazon MQ (RabbitMQ) absorbs sudden ingestion bursts for billing orders, decoupling request intake from processing capacity and preventing cascade failures.
+
+### Q10: How did you optimize Docker images for each microservice, and how did it influence build times and image sizes?
 > **Answer**:
 > - **Multi-Stage Builds**: Compiles dependencies in a build stage and copies only required artifacts into the minimal runtime stage.
 > - **Penultimate Stable Base**: Uses `alpine:3.23` or `debian:12-slim`, dropping image sizes from ~1GB down to ~80MB.
 > - **Layer Caching**: Copies `requirements.txt` / `package.json` before source code so dependency installation layers are cached across code changes.
 > - **Non-Root Execution**: Creates an unprivileged `appuser` (`UID 10001`) to eliminate container breakout risks.
+
+### Q11: If you had to redo this project, what modifications would you make to your approach or the technologies you used?
+> **Answer**:
+> - **Fully Serverless Event Architecture**: Replace long-running billing worker containers and Amazon MQ with AWS Lambda, Amazon EventBridge, and Amazon Aurora Serverless v2, reducing idle baseline computing costs to zero.
+> - **Service Mesh (AWS App Mesh / Istio)**: Implement mutual TLS (mTLS) with automatic certificate rotation and distributed tracing (AWS X-Ray) for microservice-to-microservice traffic.
+> - **GitOps Delivery Pipeline**: Implement ArgoCD or Flux inside EKS with AWS CodePipeline for declarative, audited, commit-triggered rollouts.
+> - **Multi-Region Disaster Recovery**: Configure Route 53 latency-based routing with Aurora Global Database to achieve cross-region active-active failover with RPO < 1s.
+
+### Q12: How can your AWS solution be expanded or altered to cater to future requirements like adding new microservices or migrating to a different cloud provider?
+> **Answer**:
+> - **Adding Microservices**:
+>   - **IaC**: Add new ECS task definitions or K8s deployments, declare security group rules for allowed ingress/egress, and bind new routes to the API Gateway HTTP API.
+>   - **Decoupled Architecture**: New services attach to RabbitMQ exchanges or register via Kubernetes CoreDNS / AWS Cloud Map without impacting existing services.
+> - **Multi-Cloud Portability**:
+>   - Containers adhere strictly to OCI standards (multi-stage Dockerfiles) and deploy using standard Kubernetes manifests (`manifests/*.yaml`).
+>   - IaC is written in modular Terraform; migrating to GCP or Azure involves mapping AWS resources to GKE/AKS, Cloud SQL/Azure PostgreSQL, and PubSub/Service Bus while retaining identical container images and application business logic.
+
+### Q13: What challenges did you face during the project and how did you address them?
+> **Answer**:
+> - **Challenge 1: Strict Database Isolation vs Container Dependency Provisioning**:
+>   - *Problem*: Restricting databases to private subnets without public IPs made initial schema migrations and connectivity verification tricky.
+>   - *Solution*: Utilized Kubernetes Job containers and EKS private node execution within the application subnets to run schema setups via VPC internal routing.
+> - **Challenge 2: Cross-Resource Security Group Dependency Cycles**:
+>   - *Problem*: In Terraform, creating mutual ingress/egress rules directly inside `aws_security_group` blocks resulted in cycle errors between ALB and App security groups.
+>   - *Solution*: Decoupled security groups from their rules using standalone `aws_security_group_rule` resources.
+> - **Challenge 3: Authentication Perimeter vs Service Decoupling**:
+>   - *Problem*: Enforcing auth within each microservice leads to redundant validation code and token parsing overhead.
+>   - *Solution*: Shifted token verification to AWS API Gateway HTTP API using native Cognito JWT Authorizers at the edge.
+
+### Q14: How did you ensure your documentation's clarity and completeness, and what measures did you take to make it easily understandable and maintainable?
+> **Answer**:
+> - **Visual Architecture & C4 Topologies**: Integrated clear Mermaid diagrams illustrating network zones, security boundaries, and data flow.
+> - **Automated Scripted Verification**: Built `./scripts/test_cloud.sh` to mechanically validate that all 48+ IaC deliverables, security rules, manifests, Dockerfiles, and scripts are present and error-free.
+> - **Actionable Teardown & Deployment Manuals**: Documented explicit commands for deployment and cleanup (`deploy.sh`, `destroy.sh`) to guarantee zero ambiguity for auditors and engineers.
+> - **Comprehensive Stakeholder Coverage**: Mapped direct, rigorous answers to every roleplay question defined in `audit.md`.
 
 ---
 

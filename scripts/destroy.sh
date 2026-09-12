@@ -43,6 +43,14 @@ else
     echo "[INFO] Terraform not installed locally. Cleaned up manifests."
 fi
 
+# Step 3: Cleanup local plan artifacts and transient containers
+rm -f "$TF_DIR/tfplan"
+
+if command -v docker &>/dev/null; then
+    echo "[INFO] Stopping any lingering local containers..."
+    docker ps -q --filter "name=cloud-design" | xargs -r docker stop 2>/dev/null || true
+fi
+
 echo "============================================================"
 echo "[SUCCESS] Teardown complete.                                "
 echo "============================================================"

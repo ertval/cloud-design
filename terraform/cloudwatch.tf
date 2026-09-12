@@ -234,3 +234,55 @@ resource "aws_cloudwatch_dashboard" "main" {
     ]
   })
 }
+
+# ------------------------------------------------------------------------------
+# 5. AWS Budgets & CloudWatch Billing Alarms (Actionable Cost Management Plan)
+# ------------------------------------------------------------------------------
+
+resource "aws_budgets_budget" "monthly" {
+  name         = "${local.name_prefix}-monthly-budget"
+  budget_type  = "COST"
+  limit_amount = tostring(var.monthly_budget_limit)
+  limit_unit   = "USD"
+  time_unit    = "MONTHLY"
+
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 80
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "ACTUAL"
+    subscriber_email_addresses = var.alarm_email != "" ? [var.alarm_email] : []
+    subscriber_sns_topic_arns  = [aws_sns_topic.alerts.arn]
+  }
+
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 100
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "FORECASTED"
+    subscriber_email_addresses = var.alarm_email != "" ? [var.alarm_email] : []
+    subscriber_sns_topic_arns  = [aws_sns_topic.alerts.arn]
+  }
+
+  tags = local.common_tags
+}
+
+# CloudWatch Billing Metric Alarm for EstimatedCharges
+resource "aws_cloudwatch_metric_alarm" "billing_estimated_charges" {
+  alarm_name          = "${local.name_prefix}-estimated-charges-limit"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "EstimatedCharges"
+  namespace           = "AWS/Billing"
+  period              = 21600 # 6 hours
+  statistic           = "Maximum"
+  threshold           = var.monthly_budget_limit
+  alarm_description   = "Proactive alarm triggered when estimated monthly AWS infrastructure spend exceeds $${var.monthly_budget_limit}"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+
+  dimensions = {
+    Currency = "USD"
+  }
+
+  tags = local.common_tags
+}

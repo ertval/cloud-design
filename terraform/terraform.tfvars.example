@@ -33,3 +33,4 @@ eks_desired_size         = 2
 autoscaling_target_cpu   = 60
 log_retention_days       = 30
 alarm_email              = "cloud-ops@example.com"
+monthly_budget_limit     = 15

@@ -38,9 +38,17 @@ resource "aws_security_group" "vpc_link" {
   vpc_id      = aws_vpc.main.id
 
   egress {
-    description = "Allow outbound to ALB listener"
+    description = "Allow outbound to ALB listener HTTP"
     from_port   = 80
     to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  egress {
+    description = "Allow outbound to ALB listener HTTPS"
+    from_port   = 443
+    to_port     = 443
     protocol    = "tcp"
     cidr_blocks = [var.vpc_cidr]
   }

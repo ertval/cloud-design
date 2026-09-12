@@ -113,3 +113,20 @@ resource "aws_lb_listener" "http" {
 
   tags = local.common_tags
 }
+
+# 6. HTTP Listener Rule: Forward API Gateway VPC Link traffic to Target Group
+resource "aws_lb_listener_rule" "api_traffic" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 10
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.apigw.arn
+  }
+
+  condition {
+    path_pattern {
+      values = ["/api/*", "/health", "/health*"]
+    }
+  }
+}

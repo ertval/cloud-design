@@ -156,3 +156,9 @@ variable "alarm_email" {
   type        = string
   default     = "cloud-ops@example.com"
 }
+
+variable "monthly_budget_limit" {
+  description = "Monthly budget spend limit in USD for AWS Budgets and CloudWatch billing alerts"
+  type        = number
+  default     = 15
+}

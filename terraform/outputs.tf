@@ -104,3 +104,14 @@ output "cloudwatch_dashboard_name" {
   description = "Name of the CloudWatch centralized operational dashboard"
   value       = aws_cloudwatch_dashboard.main.dashboard_name
 }
+
+# Cost Management Outputs
+output "budget_name" {
+  description = "Name of the AWS Cost Budget"
+  value       = aws_budgets_budget.monthly.name
+}
+
+output "billing_alarm_arn" {
+  description = "ARN of the CloudWatch EstimatedCharges billing alarm"
+  value       = aws_cloudwatch_metric_alarm.billing_estimated_charges.arn
+}
