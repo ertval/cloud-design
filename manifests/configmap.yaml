@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloud-design-config
+  namespace: cloud-design
+  labels:
+    app.kubernetes.io/part-of: cloud-design
+data:
+  APP_PORT: "3000"
+  INVENTORY_APP_HOST: "inventory-app-service"
+  INVENTORY_APP_PORT: "8080"
+  BILLING_APP_PORT: "8080"
+  INVENTORY_DB_HOST: "inventory-database-service"
+  INVENTORY_DB_PORT: "5432"
+  INVENTORY_DB_NAME: "inventory_db"
+  BILLING_DB_HOST: "billing-database-service"
+  BILLING_DB_PORT: "5432"
+  BILLING_DB_NAME: "billing_db"
+  RABBITMQ_HOST: "rabbitmq-service"
+  RABBITMQ_PORT: "5672"
+  RABBITMQ_QUEUE: "billing_queue"

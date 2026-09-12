@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: inventory-database
+  namespace: cloud-design
+  labels:
+    app: inventory-database
+    app.kubernetes.io/part-of: cloud-design
+spec:
+  serviceName: inventory-database-service
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inventory-database
+  template:
+    metadata:
+      labels:
+        app: inventory-database
+    spec:
+      containers:
+        - name: postgres
+          image: cloud-design/inventory-database:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+              name: postgresql
+          env:
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: cloud-design-secrets
+                  key: INVENTORY_DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cloud-design-secrets
+                  key: INVENTORY_DB_PASSWORD
+            - name: DB_NAME
+              valueFrom:
+                configMapRef:
+                  name: cloud-design-config
+                  key: INVENTORY_DB_NAME
+            - name: PGDATA
+              value: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: inventory-data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - postgres
+                - -h
+                - 127.0.0.1
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - postgres
+                - -h
+                - 127.0.0.1
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: inventory-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-database-service
+  namespace: cloud-design
+  labels:
+    app: inventory-database
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+      targetPort: 5432
+      protocol: TCP
+      name: postgresql
+  selector:
+    app: inventory-database

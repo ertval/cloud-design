@@ -1,0 +1,215 @@
+openapi: 3.0.3
+info:
+  title: Play with Containers - Microservices API Gateway
+  description: |
+    API documentation for the Play with Containers project microservices infrastructure.
+    All client interactions route through the API Gateway on port 3000.
+  version: 1.0.0
+servers:
+  - url: http://localhost:3000
+    description: Local API Gateway
+paths:
+  /health:
+    get:
+      summary: Gateway Healthcheck
+      description: Returns health status of the API Gateway service.
+      responses:
+        '200':
+          description: Gateway is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: healthy
+
+  /api/movies:
+    get:
+      summary: List all movies
+      description: Returns all movie items with optional case-insensitive substring search by title.
+      parameters:
+        - name: title
+          in: query
+          description: Filter movies by title substring
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of movies
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  movies:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Movie'
+    post:
+      summary: Create a new movie
+      description: Adds a new movie record to the inventory database.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - title
+              properties:
+                title:
+                  type: string
+                  example: A new movie
+                description:
+                  type: string
+                  example: Very short description
+      responses:
+        '200':
+          description: Movie created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Movie'
+        '400':
+          description: Missing or invalid title
+    delete:
+      summary: Delete all movies
+      description: Clears all movies from the inventory database.
+      responses:
+        '200':
+          description: All movies deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: All 5 movies deleted
+
+  /api/movies/{id}:
+    get:
+      summary: Get movie by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Movie found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Movie'
+        '404':
+          description: Movie not found
+    put:
+      summary: Update movie by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                description:
+                  type: string
+      responses:
+        '200':
+          description: Movie updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Movie'
+        '404':
+          description: Movie not found
+    delete:
+      summary: Delete movie by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Movie deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Movie with ID 1 successfully deleted
+        '404':
+          description: Movie not found
+
+  /api/billing/:
+    post:
+      summary: Submit billing order
+      description: Enqueues a new order message into RabbitMQ for asynchronous billing processing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - user_id
+                - number_of_items
+                - total_amount
+              properties:
+                user_id:
+                  type: string
+                  example: "20"
+                number_of_items:
+                  type: string
+                  example: "99"
+                total_amount:
+                  type: string
+                  example: "250"
+      responses:
+        '200':
+          description: Order queued successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: '{"user_id": "20", "number_of_items": "99", "total_amount": "250"} sent'
+        '400':
+          description: Invalid request payload
+        '500':
+          description: Failed to reach message broker
+
+components:
+  schemas:
+    Movie:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        title:
+          type: string
+          example: A new movie
+        description:
+          type: string
+          example: Very short description
+

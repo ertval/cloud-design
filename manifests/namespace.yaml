@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cloud-design
+  labels:
+    app.kubernetes.io/name: cloud-design
+    app.kubernetes.io/part-of: cloud-design

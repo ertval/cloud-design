@@ -1,0 +1,55 @@
+{
+  "family": "cloud-design-billing-database",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::123456789012:role/cloud-design-prod-ecs-task-execution-role",
+  "taskRoleArn": "arn:aws:iam::123456789012:role/cloud-design-prod-ecs-task-role",
+  "containerDefinitions": [
+    {
+      "name": "billing-database",
+      "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/cloud-design/billing-database:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 5432,
+          "hostPort": 5432,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        { "name": "DB_NAME", "value": "billing_db" },
+        { "name": "PGDATA", "value": "/var/lib/postgresql/data" }
+      ],
+      "secrets": [
+        {
+          "name": "DB_USER",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:cloud-design-prod-billing-db-credentials:username::"
+        },
+        {
+          "name": "DB_PASSWORD",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:cloud-design-prod-billing-db-credentials:password::"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/aws/microservices/cloud-design-prod/billing-database",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "pg_isready -U postgres -h 127.0.0.1 || exit 1"
+        ],
+        "interval": 15,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 20
+      }
+    }
+  ]
+}

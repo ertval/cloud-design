@@ -1,0 +1,35 @@
+# AWS Deployment Region
+aws_region  = "us-east-1"
+environment = "prod"
+project_name = "cloud-design"
+
+# Multi-AZ VPC Networking Configuration
+vpc_cidr                 = "10.0.0.0/16"
+availability_zones       = ["us-east-1a", "us-east-1b"]
+public_subnet_cidrs      = ["10.0.1.0/24", "10.0.2.0/24"]
+private_app_subnet_cidrs = ["10.0.10.0/24", "10.0.11.0/24"]
+private_db_subnet_cidrs  = ["10.0.20.0/24", "10.0.21.0/24"]
+single_nat_gateway       = false # Set true in dev to cut costs by using 1 NAT Gateway
+
+# Managed RDS PostgreSQL
+db_instance_class        = "db.t4g.micro"
+db_allocated_storage     = 20
+db_max_allocated_storage = 100
+db_username              = "dbadmin"
+
+# Amazon MQ RabbitMQ
+mq_engine_version        = "3.13"
+mq_host_instance_type    = "mq.t3.micro"
+mq_user                  = "rabbit_admin"
+
+# EKS Cluster & Node Group
+eks_cluster_version      = "1.30"
+eks_node_instance_types  = ["t3.medium"]
+eks_min_size             = 2
+eks_max_size             = 5
+eks_desired_size         = 2
+
+# Autoscaling & CloudWatch
+autoscaling_target_cpu   = 60
+log_retention_days       = 30
+alarm_email              = "cloud-ops@example.com"

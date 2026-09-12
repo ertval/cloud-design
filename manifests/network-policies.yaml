@@ -1,0 +1,141 @@
+# ------------------------------------------------------------------------------
+# Kubernetes NetworkPolicies: Zero-Trust Microservice Network Segmentation
+# ------------------------------------------------------------------------------
+
+# 1. Default Deny All Ingress Traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: cloud-design
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# 2. Allow Ingress Traffic to API Gateway (from Ingress Controller / ALB)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-gateway-ingress
+  namespace: cloud-design
+spec:
+  podSelector:
+    matchLabels:
+      app: api-gateway
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 3000
+---
+# 3. Allow Ingress to Inventory App ONLY from API Gateway
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-inventory-app-ingress
+  namespace: cloud-design
+spec:
+  podSelector:
+    matchLabels:
+      app: inventory-app
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# 4. Allow Ingress to Billing App ONLY from Ingress / API Gateway for GET routes
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-billing-app-ingress
+  namespace: cloud-design
+spec:
+  podSelector:
+    matchLabels:
+      app: billing-app
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# 5. Allow Ingress to Inventory Database ONLY from Inventory App
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-inventory-db-ingress
+  namespace: cloud-design
+spec:
+  podSelector:
+    matchLabels:
+      app: inventory-database
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: inventory-app
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+# 6. Allow Ingress to Billing Database ONLY from Billing App
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-billing-db-ingress
+  namespace: cloud-design
+spec:
+  podSelector:
+    matchLabels:
+      app: billing-database
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: billing-app
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+# 7. Allow Ingress to RabbitMQ ONLY from API Gateway and Billing App
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-rabbitmq-ingress
+  namespace: cloud-design
+spec:
+  podSelector:
+    matchLabels:
+      app: rabbitmq
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+        - podSelector:
+            matchLabels:
+              app: billing-app
+      ports:
+        - protocol: TCP
+          port: 5672
+        - protocol: TCP
+          port: 15672

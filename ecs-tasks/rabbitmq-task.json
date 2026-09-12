@@ -1,0 +1,56 @@
+{
+  "family": "cloud-design-rabbitmq",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::123456789012:role/cloud-design-prod-ecs-task-execution-role",
+  "taskRoleArn": "arn:aws:iam::123456789012:role/cloud-design-prod-ecs-task-role",
+  "containerDefinitions": [
+    {
+      "name": "rabbitmq",
+      "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/cloud-design/rabbitmq:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 5672,
+          "hostPort": 5672,
+          "protocol": "tcp"
+        },
+        {
+          "containerPort": 15672,
+          "hostPort": 15672,
+          "protocol": "tcp"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "RABBITMQ_USER",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:cloud-design-prod-amazon-mq-credentials:username::"
+        },
+        {
+          "name": "RABBITMQ_PASSWORD",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:cloud-design-prod-amazon-mq-credentials:password::"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/aws/microservices/cloud-design-prod/rabbitmq",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "rabbitmq-diagnostics -q ping || exit 1"
+        ],
+        "interval": 15,
+        "timeout": 10,
+        "retries": 3,
+        "startPeriod": 30
+      }
+    }
+  ]
+}

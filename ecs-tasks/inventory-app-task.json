@@ -1,0 +1,57 @@
+{
+  "family": "cloud-design-inventory-app",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::123456789012:role/cloud-design-prod-ecs-task-execution-role",
+  "taskRoleArn": "arn:aws:iam::123456789012:role/cloud-design-prod-ecs-task-role",
+  "containerDefinitions": [
+    {
+      "name": "inventory-app",
+      "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/cloud-design/inventory-app:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8080,
+          "hostPort": 8080,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        { "name": "APP_PORT", "value": "8080" },
+        { "name": "INVENTORY_DB_HOST", "value": "cloud-design-prod-inventory-db.c1234567890.us-east-1.rds.amazonaws.com" },
+        { "name": "INVENTORY_DB_PORT", "value": "5432" },
+        { "name": "INVENTORY_DB_NAME", "value": "inventory_db" }
+      ],
+      "secrets": [
+        {
+          "name": "INVENTORY_DB_USER",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:cloud-design-prod-inventory-db-credentials:username::"
+        },
+        {
+          "name": "INVENTORY_DB_PASSWORD",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:cloud-design-prod-inventory-db-credentials:password::"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/aws/microservices/cloud-design-prod/inventory-app",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')\" || exit 1"
+        ],
+        "interval": 15,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 15
+      }
+    }
+  ]
+}

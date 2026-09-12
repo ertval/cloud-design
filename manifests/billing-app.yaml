@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: billing-app
+  namespace: cloud-design
+  labels:
+    app: billing-app
+    app.kubernetes.io/part-of: cloud-design
+spec:
+  serviceName: billing-app-service
+  replicas: 1
+  selector:
+    matchLabels:
+      app: billing-app
+  template:
+    metadata:
+      labels:
+        app: billing-app
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: billing-app
+          image: cloud-design/billing-app:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: cloud-design-config
+            - secretRef:
+                name: cloud-design-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          volumeMounts:
+            - name: billing-app-data
+              mountPath: /usr/src/logs
+  volumeClaimTemplates:
+    - metadata:
+        name: billing-app-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: billing-app-service
+  namespace: cloud-design
+  labels:
+    app: billing-app
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app: billing-app

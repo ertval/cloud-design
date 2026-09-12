@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1
+# Optimized Alpine-based PostgreSQL image for inventory-database
+FROM postgres:16-alpine
+
+ENV PGDATA=/var/lib/postgresql/data \
+    POSTGRES_HOST_AUTH_METHOD=scram-sha-256
+
+# Add custom database init scripts
+COPY srcs/inventory-database/init-db.sh /usr/local/bin/init-db.sh
+RUN chmod +x /usr/local/bin/init-db.sh && \
+    mkdir -p /var/lib/postgresql/data /run/postgresql && \
+    chown -R postgres:postgres /var/lib/postgresql /run/postgresql
+
+EXPOSE 5432
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=5 \
+    CMD pg_isready -U postgres -h 127.0.0.1 || exit 1
+
+ENTRYPOINT ["/usr/local/bin/init-db.sh"]

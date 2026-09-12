@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+  namespace: cloud-design
+  labels:
+    app: rabbitmq
+    app.kubernetes.io/part-of: cloud-design
+spec:
+  serviceName: rabbitmq-service
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      containers:
+        - name: rabbitmq
+          image: cloud-design/rabbitmq:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5672
+              name: amqp
+            - containerPort: 15672
+              name: management
+          env:
+            - name: RABBITMQ_USER
+              valueFrom:
+                secretKeyRef:
+                  name: cloud-design-secrets
+                  key: RABBITMQ_USER
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cloud-design-secrets
+                  key: RABBITMQ_PASSWORD
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: rabbitmq-data
+              mountPath: /var/lib/rabbitmq
+          readinessProbe:
+            exec:
+              command:
+                - rabbitmq-diagnostics
+                - -q
+                - ping
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - rabbitmq-diagnostics
+                - -q
+                - ping
+            initialDelaySeconds: 40
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: rabbitmq-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-service
+  namespace: cloud-design
+  labels:
+    app: rabbitmq
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5672
+      targetPort: 5672
+      protocol: TCP
+      name: amqp
+    - port: 15672
+      targetPort: 15672
+      protocol: TCP
+      name: management
+  selector:
+    app: rabbitmq

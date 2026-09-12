@@ -1,0 +1,17 @@
+# syntax=docker/dockerfile:1
+# Optimized Alpine-based RabbitMQ image with management plugin
+FROM rabbitmq:3.13-management-alpine
+
+RUN mkdir -p /etc/rabbitmq /var/lib/rabbitmq /var/log/rabbitmq && \
+    chown -R rabbitmq:rabbitmq /etc/rabbitmq /var/lib/rabbitmq /var/log/rabbitmq && \
+    rabbitmq-plugins enable --offline rabbitmq_management rabbitmq_prometheus
+
+COPY srcs/rabbit-queue/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+EXPOSE 5672 15672 15692
+
+HEALTHCHECK --interval=15s --timeout=10s --start-period=30s --retries=5 \
+    CMD rabbitmq-diagnostics -q ping || exit 1
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

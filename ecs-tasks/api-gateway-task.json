@@ -1,0 +1,59 @@
+{
+  "family": "cloud-design-api-gateway",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::123456789012:role/cloud-design-prod-ecs-task-execution-role",
+  "taskRoleArn": "arn:aws:iam::123456789012:role/cloud-design-prod-ecs-task-role",
+  "containerDefinitions": [
+    {
+      "name": "api-gateway",
+      "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/cloud-design/api-gateway:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 3000,
+          "hostPort": 3000,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        { "name": "APP_PORT", "value": "3000" },
+        { "name": "INVENTORY_APP_HOST", "value": "inventory-app.cloud-design.local" },
+        { "name": "INVENTORY_APP_PORT", "value": "8080" },
+        { "name": "RABBITMQ_HOST", "value": "rabbitmq.cloud-design.local" },
+        { "name": "RABBITMQ_PORT", "value": "5672" },
+        { "name": "RABBITMQ_QUEUE", "value": "billing_queue" }
+      ],
+      "secrets": [
+        {
+          "name": "RABBITMQ_USER",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:cloud-design-prod-amazon-mq-credentials:username::"
+        },
+        {
+          "name": "RABBITMQ_PASSWORD",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:cloud-design-prod-amazon-mq-credentials:password::"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/aws/microservices/cloud-design-prod/api-gateway",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/health')\" || exit 1"
+        ],
+        "interval": 15,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 15
+      }
+    }
+  ]
+}
