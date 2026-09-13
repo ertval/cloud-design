@@ -98,6 +98,7 @@ resource "aws_iam_role_policy_attachment" "ecs_task_execution_policy" {
 }
 
 # Custom policy for ECS task execution to read secrets from AWS Secrets Manager
+# Scoped to project secrets + RDS KMS key (no wildcard secrets/kms access).
 resource "aws_iam_policy" "ecs_secrets_access" {
   name        = "${local.name_prefix}-ecs-secrets-access"
   description = "Allows ECS tasks to read database and MQ credentials from Secrets Manager"
@@ -108,10 +109,18 @@ resource "aws_iam_policy" "ecs_secrets_access" {
       {
         Effect = "Allow"
         Action = [
-          "secretsmanager:GetSecretValue",
-          "kms:Decrypt"
+          "secretsmanager:GetSecretValue"
         ]
-        Resource = "*"
+        Resource = [
+          aws_secretsmanager_secret.inventory_db.arn,
+          aws_secretsmanager_secret.billing_db.arn,
+          aws_secretsmanager_secret.mq_credentials.arn
+        ]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt"]
+        Resource = [aws_kms_key.rds.arn]
       }
     ]
   })
@@ -152,15 +161,27 @@ resource "aws_iam_policy" "ecs_task_cloudwatch_policy" {
     Version = "2012-10-17"
     Statement = [
       {
+        # cloudwatch:PutMetricData and X-Ray APIs do not support
+        # resource-level permissions; "*" is required by AWS here.
         Effect = "Allow"
         Action = [
           "cloudwatch:PutMetricData",
-          "logs:CreateLogStream",
-          "logs:PutLogEvents",
           "xray:PutTraceSegments",
           "xray:PutTelemetryRecords"
         ]
         Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = [
+          "${aws_cloudwatch_log_group.api_gateway_app.arn}:*",
+          "${aws_cloudwatch_log_group.inventory_app.arn}:*",
+          "${aws_cloudwatch_log_group.billing_app.arn}:*"
+        ]
       }
     ]
   })

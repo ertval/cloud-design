@@ -34,3 +34,6 @@ autoscaling_target_cpu   = 60
 log_retention_days       = 30
 alarm_email              = "cloud-ops@example.com"
 monthly_budget_limit     = 15
+
+# CORS: replace with the real frontend domain(s) serving the app
+allowed_origins = ["https://app.example.com"]

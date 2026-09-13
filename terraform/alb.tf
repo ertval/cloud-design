@@ -114,9 +114,12 @@ resource "aws_lb_listener" "http" {
   tags = local.common_tags
 }
 
-# 6. HTTP Listener Rule: Forward API Gateway VPC Link traffic to Target Group
+# 6. HTTPS Listener Rule: Forward API traffic to Target Group
+# NOTE: :80 listener is redirect-only (see above). All path-based forwarding
+# lives on :443 so plaintext HTTP can never bypass TLS. /health is served only
+# via target-group health checks, not via a public listener rule.
 resource "aws_lb_listener_rule" "api_traffic" {
-  listener_arn = aws_lb_listener.http.arn
+  listener_arn = aws_lb_listener.https.arn
   priority     = 10
 
   action {
@@ -126,7 +129,7 @@ resource "aws_lb_listener_rule" "api_traffic" {
 
   condition {
     path_pattern {
-      values = ["/api/*", "/health", "/health*"]
+      values = ["/api/*"]
     }
   }
 }

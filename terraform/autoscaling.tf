@@ -6,9 +6,11 @@
 resource "aws_appautoscaling_target" "api_gateway" {
   max_capacity       = 3
   min_capacity       = 1
-  resource_id        = "service/${aws_ecs_cluster.main.name}/${local.name_prefix}-api-gateway"
+  resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.api_gateway.name}"
   scalable_dimension = "ecs:service:DesiredCount"
   service_namespace  = "ecs"
+
+  depends_on = [aws_ecs_service.api_gateway]
 }
 
 # Target Tracking Policy for API Gateway: 60% CPU Trigger
@@ -34,9 +36,11 @@ resource "aws_appautoscaling_policy" "api_gateway_cpu" {
 resource "aws_appautoscaling_target" "inventory_app" {
   max_capacity       = 3
   min_capacity       = 1
-  resource_id        = "service/${aws_ecs_cluster.main.name}/${local.name_prefix}-inventory-app"
+  resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.inventory_app.name}"
   scalable_dimension = "ecs:service:DesiredCount"
   service_namespace  = "ecs"
+
+  depends_on = [aws_ecs_service.inventory_app]
 }
 
 # Target Tracking Policy for Inventory App: 60% CPU Trigger

@@ -91,7 +91,9 @@ resource "aws_db_instance" "inventory" {
   vpc_security_group_ids = [aws_security_group.db.id]
   publicly_accessible    = false
 
-  multi_az                    = var.environment == "prod" ? true : false
+  # Always Multi-AZ: audit requires standby failover in all envs (cost
+  # saving via single-AZ is not acceptable for this design).
+  multi_az                    = true
   auto_minor_version_upgrade  = true
   allow_major_version_upgrade = false
   backup_retention_period     = 7
@@ -129,7 +131,9 @@ resource "aws_db_instance" "billing" {
   vpc_security_group_ids = [aws_security_group.db.id]
   publicly_accessible    = false
 
-  multi_az                    = var.environment == "prod" ? true : false
+  # Always Multi-AZ: audit requires standby failover in all envs (cost
+  # saving via single-AZ is not acceptable for this design).
+  multi_az                    = true
   auto_minor_version_upgrade  = true
   allow_major_version_upgrade = false
   backup_retention_period     = 7

@@ -3,7 +3,10 @@ set -euo pipefail
 
 # ==============================================================================
 # cloud-design Automated Audit & Architecture Verification Script
-# Validates IaC configurations, manifests, security groups, Dockerfiles, and Python code
+# Static checks only - no live AWS calls (no terraform apply, no kubectl,
+# no curl against real endpoints). Validates file presence, IaC syntax via
+# grep plus `terraform fmt -check` / `terraform validate` when the binary
+# is installed (warn-skip otherwise), manifests, Dockerfiles, and Python code.
 # ==============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -108,6 +111,22 @@ for sh in "$SCRIPT_DIR"/*.sh; do
         fail "Shell script syntax error: $(basename "$sh")"
     fi
 done
+
+echo ">>> 7. Validating Terraform Formatting & Configuration"
+if command -v terraform >/dev/null 2>&1; then
+    if terraform -chdir="$ROOT_DIR/terraform" fmt -check -diff; then
+        pass "Terraform formatting clean (fmt -check)"
+    else
+        fail "Terraform formatting issues (run: terraform fmt)"
+    fi
+    if terraform -chdir="$ROOT_DIR/terraform" validate; then
+        pass "Terraform configuration valid (validate)"
+    else
+        fail "Terraform validate failed"
+    fi
+else
+    echo "  [WARN] terraform binary not found - skipping fmt -check and validate"
+fi
 
 echo "============================================================"
 echo " VERIFICATION SUMMARY                                       "

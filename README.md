@@ -10,7 +10,9 @@
 
 ## 1. Executive Summary & Architecture
 
-The **Cloud-Design** project provisions and orchestrates an enterprise-grade, highly available, secure, and cost-optimized microservices infrastructure on Amazon Web Services (AWS) using **Terraform (Infrastructure as Code)**, **Docker (multi-stage optimized containerization)**, and **Kubernetes / Amazon EKS / ECS (container orchestration)**.
+The **Cloud-Design** project provisions and orchestrates an enterprise-grade, highly available, secure, and cost-optimized microservices infrastructure on Amazon Web Services (AWS) using **Terraform (Infrastructure as Code)**, **Docker (optimized containerization: 3 multi-stage app images + 3 single-stage data images)**, and **Kubernetes / Amazon EKS / ECS (container orchestration)**.
+
+> **CURRENT scope (actually in IaC):** VPC, ALB (edge TLS), API Gateway + Cognito JWT, EKS/ECS, RDS PostgreSQL, Amazon MQ RabbitMQ, CloudWatch/alarms/budgets. **NOT deployed:** AWS WAF, CloudFront, Lambda event processing — see **Future enhancements / roadmap** below.
 
 ### Architecture Topology Diagram
 
@@ -49,7 +51,7 @@ flowchart TD
         subgraph Observability ["📊 Monitoring, Logging & Security"]
             CloudWatch["Amazon CloudWatch\n(Metrics, Logs, Alarms & Dashboards)"]
             KMS["AWS KMS\n(Customer Managed Key Encryption)"]
-            WAF["AWS WAF\n(Rate Limiting & Threat Prevention)"]
+            WAF["AWS WAF (ROADMAP - not deployed)\n(Rate Limiting & Threat Prevention)"]
         end
     end
 
@@ -78,9 +80,9 @@ flowchart TD
 | **API Gateway App** | Python / Express | Amazon EKS / ECS Deployment | Private App Subnets | Ingress from ALB only; Port 3000 |
 | **Inventory App** | Python / Express | Amazon EKS / ECS Deployment | Private App Subnets | Ingress from Gateway only; Port 8080 |
 | **Billing App** | Python / Node.js Worker | Amazon EKS / ECS StatefulSet | Private App Subnets | Ingress from Gateway/RabbitMQ; Port 8080 |
-| **Inventory Database** | PostgreSQL 15 | Amazon RDS PostgreSQL Multi-AZ | Private Data Subnets | Ingress from `inventory-app` only; Port 5432 |
-| **Billing Database** | PostgreSQL 15 | Amazon RDS PostgreSQL Multi-AZ | Private Data Subnets | Ingress from `billing-app` only; Port 5432 |
-| **Message Queue** | RabbitMQ 3.12 | Amazon MQ (Managed RabbitMQ) | Private Data Subnets | Ingress from `api-gateway` & `billing-app`; Port 5672 |
+| **Inventory Database** | PostgreSQL 16.3 | Amazon RDS PostgreSQL Multi-AZ | Private Data Subnets | Ingress from `inventory-app` only; Port 5432 |
+| **Billing Database** | PostgreSQL 16.3 | Amazon RDS PostgreSQL Multi-AZ | Private Data Subnets | Ingress from `billing-app` only; Port 5432 |
+| **Message Queue** | RabbitMQ 3.13 | Amazon MQ (Managed RabbitMQ) | Private Data Subnets | Ingress from `api-gateway` & `billing-app`; Port 5672 plaintext (VPC-internal only), 5671 AMQPS |
 | **Load Balancer** | AWS ALB | Elastic Load Balancing v2 | Public Subnets | ACM TLS 1.3 certificate, HTTP to HTTPS redirect |
 | **Managed Auth** | AWS Cognito | Cognito User Pool & App Client | Managed AWS Edge | JWT verification on API Gateway |
 | **Observability** | CloudWatch / Logs | CloudWatch Log Groups & Alarms | Managed AWS Edge | Aggregated logs from all pods & services |
@@ -108,7 +110,7 @@ flowchart TD
 - **Authentication**: AWS Cognito User Pool validates JWT bearer tokens before forwarding requests to the API gateway.
 - **Encryption**:
   - **At Rest**: AES-256 encryption via AWS KMS for RDS storage, EBS volumes, and CloudWatch log groups.
-  - **In Transit**: Enforced TLS 1.3 across external connections and internal service communications.
+  - **In Transit (edge-TLS-only)**: TLS 1.3 terminated at the ALB (ACM) and on API Gateway/Cognito; internal VPC traffic is plaintext HTTP (ALB→app `:3000`) and AMQP `:5672` restricted to private security groups. TODO: service mesh (mTLS) for internal encryption — no internal TLS/mTLS is claimed.
 
 ### D. Cost-Effectiveness
 - **Free Tier & Right-Sizing**: Default configurations leverage `t3.micro` / `t3.small` instances and `db.t3.micro` RDS instances.
@@ -118,7 +120,7 @@ flowchart TD
 
 ### E. Simplicity
 - **Clean Modular IaC**: Terraform modules separate VPC, IAM, security groups, compute, storage, and monitoring into readable, independently verifiable blocks.
-- **Standardized Container Builds**: Unified Docker multi-stage build patterns reducing image footprints by over 70%.
+- **Standardized Container Builds**: 3 multi-stage app images (`api-gateway`, `inventory-app`, `billing-app`) plus 3 single-stage data images (2× PostgreSQL, 1× RabbitMQ from upstream images), reducing app image footprints by over 70%.
 
 ---
 
@@ -163,6 +165,17 @@ terraform apply tfplan
 kubectl apply -f ../manifests/
 ```
 
+> **Secrets note:** `manifests/secrets.yaml` ships with `REPLACE_ME` placeholders only (no real credentials in git). For real clusters, inject via External Secrets Operator (ESO) from AWS Secrets Manager or SealedSecrets; never commit real values.
+
+---
+
+## 6b. Future enhancements / roadmap (NOT in current IaC)
+
+- **AWS WAF**: rate limiting + OWASP managed rules in front of ALB/API Gateway (no `aws_wafv2_*` resources yet).
+- **Amazon CloudFront**: global edge caching for `GET /api/movies` + Shield Standard DDoS absorption (no `aws_cloudfront_distribution` yet).
+- **AWS Lambda event processing**: replace/augment the billing worker with Lambda + EventBridge/SQS and Aurora Serverless v2 (no `aws_lambda_function` yet).
+- **Service mesh mTLS**: App Mesh/Istio with X-Ray tracing for internal encryption (currently edge-TLS-only).
+
 ### Resource Teardown
 ```bash
 ./scripts/destroy.sh
@@ -203,7 +216,7 @@ kubectl apply -f ../manifests/
 > - **Private Integration**: API Gateway forwards authorized requests through a private **VPC Link** to an internal-facing **Application Load Balancer (ALB)** spanning multiple Availability Zones.
 > - **Compute Tier**: The ALB distributes traffic to the containerized **`api-gateway`** microservice running in private application subnets across Amazon EKS worker nodes (or ECS Fargate).
 > - **Synchronous Flow**: Query requests (`GET /api/movies`) route synchronously from `api-gateway` to the **`inventory-app`** microservice (port 8080), which queries the isolated **RDS PostgreSQL** `inventory_db` (port 5432).
-> - **Asynchronous Flow**: Transactional write requests (`POST /api/billing`) are published by `api-gateway` as messages to **Amazon MQ (RabbitMQ)** (AMQP port 5672). The **`billing-app`** worker consumes messages from the queue and records orders in the isolated **RDS PostgreSQL** `billing_db` (port 5432).
+> - **Asynchronous Flow**: Transactional write requests (`POST /api/billing`) are published by `api-gateway` as messages to **Amazon MQ (RabbitMQ)** (AMQP port 5672 plaintext inside the VPC; 5671 AMQPS available). The **`billing-app`** worker consumes messages from the queue and records orders in the isolated **RDS PostgreSQL** `billing_db` (port 5432).
 > - **Observability**: Container logs and metrics stream continuously into **Amazon CloudWatch** via Fluent Bit and CloudWatch Container Insights.
 
 ### Q6: How did you manage and optimize the cost of your AWS solution?
@@ -219,7 +232,7 @@ kubectl apply -f ../manifests/
 > - **VPC Subnet Isolation**: Three-tier architecture. Databases and queues are placed in private data subnets without internet routes.
 > - **Security Group Least Privilege**: Databases only accept connections on port 5432 from application pod security groups; no generic `0.0.0.0/0` ingress rules exist.
 > - **Managed Authentication**: AWS Cognito verifies user identity and issues signed JWT tokens checked at the perimeter.
-> - **Encryption**: EBS and RDS volumes encrypted with AWS KMS keys; TLS 1.3 enforced on the ALB with ACM certificates.
+> - **Encryption**: EBS and RDS volumes encrypted with AWS KMS keys; TLS 1.3 at the edge only (ALB ACM certificate + API Gateway). Internal service traffic is plaintext within private subnets (see design principles); mTLS/service mesh is future work.
 
 ### Q8: What AWS monitoring and logging tools did you utilize, and how did they assist in identifying and troubleshooting application issues?
 > **Answer**:
@@ -236,8 +249,8 @@ kubectl apply -f ../manifests/
 > - **Spike Decoupling**: Amazon MQ (RabbitMQ) absorbs sudden ingestion bursts for billing orders, decoupling request intake from processing capacity and preventing cascade failures.
 
 ### Q10: How did you optimize Docker images for each microservice, and how did it influence build times and image sizes?
-> **Answer**:
-> - **Multi-Stage Builds**: Compiles dependencies in a build stage and copies only required artifacts into the minimal runtime stage.
+> **Answer** (app services use multi-stage; data services use upstream single-stage images):
+> - **Multi-Stage Builds (3 app images)**: `api-gateway`, `inventory-app`, `billing-app` compile dependencies in a build stage and copy only required artifacts into the minimal runtime stage. `inventory-database`, `billing-database` (PostgreSQL) and `rabbitmq` are single-stage builds `FROM` upstream images.
 > - **Penultimate Stable Base**: Uses `alpine:3.23` or `debian:12-slim`, dropping image sizes from ~1GB down to ~80MB.
 > - **Layer Caching**: Copies `requirements.txt` / `package.json` before source code so dependency installation layers are cached across code changes.
 > - **Non-Root Execution**: Creates an unprivileged `appuser` (`UID 10001`) to eliminate container breakout risks.
@@ -283,7 +296,7 @@ kubectl apply -f ../manifests/
 
 - [x] Comprehensive `README.md` with architecture diagrams and design rationale.
 - [x] Complete Infrastructure as Code in `terraform/` (VPC, Security Groups, IAM, RDS, Amazon MQ, ALB, Cognito, API Gateway, CloudWatch, Auto Scaling).
-- [x] Optimized multi-stage `Dockerfiles/` for all microservices and databases.
+- [x] Optimized `Dockerfiles/`: 3 multi-stage app images + 3 single-stage data images (see Q10).
 - [x] Kubernetes `manifests/` and ECS `ecs-tasks/` task definitions.
 - [x] Automation scripts in `scripts/` (`deploy.sh`, `destroy.sh`, `test_cloud.sh`).
 - [x] Verified with 48/48 checks passing in `./scripts/test_cloud.sh`.

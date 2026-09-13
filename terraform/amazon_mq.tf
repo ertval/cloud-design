@@ -30,10 +30,12 @@ resource "aws_mq_broker" "rabbitmq" {
   engine_type        = "RabbitMQ"
   engine_version     = var.mq_engine_version
   host_instance_type = var.mq_host_instance_type
-  deployment_mode    = "SINGLE_INSTANCE"
+  # Multi-AZ standby (not SINGLE_INSTANCE SPOF); spans both private DB subnets.
+  # NOTE: RabbitMQ CLUSTER_MULTI_AZ needs 3 AZs; with 2 AZs use ACTIVE_STANDBY_MULTI_AZ.
+  deployment_mode = "ACTIVE_STANDBY_MULTI_AZ"
 
-  # Deploy exclusively in private database subnet
-  subnet_ids          = [aws_subnet.private_db[0].id]
+  # Deploy across private database subnets in both AZs
+  subnet_ids          = aws_subnet.private_db[*].id
   security_groups     = [aws_security_group.mq.id]
   publicly_accessible = false
 

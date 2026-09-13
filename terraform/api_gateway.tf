@@ -11,7 +11,9 @@ resource "aws_apigatewayv2_api" "main" {
   cors_configuration {
     allow_headers = ["authorization", "content-type", "x-amz-date", "x-api-key"]
     allow_methods = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-    allow_origins = ["*"]
+    # Restricted via var.allowed_origins (default app domain placeholder);
+    # do not revert to ["*"] in production (credentialed JWT + browsers).
+    allow_origins = var.allowed_origins
     max_age       = 3600
   }
 
@@ -64,11 +66,12 @@ resource "aws_apigatewayv2_vpc_link" "alb" {
   tags = local.common_tags
 }
 
-# 4. HTTP Proxy Integration Forwarding to ALB
+# 4. HTTP Proxy Integration Forwarding to ALB (via HTTPS listener only;
+# never the :80 redirect listener, so VPC_LINK traffic stays TLS-terminated)
 resource "aws_apigatewayv2_integration" "alb" {
   api_id             = aws_apigatewayv2_api.main.id
   integration_type   = "HTTP_PROXY"
-  integration_uri    = aws_lb_listener.http.arn
+  integration_uri    = aws_lb_listener.https.arn
   integration_method = "ANY"
   connection_type    = "VPC_LINK"
   connection_id      = aws_apigatewayv2_vpc_link.alb.id

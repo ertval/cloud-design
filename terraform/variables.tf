@@ -162,3 +162,9 @@ variable "monthly_budget_limit" {
   type        = number
   default     = 15
 }
+
+variable "allowed_origins" {
+  description = "CORS allowed origins for API Gateway (replace placeholder with real app domain)"
+  type        = list(string)
+  default     = ["https://app.example.com"]
+}

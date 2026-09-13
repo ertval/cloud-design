@@ -23,7 +23,9 @@ resource "aws_eks_cluster" "main" {
     subnet_ids              = aws_subnet.private_app[*].id
     security_group_ids      = [aws_security_group.eks_cluster.id]
     endpoint_private_access = true
-    endpoint_public_access  = true
+    # Private-only API: admins reach the cluster via bastion/VPN in the VPC.
+    # To allow restricted public admin, set true + public_access_cidrs = [<admin range>].
+    endpoint_public_access = false
   }
 
   encryption_config {

@@ -15,21 +15,24 @@ resource "aws_security_group" "alb" {
 }
 
 resource "aws_security_group_rule" "alb_ingress_http" {
-  description       = "HTTP ingress (redirected to HTTPS)"
-  type              = "ingress"
-  from_port         = 80
-  to_port           = 80
-  protocol          = "tcp"
+  description = "HTTP ingress (redirected to HTTPS)"
+  type        = "ingress"
+  from_port   = 80
+  to_port     = 80
+  protocol    = "tcp"
+  # JUSTIFICATION: public ALB must accept Internet clients; :80 serves
+  # redirect-to-:443 only (see alb.tf), no plaintext forwarding.
   cidr_blocks       = ["0.0.0.0/0"]
   security_group_id = aws_security_group.alb.id
 }
 
 resource "aws_security_group_rule" "alb_ingress_https" {
-  description       = "HTTPS ingress for secure client traffic"
-  type              = "ingress"
-  from_port         = 443
-  to_port           = 443
-  protocol          = "tcp"
+  description = "HTTPS ingress for secure client traffic"
+  type        = "ingress"
+  from_port   = 443
+  to_port     = 443
+  protocol    = "tcp"
+  # JUSTIFICATION: public edge-TLS entrypoint; TLS 1.3 terminated at ALB.
   cidr_blocks       = ["0.0.0.0/0"]
   security_group_id = aws_security_group.alb.id
 }
@@ -112,7 +115,8 @@ resource "aws_security_group_rule" "app_egress_to_db" {
   security_group_id        = aws_security_group.app.id
 }
 
-# Outbound to Amazon MQ Tier (RabbitMQ AMQP 5672)
+# Outbound to Amazon MQ Tier (RabbitMQ AMQP 5672, plaintext inside VPC only;
+# TLS callers use 5671; see mq_ingress_amqp comment below)
 resource "aws_security_group_rule" "app_egress_to_mq" {
   description              = "Allow outbound connection to Amazon MQ RabbitMQ broker tier"
   type                     = "egress"
@@ -125,11 +129,14 @@ resource "aws_security_group_rule" "app_egress_to_mq" {
 
 # Outbound HTTPS for AWS APIs (ECR, CloudWatch, Secrets Manager, etc.) via NAT Gateway
 resource "aws_security_group_rule" "app_egress_https" {
-  description       = "Allow outbound HTTPS for container registries and AWS service endpoints"
-  type              = "egress"
-  from_port         = 443
-  to_port           = 443
-  protocol          = "tcp"
+  description = "Allow outbound HTTPS for container registries and AWS service endpoints"
+  type        = "egress"
+  from_port   = 443
+  to_port     = 443
+  protocol    = "tcp"
+  # JUSTIFICATION: tasks must reach public AWS service endpoints (ECR,
+  # CloudWatch, Secrets Manager, Cognito) via NAT; no VPC endpoints deployed.
+  # Restricted to 443/tcp; DNS separately scoped to VPC CIDR below.
   cidr_blocks       = ["0.0.0.0/0"]
   security_group_id = aws_security_group.app.id
 }
@@ -167,12 +174,15 @@ resource "aws_security_group" "eks_cluster" {
 }
 
 resource "aws_security_group_rule" "eks_cluster_egress_all" {
-  description       = "Allow control plane to communicate with worker nodes"
-  type              = "egress"
-  from_port         = 0
-  to_port           = 0
-  protocol          = "-1"
-  cidr_blocks       = ["0.0.0.0/0"]
+  description = "Allow control plane to communicate with worker nodes"
+  type        = "egress"
+  from_port   = 0
+  to_port     = 0
+  protocol    = "-1"
+  # Tightened to VPC CIDR (was 0.0.0.0/0): control plane only needs kubelet/
+  # webhook access to private nodes; all-protocols kept per AWS requirement
+  # for ephemeral high ports.
+  cidr_blocks       = [var.vpc_cidr]
   security_group_id = aws_security_group.eks_cluster.id
 }
 
@@ -224,11 +234,13 @@ resource "aws_security_group" "mq" {
 }
 
 resource "aws_security_group_rule" "mq_ingress_amqp" {
-  description              = "Allow AMQP broker communication exclusively from private app tier"
-  type                     = "ingress"
-  from_port                = 5672
-  to_port                  = 5672
-  protocol                 = "tcp"
+  description = "Allow AMQP broker communication exclusively from private app tier"
+  type        = "ingress"
+  from_port   = 5672
+  to_port     = 5672
+  protocol    = "tcp"
+  # NOTE: 5672 is PLAINTEXT AMQP, restricted to app SG inside the VPC only.
+  # TLS callers must use 5671 (AMQPS) below. No mTLS/service mesh yet (see README).
   source_security_group_id = aws_security_group.app.id
   security_group_id        = aws_security_group.mq.id
 }
