@@ -85,7 +85,12 @@ export PATH="${HOME}/.local/bin:${PATH}"
 # Unique per-run marker so no assertion can be satisfied by stale state.
 RUN_MARKER="audit-$$-$(date +%s)"
 # A user_id for a live billing round-trip, unique per run.
-AUDIT_USER_ID="9$(printf '%s' "${RUN_MARKER}" | cksum | cut -c1-6)"
+# Extract the CRC FIELD, not characters 1-6 of the line: `cksum` prints
+# "<crc> <byte-count>", so cutting six characters would pull in the separating
+# space and part of the byte count whenever the CRC is shorter than six digits --
+# rare, but it produced a user_id like "1234 2", which strict INT32 validation
+# rejects with a 400. awk takes field 1, so the result is always pure digits.
+AUDIT_USER_ID="9$(printf '%s' "${RUN_MARKER}" | cksum | awk '{print $1}' | cut -c1-6)"
 LB_MARK="lb-${RUN_MARKER}"
 LOAD_OUT="/tmp/cloud-design-load-${RUN_MARKER}.txt"
 

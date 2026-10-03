@@ -21,6 +21,10 @@ chown -R postgres:postgres /run/postgresql
 # `-c listen_addresses=''` keeps this half-initialised server off the network.
 SOCKET_DIRS=/run/postgresql,/tmp
 reconcile() {
+  # Re-enable errexit for this function: bash suppresses it for the whole
+  # body when the call site is a condition context, which would make a
+  # failed psql/pg_ctl invisible and return the trailing echo's status.
+  set -e
   echo "[init-db] Starting temporary instance to reconcile role, database and schema..."
   su-exec postgres pg_ctl -D "$PGDATA" \
     -o "-c listen_addresses='' -c unix_socket_directories=${SOCKET_DIRS}" -w start
@@ -88,11 +92,15 @@ if [ ! -s "$PGDATA/PG_VERSION" ]; then
   echo "[init-db] Database initialization completed successfully."
 else
   echo "[init-db] Existing PostgreSQL database cluster detected in $PGDATA."
-  if ! reconcile; then
-    # Non-fatal: a failure here must not stop the server from starting and
-    # serving whatever state the cluster is already in.
-    echo "[init-db] WARNING: credential reconciliation failed; continuing with existing cluster state." >&2
-  fi
+  # Call reconcile UNGUARDED, and let its own `set -e` do the work. This is not
+  # stylistic: bash ignores errexit for the entire body of a function whose
+  # *call* sits in a condition context, so the earlier `if ! reconcile; then`
+  # form made reconcile's status that of its trailing `echo` -- 0, no matter how
+  # many psql/pg_ctl calls had failed. A failed credential or schema reconcile
+  # therefore passed silently, which is precisely how a stale schema survives a
+  # rotation with nothing in the logs.
+  reconcile
+  echo "[init-db] Credentials and schema reconciled against the existing cluster."
 fi
 
 echo "[init-db] Starting PostgreSQL server..."

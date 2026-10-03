@@ -79,7 +79,7 @@ def create_app(stop_event=None):
 
     # Retry loop to connect and initialize database schema.
     # The budget must comfortably exceed a COLD database start: on a fresh
-    # cluster PostgreSQL needed ~145s to accept connections (initdb + role,
+    # cluster PostgreSQL can need a minute or more to accept connections (initdb + role,
     # database and table creation), while a 30 x 2s = 60s budget made the app
     # exit and be restarted twice before the database was up.
     #

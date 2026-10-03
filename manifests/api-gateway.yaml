@@ -60,9 +60,17 @@ metadata:
 spec:
   # replicas: 2 (was 1). At replicas: 1 the PDB below (`maxUnavailable: 1`)
   # permitted evicting the only pod -- a vacuous control that still got counted
-  # as protection. At replicas: 2, `maxUnavailable: 1` always retains one pod,
-  # so the budget is real. A second stateless gateway replica is cheap and fits
-  # the HPA bounds below (min 1 / max 3); no data-consistency risk.
+  # as protection. Raising the count is what makes the budget mean anything.
+  #
+  # The guarantee is CONDITIONAL, and the condition is the HPA's `minReplicas`
+  # below: it is 1, so a low-CPU window scales this back to a single replica and
+  # the budget becomes vacuous again. Deliberate. ECS Fargate is the deployment
+  # target for this project and terraform/autoscaling.tf keeps min_capacity = 1;
+  # raising the Kubernetes floor to 2 to satisfy a comment would put the two
+  # orchestrators in disagreement about the same property, which is a worse
+  # defect than a budget that lapses under low load. `minUnavailable: 0` was not
+  # used instead: at replicas: 2 it forbids every voluntary eviction and
+  # deadlocks `kubectl drain` on the first maintenance window.
   replicas: 2
   strategy:
     type: RollingUpdate
@@ -216,9 +224,12 @@ spec:
 # PodDisruptionBudget
 # -----------------------------------------------------------------------------
 # `maxUnavailable: 1` against `replicas: 2` (see above): at most one pod is
-# ever voluntarily disrupted at a time, so one gateway always stays in service
-# during a node drain, cluster upgrade, or node-autoscaler scale-down. This is
-# meaningful ONLY because replicas > maxUnavailable (1 < 2). At the previous
+# ever voluntarily disrupted at a time, so one gateway stays in service during a
+# node drain, cluster upgrade, or node-autoscaler scale-down. This is meaningful
+# ONLY while replicas > maxUnavailable. At the declared replicas: 2 that holds
+# (1 < 2); if the HPA below scales back to its minReplicas: 1 it does not, and
+# the budget permits evicting the only pod. Read this object together with the
+# HPA, not on its own. At the previous
 # size of replicas: 1 this same object permitted evicting the only pod -- a
 # vacuous control, which is why the replica count was raised instead of
 # weakening the budget to `maxUnavailable: 0` / `minAvailable: 1` (which at

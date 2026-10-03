@@ -73,9 +73,13 @@ metadata:
     app.kubernetes.io/part-of: cloud-design
     app.kubernetes.io/component: crud
 spec:
-  # replicas: 2 (was 1) -- same fix as api-gateway.yaml: at replicas: 1 the
-  # `maxUnavailable: 1` PDB below permitted evicting the only pod. Stateless,
-  # fits the HPA bounds (min 1 / max 3).
+  # replicas: 2 (was 1) -- same fix as api-gateway.yaml, including the same
+  # conditional guarantee: at replicas: 1 the `maxUnavailable: 1` PDB below
+  # permitted evicting the only pod. Stateless, fits the HPA bounds (min 1 /
+  # max 3). The HPA's minReplicas is 1, so a low-CPU window scales back to 1 and
+  # the budget lapses again; that is accepted on purpose, for the reason given
+  # in api-gateway.yaml -- terraform/autoscaling.tf keeps min_capacity = 1 for
+  # ECS, and the two orchestrators must agree about the same property.
   replicas: 2
   strategy:
     type: RollingUpdate
@@ -190,8 +194,11 @@ spec:
 # `maxUnavailable: 1` against `replicas: 2`: at most one pod is voluntarily
 # disrupted at a time, so one replica always stays in service. Meaningful only
 # because replicas (2) > maxUnavailable (1); at the previous replicas: 1 this
-# object was vacuous. Full rationale in api-gateway.yaml. Rolling updates are
-# separately covered by `maxUnavailable: 0` on the Deployment above.
+# object was vacuous. The guarantee holds ONLY while replicas > 1: the HPA below
+# has minReplicas: 1, so a low-CPU window scales back to a single replica and
+# this budget permits evicting it. Full rationale, including why the floor was
+# not raised instead, in api-gateway.yaml. Rolling updates are separately
+# covered by `maxUnavailable: 0` on the Deployment above.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

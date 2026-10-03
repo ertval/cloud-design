@@ -13,13 +13,21 @@ import math
 import re
 from decimal import Decimal, InvalidOperation
 
-# `orders.user_id` is VARCHAR(255) (srcs/billing-database/init.sql, matching
-# String(255) in app/orders.py). A longer id cannot be stored: PostgreSQL raises
-# StringDataRightTruncation on every attempt.
+# `orders.user_id` is INTEGER (srcs/billing-database/init.sql, matching
+# `Column(Integer)` in app/orders.py). It is not a string column: as one, the
+# audit's own literal `WHERE user_id = 20` compares int against varchar, which
+# is not a valid SQL operator and returns an empty set that reads exactly like
+# "no orders exist".
 #
-# It has to be rejected HERE, as a payload error, rather than left to the
-# database. A permanently unpersistable message must NOT be requeued: with
-# prefetch_count=1 an over-long user_id is redelivered, fails five times, is
+# MAX_USER_ID_LENGTH therefore no longer guards the column. It guards the
+# payload, before parsing: an unbounded user_id is a memory and CPU cost
+# imposed on every request, so a 10 MB string is rejected on its raw length
+# rather than after a regex has walked it. The bound is applied to the raw
+# field for that reason, and INT32 range is enforced separately by parse_user_id.
+#
+# Rejecting an unusable user_id HERE, as a payload error, is also what keeps it
+# out of the requeue path. A permanently unpersistable message must NOT be
+# requeued: with prefetch_count=1 it is redelivered, fails five times, is
 # nacked and redelivered again - forever - which blocks the head of the queue
 # and every legitimate order behind it. Rejecting it as an InvalidOrderError
 # routes it into the existing poison-payload path (acknowledge and discard),

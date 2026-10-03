@@ -319,7 +319,7 @@ resource "aws_ecs_service" "inventory_app" {
   # retries 3) fails at roughly 130 s, but inventory-app does not bind :8080 until
   # create_app() finishes its retry loop - DB_CONNECT_MAX_RETRIES(180) x
   # DB_CONNECT_RETRY_DELAY(2) = 360 s of budget, needed because RDS is created in
-  # the same apply and a cold PostgreSQL was measured at ~145 s before it accepted
+  # the same apply and a cold PostgreSQL can need a minute or more before it accepts
   # connections. Without a grace period covering that wait, ECS killed the task
   # during the DB connect on exactly the run where the DB was slowest.
   # The removed comment claimed AWS only allows this argument on load-balancer-

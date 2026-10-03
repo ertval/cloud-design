@@ -176,7 +176,7 @@ services:
       INVENTORY_DB_NAME: ${INVENTORY_DB_NAME:-inventory_db}
       INVENTORY_DB_USER: ${INVENTORY_DB_USER:?set INVENTORY_DB_USER in .env - see .env.example}
       INVENTORY_DB_PASSWORD: ${INVENTORY_DB_PASSWORD:?set INVENTORY_DB_PASSWORD in .env - see .env.example}
-      # Cold-start budget: 180 x 2s = 360s, comfortably above the ~145s a fresh
+      # Cold-start budget: 180 x 2s = 360s, comfortably above what a fresh
       # PostgreSQL cluster needed before it accepted connections. Too small a
       # budget turns a slow database into a restart loop.
       DB_CONNECT_MAX_RETRIES: ${DB_CONNECT_MAX_RETRIES:-180}

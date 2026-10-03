@@ -52,7 +52,14 @@ def _env_or_default(name: str, default: str) -> str:
     return value.strip()
 
 
-def create_app():
+def create_app(stop_event=None):
+    """Build the Flask app.
+
+    Returns the app, or None when `stop_event` was set while waiting for the
+    database: a shutdown request during a cold start must abandon the wait and
+    let server.py exit 0 instead of sitting out Docker's whole grace period and
+    being SIGKILLed (exit 137).
+    """
     app = Flask(__name__)
 
     # Secrets MUST come from env; host/port/db-name keep safe non-secret defaults.
@@ -141,7 +148,7 @@ def create_app():
 
     # Wait for database readiness and initialize schema.
     # The budget must comfortably exceed a COLD database start: on a fresh
-    # cluster PostgreSQL needed ~145s to accept connections (initdb + role,
+    # cluster PostgreSQL can need a minute or more to accept connections (initdb + role,
     # database and table creation), while a 30 x 2s = 60s budget made the app
     # exit and be restarted twice before the database was up.
     try:
@@ -166,6 +173,13 @@ def create_app():
                 if attempt == max_retries:
                     logger.error("Could not connect to inventory database after max retries.")
                     raise
+                # `stop_event` is the SIGTERM event installed by server.py BEFORE
+                # this call. Honouring it between attempts is what stops a
+                # `docker stop` during a cold start from having to wait out the
+                # whole budget - 179 x 2s = 358s - and then be SIGKILLed.
+                if stop_event is not None and stop_event.is_set():
+                    logger.info("Shutdown requested while waiting for the inventory database; abandoning startup.")
+                    return None
                 time.sleep(retry_delay)
 
     return app

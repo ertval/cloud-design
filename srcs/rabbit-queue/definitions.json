@@ -9,7 +9,15 @@
     "(compose `.env`, or a k8s secretKeyRef) and are applied by entrypoint.sh,",
     "which verifies them with `rabbitmqctl authenticate_user` before writing the",
     "/tmp/rabbit-queue-ready sentinel.",
-    "REPLACE_ME_* values below are placeholders, not secrets."
+    "REPLACE_ME_* values below are placeholders, not secrets.",
+    "",
+    "The rabbit_version field is the ONE thing here that is not version-agnostic,",
+    "and it is wrong for this image: alpine:3.23 currently packages RabbitMQ",
+    "4.2.x, not the 3.13.x named below. It is left as-is deliberately, because",
+    "this file is never imported (see above), so the field is inert here -- but",
+    "if it is ever imported into a 4.2 broker the mismatch would be rejected.",
+    "Update it to match whatever `apk info rabbitmq-server` reports on the build",
+    "image before relying on an import."
   ],
   "rabbit_version": "3.13",
   "vhosts": [
