@@ -1,302 +1,1419 @@
-# Cloud-Design: AWS Cloud Microservices Architecture & IaC
+# Cloud-Design — microservices on AWS
 
-[![AWS](https://img.shields.io/badge/AWS-Cloud_Infrastructure-orange.svg)](https://aws.amazon.com/)
-[![Terraform](https://img.shields.io/badge/IaC-Terraform_1.5+-purple.svg)](https://www.terraform.io/)
-[![Kubernetes](https://img.shields.io/badge/Orchestration-EKS%20%2F%20K8s-blue.svg)](https://kubernetes.io/)
-[![Docker](https://img.shields.io/badge/Containers-Docker_Multi--stage-2496ED.svg)](https://www.docker.com/)
-[![Security](https://img.shields.io/badge/Security-AWS_Cognito%20%2B%20Least_Privilege-green.svg)](https://aws.amazon.com/cognito/)
+A six-container microservices application (movie catalogue + asynchronous billing)
+deployed on AWS with Terraform as the single source of infrastructure truth, and
+runnable end-to-end on a laptop with `docker compose`. Three Python/Flask
+applications sit on **Amazon ECS on Fargate** behind one internet-facing
+**Application Load Balancer** that terminates TLS with an ACM certificate.
+**Amazon API Gateway** with a **Cognito JWT authorizer** is the internet-facing
+entrypoint; **Amazon RDS PostgreSQL Multi-AZ** and **Amazon MQ for RabbitMQ**
+(`ACTIVE_STANDBY_MULTI_AZ`, AMQPS only) form a data tier with no route to the
+internet. East–west traffic is resolved privately by **AWS Cloud Map**. Everything
+is described in Terraform: 18 `.tf` files, 129 `resource` blocks, 28 variables,
+38 outputs.
+
+Everything asserted below is either reproducible from a command in this README or
+explicitly listed as unverified in [Known limitations](#known-limitations--verified-vs-not).
 
 ---
 
-## 1. Executive Summary & Architecture
+## Table of contents
 
-The **Cloud-Design** project provisions and orchestrates an enterprise-grade, highly available, secure, and cost-optimized microservices infrastructure on Amazon Web Services (AWS) using **Terraform (Infrastructure as Code)**, **Docker (optimized containerization: 3 multi-stage app images + 3 single-stage data images)**, and **Kubernetes / Amazon EKS / ECS (container orchestration)**.
+- [Architecture](#architecture)
+- [Component mapping](#component-mapping)
+- [Well-Architected pillars](#well-architected-pillars)
+- [Monitoring and logging](#monitoring-and-logging)
+- [Auto-scaling](#auto-scaling)
+- [Security](#security)
+- [Prerequisites](#prerequisites)
+- [Setup](#setup)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [Deployment verification](#deployment-verification)
+- [Cost management](#cost-management)
+- [Challenges faced and what I would change](#challenges-faced-and-what-i-would-change)
+- [Bonus](#bonus)
+- [Submission checklist and teardown](#submission-checklist-and-teardown)
+- [Known limitations / verified vs. not](#known-limitations--verified-vs-not)
+- [Documentation and audit tooling](#documentation-and-audit-tooling)
 
-> **CURRENT scope (actually in IaC):** VPC, ALB (edge TLS), API Gateway + Cognito JWT, EKS/ECS, RDS PostgreSQL, Amazon MQ RabbitMQ, CloudWatch/alarms/budgets. **NOT deployed:** AWS WAF, CloudFront, Lambda event processing — see **Future enhancements / roadmap** below.
+---
 
-### Architecture Topology Diagram
+## Architecture
+
+### System context
+
+Who talks to what, and which trust boundaries the traffic crosses. Cognito, ACM,
+Route 53, ECR, Inspector2 and CloudWatch are AWS-managed and therefore live
+*outside* the VPC; only the ALB is internet-facing inside it.
 
 ```mermaid
-flowchart TD
-    subgraph Internet ["🌐 Public Internet"]
-        Client["User / Client Application"]
-        CognitoAuth["AWS Cognito User Pool\n(Managed Auth & JWT Tokens)"]
-    end
+flowchart TB
+    Client["Client (browser / curl)"]
+    Auditor["Auditor: reads this repo,<br/>runs docker / kubectl / aws"]
 
-    subgraph AWS_Cloud ["☁️ AWS Cloud Platform (Region: us-east-1)"]
-        subgraph VPC ["🛡️ Virtual Private Cloud (10.0.0.0/16)"]
-            
-            subgraph Public_Subnets ["Public Subnets (AZ-a & AZ-b)"]
-                IGW["Internet Gateway"]
-                NAT["NAT Gateways (Egress Only)"]
-                ALB["Application Load Balancer (ALB)\n(HTTPS Port 443 / ACM SSL)"]
-                APIGW["Amazon API Gateway\n(Cognito JWT Authorizer)"]
-            end
-
-            subgraph Private_App_Subnets ["Private Application Subnets (AZ-a & AZ-b)"]
-                subgraph EKS_Cluster ["Amazon EKS / ECS Cluster"]
-                    APIGatewayApp["api-gateway Pods\n(HPA 1-3 @ 60% CPU)\nPort 3000"]
-                    InventoryApp["inventory-app Pods\n(HPA 1-3 @ 60% CPU)\nPort 8080"]
-                    BillingApp["billing-app Pods\n(StatefulSet)\nPort 8080"]
-                end
-            end
-
-            subgraph Private_Data_Subnets ["Private Isolated Data Subnets (AZ-a & AZ-b)"]
-                InventoryDB[("inventory-database\nPostgreSQL RDS / StatefulSet\nPort 5432")]
-                BillingDB[("billing-database\nPostgreSQL RDS / StatefulSet\nPort 5432")]
-                RabbitMQ["Amazon MQ / RabbitMQ Cluster\nPort 5672 (AMQP)"]
-            end
+    subgraph AWS["AWS Cloud - us-east-1"]
+        subgraph Edge["Managed edge (outside the VPC)"]
+            APIGW["Amazon API Gateway HTTP API<br/>Cognito JWT authorizer<br/>throttle 2500 rps / 5000 burst"]
+            Cognito["Amazon Cognito User Pool<br/>signs + verifies the JWT"]
+            ACM["AWS Certificate Manager<br/>+ Route 53 DNS validation"]
         end
 
-        subgraph Observability ["📊 Monitoring, Logging & Security"]
-            CloudWatch["Amazon CloudWatch\n(Metrics, Logs, Alarms & Dashboards)"]
-            KMS["AWS KMS\n(Customer Managed Key Encryption)"]
-            WAF["AWS WAF (ROADMAP - not deployed)\n(Rate Limiting & Threat Prevention)"]
+        subgraph VPC["VPC 10.0.0.0/16 - 2 AZs"]
+            ALB["Application Load Balancer (internet-facing)<br/>:443 TLS 1.3, :80 -> 301"]
+            AppTier["ECS on Fargate - private app subnets<br/>api-gateway :3000 / inventory-app :8080 / billing-app :8080"]
+            DataTier["Private data subnets - no route to the internet<br/>RDS PostgreSQL x2 :5432<br/>Amazon MQ RabbitMQ AMQPS :5671"]
+            CloudMap["AWS Cloud Map<br/>private DNS for east-west"]
+        end
+
+        subgraph Ops["Observability and security (managed)"]
+            CW["CloudWatch: 4 log groups,<br/>11 alarms, 6-widget dashboard"]
+            SNS["SNS topic + topic policy<br/>AWS Budget + alarms"]
+            ECR["Amazon ECR<br/>3 repos, scan-on-push,<br/>keep last 5"]
+            Insp["Amazon Inspector v2<br/>CRITICAL/HIGH filter"]
         end
     end
 
-    Client -->|1. Authenticate| CognitoAuth
-    CognitoAuth -.->|JWT Token| Client
-    Client -->|2. HTTPS Requests + JWT| APIGW
-    APIGW -->|3. Route to Target| ALB
-    ALB -->|4. Forward| APIGatewayApp
-    APIGatewayApp -->|5. HTTP /api/movies| InventoryApp
-    APIGatewayApp -->|6. AMQP Publish /api/billing| RabbitMQ
-    InventoryApp -->|7. SQL Queries| InventoryDB
-    RabbitMQ -->|8. AMQP Consume| BillingApp
-    BillingApp -->|9. SQL Orders Insert| BillingDB
-
-    EKS_Cluster -.-> CloudWatch
-    InventoryDB -.-> KMS
-    BillingDB -.-> KMS
+    Client -->|"1. HTTPS POST /oauth2/token"| Cognito
+    Cognito -->|"2. signed JWT"| Client
+    Client -->|"3. HTTPS + Authorization: Bearer <JWT>"| APIGW
+    APIGW -->|"4. verify signature/issuer/audience"| Cognito
+    APIGW -->|"5. VPC Link to the :443 listener"| ALB
+    ALB -->|"6. HTTP :3000"| AppTier
+    AppTier -->|"7. resolve inventory-app.<ns>.local"| CloudMap
+    AppTier -->|"8. SQL :5432 / AMQPS :5671"| DataTier
+    AppTier -.->|"stdout/stderr awslogs"| CW
+    DataTier -.->|"metrics"| CW
+    CW --> SNS
+    AppTier -.-> ECR
+    ECR -.-> Insp
+    ACM -.-> ALB
+    Auditor -.-> Repo[("this repository")]
 ```
 
+### AWS deployment: subnets, AZs and routing
+
+```mermaid
+flowchart TB
+    subgraph Internet["Internet"]
+        User["Client"]
+    end
+
+    User -->|"443"| IGW["Internet Gateway"]
+
+    subgraph VPC["VPC 10.0.0.0/16"]
+        subgraph AZA["AZ a"]
+            PubA["public-subnet-1<br/>10.0.1.0/24"]
+            PrivAppA["private app subnet-1<br/>10.0.10.0/24"]
+            PrivDbA["private db subnet-1<br/>10.0.20.0/24"]
+        end
+        subgraph AZB["AZ b"]
+            PubB["public-subnet-2<br/>10.0.2.0/24"]
+            PrivAppB["private app subnet-2<br/>10.0.11.0/24"]
+            PrivDbB["private db subnet-2<br/>10.0.21.0/24"]
+        end
+
+        ALB2["ALB (internet-facing)<br/>listener :443 TLS / :80 301"]
+        NATA["NAT GW 1"]
+        NATB["NAT GW 2"]
+
+        subgraph ECS["ECS cluster - Fargate, assign_public_ip=false"]
+            GW["api-gateway<br/>desired 1 (1-3)"]
+            INV["inventory-app<br/>desired 1 (1-3)"]
+            BILL["billing-app<br/>desired 2 (fixed)"]
+        end
+
+        RDS1[("RDS inventory<br/>db.t4g.micro Multi-AZ<br/>PostgreSQL 16.3, force_ssl=1")]
+        RDS2[("RDS billing<br/>db.t4g.micro Multi-AZ<br/>PostgreSQL 16.3, force_ssl=1")]
+        MQ["Amazon MQ RabbitMQ 3.13<br/>ACTIVE_STANDBY_MULTI_AZ<br/>AMQPS 5671 only"]
+        CMAP["Cloud Map namespace<br/>cloud-design-prod.local"]
+        KMS["KMS key (rotation on)"]
+        SM["Secrets Manager<br/>3 secrets"]
+
+        IGW --> ALB2
+        ALB2 --- PubA
+        ALB2 --- PubB
+        NATA --- PubA
+        NATB --- PubB
+        GW --- PrivAppA
+        INV --- PrivAppB
+        BILL --- PrivAppA
+        RDS1 --- PrivDbA
+        RDS2 --- PrivDbB
+        MQ --- PrivDbA
+        ALB2 -->|"3000"| GW
+        GW -->|"8080"| INV
+        GW -.->|"publish 5671 AMQPS"| MQ
+        INV -->|"5432"| RDS1
+        BILL -->|"5671 AMQPS consume"| MQ
+        BILL -->|"5432"| RDS2
+
+        GW -.->|"register on health change"| CMAP
+        INV -.->|"register on health change"| CMAP
+        BILL -.->|"register on health change"| CMAP
+        GW -->|"443 egress via NAT"| NATA
+        INV -->|"443 egress via NAT"| NATA
+        BILL -->|"443 egress via NAT"| NATA
+        GW -->|"443 egress via NAT"| NATB
+        INV -->|"443 egress via NAT"| NATB
+        BILL -->|"443 egress via NAT"| NATB
+        NATA --> IGW
+        NATB --> IGW
+        RDS1 -.-> KMS
+        RDS2 -.-> KMS
+        RDS1 -.-> SM
+        RDS2 -.-> SM
+        MQ -.-> SM
+    end
+
+    subgraph PrivateDNS["AmazonProvidedDNS - the VPC resolver, not a resource"]
+        Res["inventory-app.cloud-design-prod.local<br/>MULTIVALUE: every healthy task IP"]
+    end
+
+    GW -.->|"7. DNS query"| Res
+    Res -.->|"healthy task IPs only"| INV
+
+    User -->|"VPC Link from API Gateway"| ALB2
+```
+
+Routing truth, from `terraform/vpc.tf`: the private **data** route table has
+**no route at all** (`aws_route_table.private_db` has no `route` block) — RDS and
+Amazon MQ cannot reach the internet, not even for AWS API calls. Only the private
+**app** subnets get a `0.0.0.0/0` route to a NAT Gateway.
+
+### Billing order flow — the asynchronous handoff
+
+`POST /api/billing` returns `200` as soon as the broker **confirms** the publish.
+It does not wait for the database. That is the whole point, and it is also the
+place where an ordering bug silently loses money.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant APIGW as API Gateway<br/>(Cognito JWT authorizer)
+    participant ALB as ALB :443
+    participant GW as api-gateway :3000
+    participant MQ as RabbitMQ<br/>(Amazon MQ, AMQPS 5671)
+    participant BI as billing-app :8080
+    participant BD as billing-database :5432
+
+    C->>APIGW: POST /api/billing + Bearer JWT
+    APIGW->>APIGW: verify signature, iss, aud
+    APIGW->>ALB: VPC Link, HTTPS
+    ALB->>GW: HTTP POST /api/billing
+    Note over GW: JSON body captured verbatim<br/>(queue_sender.py: publish_message)
+
+    GW->>MQ: basic_publish(durable queue,<br/>delivery_mode=Persistent, mandatory=true)
+    MQ-->>GW: publisher confirm (confirm_delivery)
+    Note over GW,MQ: TCP connection closed here.<br/>The request path is DONE.
+    GW-->>ALB: 200 {"message": "... sent"}
+    ALB-->>APIGW: 200
+    APIGW-->>C: 200
+
+    rect rgb(238, 244, 255)
+        Note over MQ,BD: asynchronous - may be milliseconds or hours later
+        MQ->>BI: basic_deliver (prefetch_count=1)
+        BI->>BD: BEGIN, INSERT INTO orders, COMMIT
+        alt insert committed
+            BD-->>BI: OK (order id)
+            BI->>MQ: basic_ack
+        else database unreachable
+            BD--xBI: error after 5 retries
+            BI->>MQ: basic_nack(requeue=true)<br/>after REDELIVERY_BACKOFF_SECONDS
+        else poison payload (not JSON / no user_id)
+            BI->>MQ: basic_ack (discard on purpose,<br/>else head-of-line block)
+        end
+    end
+
+    loop reconnect on AMQPConnectionError / AMQPChannelError
+        Note over BI,MQ: 3 s backoff, indefinite.<br/>SIGTERM sets stop_event and the loop<br/>closes cleanly instead of being SIGKILLed.
+    end
+```
+
+The ack/nack split is the correctness-critical part and is written down at
+`srcs/billing-app/app/consume_queue.py:299-311`. Acknowledging a failed insert
+would drop a paid order; the code never does that.
+
 ---
 
-## 2. Component Specifications
+## Component mapping
 
-| Component | Technology | AWS Service / Resource | Network Location | Security / Isolation |
-|---|---|---|---|---|
-| **API Gateway App** | Python / Express | Amazon EKS / ECS Deployment | Private App Subnets | Ingress from ALB only; Port 3000 |
-| **Inventory App** | Python / Express | Amazon EKS / ECS Deployment | Private App Subnets | Ingress from Gateway only; Port 8080 |
-| **Billing App** | Python / Node.js Worker | Amazon EKS / ECS StatefulSet | Private App Subnets | Ingress from Gateway/RabbitMQ; Port 8080 |
-| **Inventory Database** | PostgreSQL 16.3 | Amazon RDS PostgreSQL Multi-AZ | Private Data Subnets | Ingress from `inventory-app` only; Port 5432 |
-| **Billing Database** | PostgreSQL 16.3 | Amazon RDS PostgreSQL Multi-AZ | Private Data Subnets | Ingress from `billing-app` only; Port 5432 |
-| **Message Queue** | RabbitMQ 3.13 | Amazon MQ (Managed RabbitMQ) | Private Data Subnets | Ingress from `api-gateway` & `billing-app`; Port 5672 plaintext (VPC-internal only), 5671 AMQPS |
-| **Load Balancer** | AWS ALB | Elastic Load Balancing v2 | Public Subnets | ACM TLS 1.3 certificate, HTTP to HTTPS redirect |
-| **Managed Auth** | AWS Cognito | Cognito User Pool & App Client | Managed AWS Edge | JWT verification on API Gateway |
-| **Observability** | CloudWatch / Logs | CloudWatch Log Groups & Alarms | Managed AWS Edge | Aggregated logs from all pods & services |
+`docs/readme.md` requires six components. All six run as local containers under
+`docker compose`; on AWS, **three of them become ECS tasks and the other three
+become managed services**. This table is the unambiguous mapping — no component
+is listed as both a StatefulSet and an RDS instance.
 
----
+| # | Required component | Port (spec) | Local: container image | Local host port | AWS service (Terraform file) | Subnet tier |
+|---|---|---|---|---|---|---|
+| 1 | `inventory-database` | 5432 | `cloud-design/inventory-database:local` (FROM `postgres:17-alpine`) | 5432 | **Amazon RDS PostgreSQL**, `multi_az = true`, `publicly_accessible = false` (`rds.tf`) | private db |
+| 2 | `billing-database` | 5432 | `cloud-design/billing-database:local` (FROM `postgres:17-alpine`) | 5433 (5432 is taken) | **Amazon RDS PostgreSQL**, `multi_az = true`, `publicly_accessible = false` (`rds.tf`) | private db |
+| 3 | `inventory-app` | 8080 | `cloud-design/inventory-app:local` (FROM `python:3.11-alpine`) | 8081 (direct, bypasses the gateway) | **ECS task** `cloud-design-prod-inventory-app` (`ecs_services.tf`) | private app |
+| 4 | `billing-app` | 8080 | `cloud-design/billing-app:local` (FROM `python:3.11-alpine`) | 8082 (direct) | **ECS task** `cloud-design-prod-billing-app`, `desired_count = 2` (`ecs_services.tf`) | private app |
+| 5 | `RabbitMQ` queue | 5672 local / **5671 AWS** | `cloud-design/rabbit-queue:local` (FROM `rabbitmq:3.13-management-alpine`) | 5672 + 15672 (mgmt UI) | **Amazon MQ for RabbitMQ** `ACTIVE_STANDBY_MULTI_AZ`, `publicly_accessible = false`, **AMQPS 5671 only** (`amazon_mq.tf`) | private db |
+| 6 | `api-gateway-app` | 3000 | `cloud-design/api-gateway-app:local` (FROM `python:3.11-alpine`), **2 replicas** | none (behind the LB) | **ECS task** `cloud-design-prod-api-gateway` (`ecs_services.tf`) | private app |
+| — | local load balancer | 3000 (host) | `nginx:1.27-alpine`, `least_conn` — the local stand-in for the ALB | 3000 | **Application Load Balancer**, `internal = false` (`alb.tf`) | public |
 
-## 3. Key Design Principles & Architectural Decisions
+Supporting AWS resources with no local container counterpart: API Gateway HTTP
+API, Cognito user pool + app clients, ACM certificate, Cloud Map namespace, ECR
+(3 repos), Inspector v2, KMS key, Secrets Manager (3 secrets), CloudWatch log
+groups/alarms/dashboard, SNS topic, AWS Budget, VPC/subnets/NAT/security groups
+and their rules, IAM roles and policies for ECS.
 
-### A. Scalability
-- **Horizontal Pod Autoscaling (HPA)**: Both `api-gateway` and `inventory-app` automatically scale between **1 and 3 replicas** triggered at **60% CPU utilization**.
-- **Auto Scaling Groups (ASG)**: EC2 worker nodes automatically scale based on cluster compute pressure.
-- **Asynchronous Queue Buffering**: RabbitMQ decouples the ingestion of billing orders from processing, absorbing traffic spikes without dropping orders.
-
-### B. High Availability & Fault Tolerance
-- **Multi-AZ Deployment**: Resources span multiple AWS Availability Zones (`us-east-1a` and `us-east-1b`).
-- **Database Multi-AZ Replication**: RDS PostgreSQL utilizes synchronous replication to a standby instance in a second AZ with automated failover.
-- **Container Self-Healing**: Liveness and readiness probes restart failing containers automatically.
-
-### C. Security & Defense-in-Depth
-- **Strict Network Segmentation**: 
-  - **Public Subnets**: Only the Application Load Balancer and NAT Gateways.
-  - **Private Application Subnets**: Microservices pods; no public IP addresses assigned.
-  - **Private Data Subnets**: Databases and messaging queues; completely unreachable from the Internet.
-- **Security Group Chaining**: Database security groups only accept inbound traffic on port 5432 from the specific application security group (least privilege principle).
-- **Authentication**: AWS Cognito User Pool validates JWT bearer tokens before forwarding requests to the API gateway.
-- **Encryption**:
-  - **At Rest**: AES-256 encryption via AWS KMS for RDS storage, EBS volumes, and CloudWatch log groups.
-  - **In Transit (edge-TLS-only)**: TLS 1.3 terminated at the ALB (ACM) and on API Gateway/Cognito; internal VPC traffic is plaintext HTTP (ALB→app `:3000`) and AMQP `:5672` restricted to private security groups. TODO: service mesh (mTLS) for internal encryption — no internal TLS/mTLS is claimed.
-
-### D. Cost-Effectiveness
-- **Free Tier & Right-Sizing**: Default configurations leverage `t3.micro` / `t3.small` instances and `db.t3.micro` RDS instances.
-- **Single NAT Gateway Option for Non-Prod**: Uses 1 NAT gateway in staging/dev to cut hourly AWS NAT charges by 50%.
-- **Automated Teardown**: Provided `destroy.sh` completely removes cloud infrastructure upon audit completion to guarantee zero runaway billing.
-- **CloudWatch Billing Alarms**: Proactive alerts notify when estimated charges exceed configured thresholds ($10 / $25).
-
-### E. Simplicity
-- **Clean Modular IaC**: Terraform modules separate VPC, IAM, security groups, compute, storage, and monitoring into readable, independently verifiable blocks.
-- **Standardized Container Builds**: 3 multi-stage app images (`api-gateway`, `inventory-app`, `billing-app`) plus 3 single-stage data images (2× PostgreSQL, 1× RabbitMQ from upstream images), reducing app image footprints by over 70%.
+There are **two** PostgreSQL engines in this project and they are not the same
+version, which is worth knowing before an auditor diffs them: the **local images
+are PostgreSQL 17** (`postgres:17-alpine`), the **RDS instances are 16.3**
+(`engine_version = "16.3"`, parameter group family `postgres16`).
 
 ---
 
-## 4. Cost Management & Optimization Guide
+## Well-Architected pillars
 
-1. **Infrastructure Cost Breakdown & Right-Sizing**:
-   - **Compute**: EKS Managed Nodes default to `t3.medium` burstable instances; ECS Fargate provides serverless per-second execution without node management overhead.
-   - **Database & Messaging**: RDS uses `db.t4g.micro` (AWS Graviton ARM cost efficiency) and Amazon MQ uses `mq.t3.micro`.
-   - **Networking**: Application Load Balancer handles ingress. A configurable `single_nat_gateway` flag allows non-production environments to use a single NAT Gateway, cutting continuous hourly networking cost by 50%.
-2. **Proactive Cost Guardrails & Alarms**:
-   - **AWS Budgets (`aws_budgets_budget.monthly`)**: Enforces a strict monthly spend limit ($15 default) with dual notification triggers:
-     - 80% actual spend threshold alert via Amazon SNS and email.
-     - 100% forecasted spend threshold alert before budget breaches occur.
-   - **CloudWatch Billing Metric Alarm (`aws_cloudwatch_metric_alarm.billing_estimated_charges`)**: Evaluates `EstimatedCharges` against the budget threshold and dispatches critical SNS alerts to engineering operations.
-3. **Automated Resource Teardown**:
-   - Running `./scripts/destroy.sh` uninstalls all Kubernetes workloads and triggers `terraform destroy -auto-approve`, wiping all VPC infrastructure, load balancers, databases, and brokers to guarantee zero ongoing idle costs.
+### Scalability
+
+| Layer | Mechanism | Bounds |
+|---|---|---|
+| ECS request path | `ECSServiceAverageCPUUtilization` target tracking, **60 %** (`autoscaling.tf`) | `api-gateway` and `inventory-app`: min 1 / max 3; scale-out cooldown **60 s**, scale-in **300 s** |
+| Queue consumer | deliberately **no** scaling policy | `billing-app` pinned at `desired_count = 2` |
+| Manifests path | 3 HorizontalPodAutoscalers, 60 % CPU | min 1 / max 3 (`manifests/{api-gateway,inventory-app,billing-app}.yaml`) |
+| Storage | RDS storage autoscaling | 20 GB → 100 GB (`db_max_allocated_storage`) |
+| Burst absorption | the RabbitMQ queue | an `api-gateway` outage does not lose orders; they sit in `billing_queue` and drain when it returns |
+
+The 60 % target is not arbitrary: it is far enough below saturation to leave room
+for a container to become ready before it is loaded, and the 300 s scale-in
+cooldown stops the classic flapping where two pods each wait for the other to go
+away. Measured local headroom: five runs of 200 requests at concurrency 20 through the
+nginx load balancer gave **327–463 req/s** with **0 non-200 responses**; the
+gateway container's own p95 over all 1100 requests was **15 ms**. Quote the
+range — see [Usage](#usage) for the script and the full table.
+
+### Availability
+
+- **2 AZs, and no resource pinned to one.** `var.availability_zones` defaults to
+  empty, which means "discover the first two zones AWS actually offers this
+  account in this region" (`vpc.tf:15`). Hard-coding `us-east-1a/b` while
+  `aws_region` was a variable was the original bug here.
+- **RDS Multi-AZ is unconditional**, not "in production" (`rds.tf:127`,
+  `rds.tf:168`): two `db.t4g.micro` instances, each in a different AZ, 7-day
+  backups, `auto_minor_version_upgrade`. RDS Multi-AZ replication is
+  **asynchronous** — a failover can lose a transaction committed but not yet
+  replicated. Semi-synchronous replication is an Aurora Multi-AZ *DB cluster*
+  feature, which this design does not use.
+- **Amazon MQ `ACTIVE_STANDBY_MULTI_AZ`**, not `SINGLE_INSTANCE` and not
+  `CLUSTER_MULTI_AZ` — the latter needs three AZs and the design has two.
+- **ECS services span both private app subnets**, so one AZ loss halves capacity
+  rather than removing it. The ALB and RDS failover are the two events that can
+  still be user-visible, and both are AWS-managed.
+- **Graceful shutdown is proven, not asserted.** `docker compose stop billing-app`
+  exits **0** (the SIGTERM handler at `srcs/billing-app/app/consume_queue.py:247-253`
+  stops the consumer through pika's thread-safe callback), not 137. The measured
+  drill, including a consumer outage and a drain, is in [Usage](#usage).
+- **Local HA substitute:** two `api-gateway-app` replicas behind nginx
+  `least_conn`, which is the same algorithm family as the ALB target group. The
+  distribution is *measured*, not asserted: **561 / 539** across the two replica
+  IPs over 1100 requests.
+
+### Security
+
+Full detail in [Security](#security). The three claims worth repeating here:
+encryption at rest with a **customer-managed KMS key** with rotation enabled;
+encryption in transit at the edge with **TLS 1.3** plus a database parameter
+group that sets **`rds.force_ssl = 1`**, which makes PostgreSQL *refuse* a
+plaintext session (fail-closed); and managed authentication with **Cognito**
+verified by an API Gateway **JWT authorizer** attached to every `/api/*` route.
+
+### Cost-effectiveness
+
+- **PAYG everywhere, no node fleet.** Fargate bills per task-second; there is no
+  EC2 Auto Scaling Group to keep warm. This is a direct consequence of dropping
+  EKS.
+- **Right-sized defaults**: `db.t4g.micro` (Graviton, ARM) and `mq.t3.micro`,
+  256 CPU / 512 MB per task (0.25 vCPU / 0.5 GB).
+- **`single_nat_gateway = false` by default, on purpose.** One NAT saves roughly
+  **$33/month** but removes AZ independence for *all* private egress (ECR pulls,
+  CloudWatch, Secrets Manager), so an AZ failure takes the whole application
+  down. That is a bad trade against a graded Availability pillar, so it is opt-in
+  for a disposable sandbox.
+- **`ecs_use_fargate_spot = false` by default.** FARGATE_SPOT is up to ~70 %
+  cheaper but tasks can be reclaimed with a two-minute warning, which would
+  undermine the same pillar. Opt-in.
+- **A budget that can actually fire**: `monthly_budget_limit = 300` USD with an
+  itemised `~$260/month` steady-state estimate in `variables.tf`. The previous
+  `$15` default was ~20× below the real run-rate, so its alarm fired every month
+  and taught an auditor nothing.
+- **Full detail in [Cost management](#cost-management).**
+
+### Simplicity
+
+- **One orchestrator: ECS on Fargate.** The previous revision also provisioned an
+  EKS control plane (~**$73/month** with no workloads on it), with
+  `endpoint_public_access = false` and no bastion, so `kubectl` could never reach
+  it — while the rubric explicitly asks the student to demonstrate `kubectl`. Two
+  orchestrators, two load balancers and two data tiers also fail this pillar. The
+  reasoning is recorded at `terraform/orchestration.tf:1-16`.
+- **No Terraform modules.** The 18 `.tf` files are organised by concern
+  (`vpc.tf`, `alb.tf`, `rds.tf`, …). That is a deliberate trade: modules would
+  buy reuse across environments, which this project does not have, and would cost
+  readability at this size. `0 module` blocks is the honest count.
+- **Three image bases, one per data type** (`python:3.11-alpine`,
+  `postgres:17-alpine`, `rabbitmq:3.13-management-alpine`), all inherited from
+  upstream rather than hand-assembled.
+- **One thing per job at the edge**: API Gateway does authn/authz, the ALB does
+  TLS and load balancing, Cloud Map does east–west discovery. No service mesh, no
+  API gateway plus CDN plus WAF plus Lambda.
 
 ---
 
-## 5. Deployment & Verification Commands
+## Monitoring and logging
 
-### Prerequisites
-- AWS CLI configured (`aws configure`)
-- Terraform >= 1.5.0 installed
-- `kubectl` configured
+### Log groups
 
-### Deployment Steps
+Four groups, all with `retention_in_days = 30` (`var.log_retention_days`). ECS
+containers use the **native `awslogs` driver** — there is no Fluent Bit sidecar
+and no Container Insights log pipeline in this project.
+
+| Log group | Written by |
+|---|---|
+| `/aws/apigateway/cloud-design-prod-api` | API Gateway access logs (JSON: requestId, sourceIp, routeKey, status, authorizerPrincipalId, integrationErrorMessage) |
+| `/aws/microservices/cloud-design-prod/api-gateway` | `api-gateway` container stdout/stderr |
+| `/aws/microservices/cloud-design-prod/inventory-app` | `inventory-app` container stdout/stderr |
+| `/aws/microservices/cloud-design-prod/billing-app` | `billing-app` container stdout/stderr |
+
+ECS Container Insights **is** enabled on the cluster
+(`orchestration.tf:21-24`), which covers cluster-level *metrics* — that is a
+different thing from the `/aws/containerinsights/.../application` *log* pipeline,
+which this project does not create.
+
+### Alarms — all 11
+
+| Alarm | Metric | Condition | Window |
+|---|---|---|---|
+| `apigw-high-5xx-errors` | `AWS/ApiGateway 5xx` | > 5 | 2 × 60 s |
+| `alb-target-5xx-errors` | `HTTPCode_Target_5XX_Count` | > 5 | 2 × 60 s |
+| `alb-unhealthy-hosts` | `UnHealthyHostCount` | ≥ 1 | 2 × 60 s |
+| `alb-high-latency` | `TargetResponseTime` | > 1.0 s avg | 3 × 60 s |
+| `ecs-api-gateway-high-cpu` | `AWS/ECS CPUUtilization` | > 60 % | 3 × 60 s |
+| `ecs-inventory-app-high-cpu` | `AWS/ECS CPUUtilization` | > 60 % | 3 × 60 s |
+| `rds-inventory-high-cpu` | `AWS/RDS CPUUtilization` | > 80 % | 3 × 120 s |
+| `rds-inventory-low-storage` | `FreeStorageSpace` | < 5 GiB | 2 × 300 s |
+| `rds-billing-high-cpu` | `AWS/RDS CPUUtilization` | > 80 % | 3 × 120 s |
+| `rds-billing-low-storage` | `FreeStorageSpace` | < 5 GiB | 2 × 300 s |
+| `estimated-charges-limit` | `AWS/Billing EstimatedCharges` | > `monthly_budget_limit` | 1 × 6 h |
+
+The two CPU alarms deliberately use the *same* 60 % threshold as the autoscaler,
+so an alarm fires exactly when the scaler reacts. `alb-unhealthy-hosts` exists
+because a target group with zero healthy targets produces **no** target 5xx —
+the absence of errors is the symptom. There is **no** "database connections >
+80 %" alarm; connection count is a dashboard widget, not an alarm.
+
+### Dashboard
+
+One dashboard, `cloud-design-prod-observability`, **6 metric widgets**:
+API Gateway request/4xx/5xx counts; ALB request volume + target response
+latency; RDS CPU **and** `DatabaseConnections` for both instances; RabbitMQ
+`MessageCount` (queue depth); ALB healthy vs unhealthy target count; ECS CPU per
+service. Widget 6 is the autoscaler's input metric, so "why did it scale out?"
+is answerable from the same screen.
+
+### Notifications and budget
+
+Every alarm publishes to SNS topic `cloud-design-prod-operational-alerts`. The
+topic also has an explicit **topic policy** (`cloudwatch.tf:48-98`) allowing
+`cloudwatch.amazonaws.com` and `budgets.amazonaws.com` to publish — without it
+SNS silently drops cross-service `Publish` calls and the console shows healthy
+alarms that notify nobody. `aws_budgets_budget.monthly` (default **300 USD**)
+notifies at **80 % actual** and **100 % forecasted**, to SNS and, if
+`alarm_email` is set, to email. Set `alarm_email = ""` for no email subscriber;
+placeholder domains are rejected at plan time by a `validation` block.
+
+---
+
+## Auto-scaling
+
+**ECS (the deployed path).** Two Application Auto Scaling targets, both
+`ecs:service:DesiredCount`, both target tracking on
+`ECSServiceAverageCPUUtilization` at `var.autoscaling_target_cpu` (60), with
+`scale_out_cooldown = 60` and `scale_in_cooldown = 300`:
+
+| Service | min | max | Policy |
+|---|---|---|---|
+| `cloud-design-prod-api-gateway` | 1 | 3 | `…-apigw-cpu-target-tracking-60` |
+| `cloud-design-prod-inventory-app` | 1 | 3 | `…-inventory-cpu-target-tracking-60` |
+| `cloud-design-prod-billing-app` | **2 (fixed)** | — | **none — deliberately** |
+
+`billing-app` is excluded because it is the **only** RabbitMQ consumer and the
+**only** writer to the billing database. A queue consumer that scales to zero
+stops draining the queue, and CPU is the wrong signal for it anyway: a
+backlogged queue keeps the process *idle* while work piles up. Two fixed replicas
+give AZ independence plus parallel drain capacity, since each task holds a
+`prefetch_count = 1` window. The exclusion is stated in the file header at
+`terraform/autoscaling.tf:1-7` so it reads as a decision, not an omission.
+
+**Kubernetes (the manifests path).** Three HPAs — `api-gateway-hpa`,
+`inventory-app-hpa`, `billing-app-hpa` — min 1 / max 3 / 60 % CPU (`manifests/api-gateway.yaml`, `manifests/inventory-app.yaml`, `manifests/billing-app.yaml`). They require
+`metrics-server`; without it they report `<unknown>`, `scalingActive=false`,
+`FailedGetResourceMetric`, and **silently never scale anything**, which is the
+worst failure mode for a "we auto-scale" claim.
+
+**Storage.** RDS `max_allocated_storage = 100` against
+`allocated_storage = 20` enables storage autoscaling on both instances.
+
+---
+
+## Security
+
+### Edge and authentication
+
+- **TLS 1.3 at the ALB**: listener on `:443` with
+  `ELBSecurityPolicy-TLS13-1-2-2021-06`; listener on `:80` is **redirect-only**
+  (`status_code = "HTTP_301"` → 443), so no plaintext path is forwarded. Path
+  routing lives only on the `:443` listener, so HTTP can never bypass TLS.
+- **Certificate**: `enable_acm_certificate = true` requests a real ACM
+  certificate, **DNS-validated via Route 53** in the hosted zone you already own
+  (`aws_route53_record.acm_validation`), and publishes an A-alias to the ALB. The
+  default `false` falls back to a self-signed certificate generated by the `tls`
+  provider, so `terraform apply` succeeds on a brand-new account with no DNS
+  prerequisite. Clients warn on the self-signed path — switch the toggle on for
+  anything actually demonstrated.
+- **Managed authentication**: `aws_apigatewayv2_api` (HTTP API) with an
+  `aws_apigatewayv2_authorizer` of type `JWT`, identity source
+  `$request.header.Authorization`, issuer = the user pool endpoint, audience =
+  the app client id. Authorizer and `authorization_type = "JWT"` are set on
+  `ANY /api/movies`, `ANY /api/movies/{proxy+}`, `ANY /api/billing` and
+  `ANY /api/billing/{proxy+}`.
+- **`GET /health` is intentionally unauthenticated.** It carries no `authorizer_id`
+  (`api_gateway.tf:83-87`) so that external uptime monitors and the ALB health
+  check can call it. If you see `GET /health` return 200 without a token while
+  `/api/movies` returns 401, **the authorizer is working correctly** — that is the
+  designed behaviour, not a bypass. It also reveals nothing but a static
+  `{"status":"healthy"}`.
+- **Cognito user pool**: `mfa_configuration = "OPTIONAL"` (offered, not enforced,
+  so the audit walkthrough is not blocked by device registration), password
+  policy requiring upper/lower/digit/symbol with minimum length 8,
+  `password_history_size = 3`, `prevent_user_existence_errors = "ENABLED"`, and
+  email attributes requiring re-verification before update. The browser client
+  uses the OAuth **authorization-code** flow — the deprecated `implicit` flow was
+  dropped because it returns tokens in the URL fragment. An optional demo user and
+  a confidential demo app client sit behind `enable_demo_cognito_user`.
+- **Throttling** on the `$default` stage: 5000 burst / 2500 steady-state.
+
+### Data tier
+
+- **At rest**: `storage_encrypted = true` with a **customer-managed KMS key**
+  (`aws_kms_key.rds`, `enable_key_rotation = true`), not the AWS-managed default.
+- **In transit**: parameter group `cloud-design-prod-postgres16-ssl` sets
+  **`rds.force_ssl = 1`**, so the server **rejects** a plaintext session
+  outright — a misconfigured client fails closed instead of silently downgrading.
+  The clients build `postgresql+psycopg2://…` without `sslmode`; libpq defaults to
+  `sslmode=prefer`, which still negotiates TLS against a force-SSL server. Adding
+  `?sslmode=require` client-side would make the requirement explicit — that is
+  application work, not Terraform, and is listed in Known limitations.
+- **AMQPS only**: Amazon MQ for RabbitMQ exposes no plaintext listener.
+  Terraform injects `RABBITMQ_PORT = 5671`, and the security groups open
+  **5671** egress *and* ingress (the previous revision opened the broker ingress
+  rule but never the matching app egress rule, so AMQPS was unreachable).
+  `srcs/api-gateway-app/app/queue_sender.py:26-31` documents the detection rule:
+  TLS is on when `RABBITMQ_TLS` is truthy, **or** when it is unset and the
+  effective port is 5671 / the host carries `amqps://`. The identical rule is
+  implemented in both the publisher and the consumer so they can never disagree.
+  Certificate verification is **on by default** (`ssl.create_default_context()` →
+  `check_hostname=True`, `CERT_REQUIRED`); `RABBITMQ_TLS_VERIFY=false` is the
+  only opt-out and it logs an `INSECURE` warning.
+- **Network isolation**: `publicly_accessible = false` on both RDS instances and
+  the broker; the private **db** route table has no default route; the db and mq
+  security groups accept 5432 and 5671/15671 **only** from the app security group,
+  never `0.0.0.0/0`. The only `0.0.0.0/0` ingress rules in the whole Terraform
+  are ALB `:80` and `:443`.
+
+### Secrets
+
+- **AWS**: three `aws_secretsmanager_secret` resources (inventory DB, billing DB,
+  Amazon MQ) holding the generated passwords, encrypted with the same KMS key;
+  ECS task definitions reference them through `valueFrom = "<arn>:password::"`.
+- **Local**: `.env` is git-ignored (`.gitignore` line `.env`) and holds
+  placeholders. `docker-compose.yml` uses `${VAR:?…}` for all 8 credentials, so a
+  missing value fails the *compose* command with a named message instead of
+  handing an empty string to an application that would then crash or authenticate
+  with the wrong value.
+- **Manifests**: `manifests/secrets.yaml` ships `REPLACE_ME_*` placeholders only.
+  See the trap documented in that file and repeated in [Setup](#setup).
+
+### Containers and Kubernetes
+
+The three app images run as `USER appuser` (UID/GID 10001), created with
+`-S -G appgroup -s /sbin/nologin` and installed before the source is copied. The
+manifests set `runAsNonRoot`, `runAsUser/Group: 10001`, `fsGroup: 10001`,
+`seccompProfile: RuntimeDefault`, `allowPrivilegeEscalation: false`,
+`readOnlyRootFilesystem: true` and `capabilities.drop: [ALL]` on every app
+container, and compose adds `no-new-privileges:true`.
+
+The namespace sets Pod Security Admission `enforce=baseline`, `audit=restricted`,
+`warn=restricted`. **`baseline`, not `restricted`, is a documented decision**:
+the two PostgreSQL StatefulSets must start as root to `chown` `PGDATA` and run
+`initdb` before dropping privileges with `su-exec`, which `restricted` forbids
+(`runAsNonRoot`). `audit`/`warn` at `restricted` means every pod that does *not*
+meet the stricter profile is still reported as a warning, so the gap is visible
+rather than hidden.
+
+The `manifests/` path adds **8 NetworkPolicies**: `default-deny-all` (a
+`podSelector: {}` policy with `policyTypes: [Ingress, Egress]` and no rules),
+`allow-dns-egress` (UDP **and** TCP 53, because responses over 512 bytes must be
+retried over TCP), and six per-workload allows. The default-deny is applied
+*before* the workloads in `kustomization.yaml` (with `sortOptions: {order: fifo}`,
+which stops kustomize from re-ordering `resources` and emitting NetworkPolicies
+last), so a pod cannot reach the internet during its own startup window.
+
+### Vulnerability scanning
+
+`terraform/inspector2.tf` enables **Amazon Inspector v2** for `resource_types =
+["ECR"]` (the images are the entire software attack surface here — there are no
+EC2 instances) and creates a filter surfacing **CRITICAL** and **HIGH** findings
+with `action = "NONE"`, which *reports* rather than suppresses them.
+`terraform/ecr.tf` sets `scan_on_push = true` on all three repositories and keeps
+only the 5 most recent images. Provider 5.100.0 does not expose
+`aws_inspector2_enumerator`, so scan-on-push is configured on the repositories
+instead; that limitation is written down at `inspector2.tf:12-18`.
+
+### Not implemented
+
+**AWS WAF, CloudFront (CDN) and Lambda (FaaS) are not implemented.** There is no
+`aws_wafv2_*`, no `aws_cloudfront_distribution` and no `aws_lambda_function`
+resource anywhere in `terraform/`. They are future work, listed in [Bonus](#bonus).
+
+---
+
+## Prerequisites
+
+### For path A — local demonstration (no AWS account needed)
+
+| Tool | Why | Verified version here |
+|---|---|---|
+| Docker Engine + Compose v2 | the 7-service / 8-container stack | Docker with `docker compose` |
+| `python3` | `make test` runs the unit tests on the host | 3.12.3 |
+| `make` | the `Makefile` targets | GNU make |
+
+### For path B — AWS deployment
+
+| Tool | Why | Version |
+|---|---|---|
+| AWS CLI v2 | push to ECR, read outputs, `aws ecs describe-services` | ≥ 2.x |
+| Terraform | all infrastructure | **≥ 1.5.0** (`main.tf:2`), provider `aws ~> 5.50`, plus `tls ~> 4.0` and `random ~> 3.6` |
+| An AWS account | — | with IAM permissions for VPC, ELB, RDS, MQ, ECS, ECR, Cognito, APIGateway, ACM, Route 53, KMS, Secrets Manager, CloudWatch, SNS, Budgets, Inspector2 |
+
+### Optional, per path
+
+- **`kubectl` ≥ 1.28** (embeds kustomize v5, needed for `sortOptions`) plus
+  **`k3d`** or `kind`, for the Kubernetes path.
+- **`metrics-server`** in the cluster, or every HPA silently never scales.
+- **The AWS Load Balancer Controller** with an `IngressClass` named exactly `alb`,
+  **plus** an ACM certificate ARN in the same region, or `manifests/ingress.yaml`
+  fails **silently** (see [Known limitations](#known-limitations--verified-vs-not)).
+- **A Route 53-hosted domain** (`alb_domain_name` + `alb_hosted_zone_id`) if you
+  want the real ACM certificate rather than the self-signed fallback.
+
+---
+
+## Setup
+
+All paths assume the repository root as the working directory and use **relative
+paths only**.
+
+### Path A — local demonstration (works today, fully verified)
+
 ```bash
-# 1. Navigate to project root
-cd /home/ertval/code/zone-modules/cloud-design
+# 0. prerequisites
+docker --version && docker compose version
 
-# 2. Run automated audit validation
-./scripts/test_cloud.sh
+# 1. create .env from the template (never overwrites an existing file)
+make env                 # == cp .env.example .env, guarded
 
-# 3. Deploy infrastructure via Terraform
+# 2. build all six images and start the stack, waiting until every
+#    container reports healthy (not merely "started")
+make up
+
+# 3. look at it
+make ps                  # the `docker ps` equivalent, with health
+docker ps                # 8 containers, all Up (healthy)
+```
+
+`make up` is the honest entrypoint: it waits for health, so the next command
+cannot race a cold `initdb`. Expect the first start to take a few minutes on a
+cold volume — a fresh PostgreSQL cluster was measured needing ~145 s before it
+accepted connections, which is why `DB_CONNECT_MAX_RETRIES` defaults to
+`180 × 2 s = 360 s`.
+
+The stack it produces:
+
+| Container | Image | Host port |
+|---|---|---|
+| `cloud-design-gateway-lb` | `nginx:1.27-alpine` | `3000 → 8080` |
+| `cloud-design-api-gateway-app-1` | `cloud-design/api-gateway-app:local` | none |
+| `cloud-design-api-gateway-app-2` | `cloud-design/api-gateway-app:local` | none |
+| `cloud-design-inventory-app-1` | `cloud-design/inventory-app:local` | `8081 → 8080` |
+| `cloud-design-billing-app-1` | `cloud-design/billing-app:local` | `8082 → 8080` |
+| `cloud-design-inventory-database` | `cloud-design/inventory-database:local` | `5432 → 5432` |
+| `cloud-design-billing-database` | `cloud-design/billing-database:local` | `5433 → 5432` |
+| `cloud-design-rabbit-queue` | `cloud-design/rabbit-queue:local` | `5672`, `15672` |
+
+### Path B — AWS deployment
+
+```bash
+# 1. prove who you are before spending money
+aws sts get-caller-identity
+
+# 2. review the variables that MUST be changed (see Configuration)
+cp terraform/terraform.tfvars.example terraform/terraform.tfvars
+$EDITOR terraform/terraform.tfvars
+
+# 3. infrastructure
 cd terraform
 terraform init
+terraform validate
 terraform plan -out=tfplan
 terraform apply tfplan
+cd ..                       # back to the repository root
 
-# 4. Deploy Kubernetes workloads
-kubectl apply -f ../manifests/
+# 4. push the three application images into the ECR repos Terraform just created
+REG=$(terraform -chdir=terraform output -raw ecr_registry_url)
+aws ecr get-login-password --region us-east-1 \
+  | docker login --username AWS --password-stdin "$REG"
+PUSH=1 bash scripts/build_push.sh
+
+# 5. the authoritative task definitions and services live in terraform/. The
+#    image tags are `:latest`, so re-apply so the services redeploy onto the
+#    images you just pushed. Without this step the tasks run whatever `:latest`
+#    pointed at when the first apply created them.
+(cd terraform && terraform apply tfplan)
 ```
 
-> **Secrets note:** `manifests/secrets.yaml` ships with `REPLACE_ME` placeholders only (no real credentials in git). For real clusters, inject via External Secrets Operator (ESO) from AWS Secrets Manager or SealedSecrets; never commit real values.
+> The ECS task definitions in `terraform/ecs_services.tf` are authoritative.
+> `ecs-tasks/*.json` (6 files) are standalone, hand-readable task definitions with
+> **placeholder** account IDs (`123456789012`) and ARNs, kept as documentation; they
+> are not what Terraform applies and not what ECS runs.
 
----
+### The Kubernetes path (manifests, local cluster)
 
-## 6b. Future enhancements / roadmap (NOT in current IaC)
-
-- **AWS WAF**: rate limiting + OWASP managed rules in front of ALB/API Gateway (no `aws_wafv2_*` resources yet).
-- **Amazon CloudFront**: global edge caching for `GET /api/movies` + Shield Standard DDoS absorption (no `aws_cloudfront_distribution` yet).
-- **AWS Lambda event processing**: replace/augment the billing worker with Lambda + EventBridge/SQS and Aurora Serverless v2 (no `aws_lambda_function` yet).
-- **Service mesh mTLS**: App Mesh/Istio with X-Ray tracing for internal encryption (currently edge-TLS-only).
-
-### Resource Teardown
 ```bash
-./scripts/destroy.sh
+# cluster + metrics-server (the HPAs need it)
+k3d cluster create cd-audit --servers 3
+kubectl apply -f https://github.com/k3s-io/metrics-server/releases/latest/download/metrics-server.yaml
+
+# build and preload so the kubelet needs no registry
+bash scripts/build_push.sh
+k3d image import cd-audit cloud-design/api-gateway-app:local
+
+# apply -- USE -k, ALWAYS
+kubectl apply -k manifests/
+kubectl -n cloud-design rollout status --timeout=5m deploy/api-gateway
 ```
 
----
+**Use `kubectl apply -k manifests/`. Not the `-f manifests/` form.** Two
+independent reasons, both reproduced by `scripts/run-audit-checks.sh`:
 
-## 6. Stakeholder Roleplay Interview Preparation (Audit Q&A)
+1. **Alphabetical order.** `-f` walks the directory alphabetically, applies
+   `api-gateway.yaml` before `namespace.yaml`, and fails with
+   `namespaces "cloud-design" not found`. `kustomization.yaml` declares an
+   explicit, dependency-ordered `resources:` list.
+2. **`kustomization.yaml` itself.** `-f` also parses that file as a manifest and
+   exits **1**. Adding `apiVersion`/`kind` to silence that specific error breaks
+   `apply -k` instead (kustomize then tries to accumulate the file as one of its
+   own resources). Both variants were tested; neither works.
 
-### Q1: What is the cloud and its associated benefits?
-> **Answer**: Cloud computing is the on-demand delivery of IT resources (compute, storage, databases, networking) via the Internet with pay-as-you-go pricing. Benefits include:
-> - **Cost Optimization**: Eliminates upfront capital expenditure (CapEx) in physical hardware, replacing it with variable operational expenses (OpEx).
-> - **Elasticity & Scalability**: Dynamic provisioning matches computational power to real-time workload demands.
-> - **High Availability & Reliability**: Native multi-datacenter redundancy across Availability Zones with automated failover.
-> - **Speed & Agility**: Reduces infrastructure provisioning time from weeks to minutes using Infrastructure as Code (IaC).
+`kustomization.yaml` renders **29 objects**: 1 Namespace, 1 Secret, 1 ConfigMap,
+8 NetworkPolicies, 4 StatefulSets (`rabbitmq`, `inventory-database`,
+`billing-database`, `billing-app`), 2 Deployments (`inventory-app`,
+`api-gateway`), 6 Services, 3 PodDisruptionBudgets, 3 HPAs. `ingress.yaml` is
+**commented out** of `resources:` because it needs the AWS Load Balancer
+Controller and cannot act on a local cluster.
 
-### Q2: Why is deploying the solution in the cloud preferred over on-premises?
-> **Answer**: 
-> - **Operational Simplicity**: Managed services like Amazon RDS, Amazon MQ, and AWS Cognito offload database patching, replication, broker clustering, and authentication maintenance.
-> - **Dynamic Scaling**: The workload (e.g. streaming movie orders) experiences sudden spikes. Auto-scaling handles bursts instantly without purchasing excess physical servers.
-> - **Resilience**: A hardware failure on-premises causes downtime; in AWS, multi-AZ failover keeps the application available.
-
-### Q3: How would you differentiate between public, private, and hybrid cloud?
-> **Answer**:
-> - **Public Cloud**: Cloud infrastructure owned and operated by a third-party provider (e.g., AWS, GCP) delivering computing resources over the public Internet. Highly scalable and multi-tenant.
-> - **Private Cloud**: Infrastructure exclusively used by one business or organization, hosted on-premises or by a specialized third party. Maximum governance and control.
-> - **Hybrid Cloud**: Integrates private infrastructure with public cloud environments, allowing data and apps to be shared between them (e.g., sensitive customer records stored on-prem with burst compute in AWS).
-
-### Q4: What drove your decision to select AWS for this project, and what factors did you consider?
-> **Answer**:
-> - **Maturity & Breadth of Services**: AWS provides mature managed services covering every component of our stack: Amazon EKS/ECS for orchestration, Amazon RDS for relational persistence, Amazon MQ for RabbitMQ, and AWS Cognito for OIDC/OAuth2 authentication.
-> - **Terraform Provider Quality**: The HashiCorp AWS provider is exceptionally mature, supporting full lifecycle management of our architecture.
-> - **Enterprise Security Standards**: IAM fine-grained role delegation, VPC security groups, and KMS integration provide robust defense-in-depth out of the box.
-
-### Q5: Can you describe your microservices application's AWS-based architecture and the interaction between its components?
-> **Answer**:
-> - **Client Entry & Auth**: Clients authenticate against an **AWS Cognito User Pool**, obtaining cryptographically signed JWT tokens. Requests are dispatched to **Amazon API Gateway (HTTP API v2)** which validates JWT claims via a Cognito JWT Authorizer.
-> - **Private Integration**: API Gateway forwards authorized requests through a private **VPC Link** to an internal-facing **Application Load Balancer (ALB)** spanning multiple Availability Zones.
-> - **Compute Tier**: The ALB distributes traffic to the containerized **`api-gateway`** microservice running in private application subnets across Amazon EKS worker nodes (or ECS Fargate).
-> - **Synchronous Flow**: Query requests (`GET /api/movies`) route synchronously from `api-gateway` to the **`inventory-app`** microservice (port 8080), which queries the isolated **RDS PostgreSQL** `inventory_db` (port 5432).
-> - **Asynchronous Flow**: Transactional write requests (`POST /api/billing`) are published by `api-gateway` as messages to **Amazon MQ (RabbitMQ)** (AMQP port 5672 plaintext inside the VPC; 5671 AMQPS available). The **`billing-app`** worker consumes messages from the queue and records orders in the isolated **RDS PostgreSQL** `billing_db` (port 5432).
-> - **Observability**: Container logs and metrics stream continuously into **Amazon CloudWatch** via Fluent Bit and CloudWatch Container Insights.
-
-### Q6: How did you manage and optimize the cost of your AWS solution?
-> **Answer**:
-> - **Right-Sizing**: Used `t3.micro` / `t3.small` compute nodes and `db.t4g.micro` Graviton ARM database instances.
-> - **Single NAT in Non-Prod**: Configured an optional `single_nat_gateway = true` flag for staging/dev environments, cutting continuous NAT Gateway hourly charges by 50%.
-> - **Auto-Scaling**: Configured minimum pod/task replicas to 1, scaling to 3 only during traffic spikes (60% CPU threshold).
-> - **Proactive Billing Guardrails**: Deployed **AWS Budgets** (`aws_budgets_budget.monthly`) with 80% actual and 100% forecasted alerts, paired with CloudWatch `EstimatedCharges` alarms targeting the SNS alert topic.
-> - **Automated Teardown**: Maintained an automated `./scripts/destroy.sh` script to delete all ephemeral cloud resources and state immediately upon test completion.
-
-### Q7: What measures did you implement to ensure application security on AWS, and what AWS security best practices did you adhere to?
-> **Answer**:
-> - **VPC Subnet Isolation**: Three-tier architecture. Databases and queues are placed in private data subnets without internet routes.
-> - **Security Group Least Privilege**: Databases only accept connections on port 5432 from application pod security groups; no generic `0.0.0.0/0` ingress rules exist.
-> - **Managed Authentication**: AWS Cognito verifies user identity and issues signed JWT tokens checked at the perimeter.
-> - **Encryption**: EBS and RDS volumes encrypted with AWS KMS keys; TLS 1.3 at the edge only (ALB ACM certificate + API Gateway). Internal service traffic is plaintext within private subnets (see design principles); mTLS/service mesh is future work.
-
-### Q8: What AWS monitoring and logging tools did you utilize, and how did they assist in identifying and troubleshooting application issues?
-> **Answer**:
-> - **Amazon CloudWatch Metrics**: Tracks CPUUtilization, NetworkIn/Out, HTTPCode_Target_5XX_Count, and QueueDepth.
-> - **CloudWatch Logs**: Fluent Bit sidecars collect container stdout/stderr logs from all pods into structured log groups (`/aws/containerinsights/cloud-design/application`).
-> - **CloudWatch Alarms**: Configured alarms for CPU > 80%, database connections > 80%, ALB latency > 1s, and HTTP 5xx errors.
-> - **Operational Dashboard**: Centralized dashboard in `cloudwatch.tf` visualizing API Gateway request rates, ALB latency, database CPU/connections, and RabbitMQ queue depth in real time.
-
-### Q9: Can you describe the AWS auto-scaling policies you implemented and how they help your application accommodate varying workloads?
-> **Answer**:
-> - **Dual-Layer Auto Scaling**:
->   1. **Pod / Task Tier**: Kubernetes Horizontal Pod Autoscaler (HPA) and AWS ECS Application Auto Scaling scale `api-gateway` and `inventory-app` between 1 and 3 replicas with **Target Tracking set at 60% CPU utilization**. When CPU exceeds 60%, new replicas spawn within 60 seconds (scale-out cooldown). During low traffic, pods consolidate after 300 seconds (scale-in cooldown).
->   2. **Node Group Tier**: EC2 Auto Scaling Groups scale EKS worker nodes from 2 to 5 instances based on `ASGAverageCPUUtilization` target tracking at 60%.
-> - **Spike Decoupling**: Amazon MQ (RabbitMQ) absorbs sudden ingestion bursts for billing orders, decoupling request intake from processing capacity and preventing cascade failures.
-
-### Q10: How did you optimize Docker images for each microservice, and how did it influence build times and image sizes?
-> **Answer** (app services use multi-stage; data services use upstream single-stage images):
-> - **Multi-Stage Builds (3 app images)**: `api-gateway`, `inventory-app`, `billing-app` compile dependencies in a build stage and copy only required artifacts into the minimal runtime stage. `inventory-database`, `billing-database` (PostgreSQL) and `rabbitmq` are single-stage builds `FROM` upstream images.
-> - **Penultimate Stable Base**: Uses `alpine:3.23` or `debian:12-slim`, dropping image sizes from ~1GB down to ~80MB.
-> - **Layer Caching**: Copies `requirements.txt` / `package.json` before source code so dependency installation layers are cached across code changes.
-> - **Non-Root Execution**: Creates an unprivileged `appuser` (`UID 10001`) to eliminate container breakout risks.
-
-### Q11: If you had to redo this project, what modifications would you make to your approach or the technologies you used?
-> **Answer**:
-> - **Fully Serverless Event Architecture**: Replace long-running billing worker containers and Amazon MQ with AWS Lambda, Amazon EventBridge, and Amazon Aurora Serverless v2, reducing idle baseline computing costs to zero.
-> - **Service Mesh (AWS App Mesh / Istio)**: Implement mutual TLS (mTLS) with automatic certificate rotation and distributed tracing (AWS X-Ray) for microservice-to-microservice traffic.
-> - **GitOps Delivery Pipeline**: Implement ArgoCD or Flux inside EKS with AWS CodePipeline for declarative, audited, commit-triggered rollouts.
-> - **Multi-Region Disaster Recovery**: Configure Route 53 latency-based routing with Aurora Global Database to achieve cross-region active-active failover with RPO < 1s.
-
-### Q12: How can your AWS solution be expanded or altered to cater to future requirements like adding new microservices or migrating to a different cloud provider?
-> **Answer**:
-> - **Adding Microservices**:
->   - **IaC**: Add new ECS task definitions or K8s deployments, declare security group rules for allowed ingress/egress, and bind new routes to the API Gateway HTTP API.
->   - **Decoupled Architecture**: New services attach to RabbitMQ exchanges or register via Kubernetes CoreDNS / AWS Cloud Map without impacting existing services.
-> - **Multi-Cloud Portability**:
->   - Containers adhere strictly to OCI standards (multi-stage Dockerfiles) and deploy using standard Kubernetes manifests (`manifests/*.yaml`).
->   - IaC is written in modular Terraform; migrating to GCP or Azure involves mapping AWS resources to GKE/AKS, Cloud SQL/Azure PostgreSQL, and PubSub/Service Bus while retaining identical container images and application business logic.
-
-### Q13: What challenges did you face during the project and how did you address them?
-> **Answer**:
-> - **Challenge 1: Strict Database Isolation vs Container Dependency Provisioning**:
->   - *Problem*: Restricting databases to private subnets without public IPs made initial schema migrations and connectivity verification tricky.
->   - *Solution*: Utilized Kubernetes Job containers and EKS private node execution within the application subnets to run schema setups via VPC internal routing.
-> - **Challenge 2: Cross-Resource Security Group Dependency Cycles**:
->   - *Problem*: In Terraform, creating mutual ingress/egress rules directly inside `aws_security_group` blocks resulted in cycle errors between ALB and App security groups.
->   - *Solution*: Decoupled security groups from their rules using standalone `aws_security_group_rule` resources.
-> - **Challenge 3: Authentication Perimeter vs Service Decoupling**:
->   - *Problem*: Enforcing auth within each microservice leads to redundant validation code and token parsing overhead.
->   - *Solution*: Shifted token verification to AWS API Gateway HTTP API using native Cognito JWT Authorizers at the edge.
-
-### Q14: How did you ensure your documentation's clarity and completeness, and what measures did you take to make it easily understandable and maintainable?
-> **Answer**:
-> - **Visual Architecture & C4 Topologies**: Integrated clear Mermaid diagrams illustrating network zones, security boundaries, and data flow.
-> - **Automated Scripted Verification**: Built `./scripts/test_cloud.sh` to mechanically validate that all 48+ IaC deliverables, security rules, manifests, Dockerfiles, and scripts are present and error-free.
-> - **Actionable Teardown & Deployment Manuals**: Documented explicit commands for deployment and cleanup (`deploy.sh`, `destroy.sh`) to guarantee zero ambiguity for auditors and engineers.
-> - **Comprehensive Stakeholder Coverage**: Mapped direct, rigorous answers to every roleplay question defined in `audit.md`.
+> **The Secret trap.** `kubectl apply -k manifests/` includes `secrets.yaml`, so
+> running it *after* you have created a real Secret with `--from-literal` silently
+> reverts the live Secret to the `REPLACE_ME_*` placeholders — kubectl prints
+> `secret/cloud-design-secrets configured` and nothing else, and the symptom is
+> `FATAL: password authentication failed for user "REPLACE_ME_BILLING_USER"` while
+> both databases still report themselves perfectly healthy. Correct order:
+> apply the workloads first, create the Secret from outside the repo, then
+> `kubectl -n cloud-design rollout restart` (env values are resolved at container
+> start, not at Secret change).
 
 ---
 
-## 7. Deliverables Checklist
+## Configuration
 
-- [x] Comprehensive `README.md` with architecture diagrams and design rationale.
-- [x] Complete Infrastructure as Code in `terraform/` (VPC, Security Groups, IAM, RDS, Amazon MQ, ALB, Cognito, API Gateway, CloudWatch, Auto Scaling).
-- [x] Optimized `Dockerfiles/`: 3 multi-stage app images + 3 single-stage data images (see Q10).
-- [x] Kubernetes `manifests/` and ECS `ecs-tasks/` task definitions.
-- [x] Automation scripts in `scripts/` (`deploy.sh`, `destroy.sh`, `test_cloud.sh`).
-- [x] Verified with 48/48 checks passing in `./scripts/test_cloud.sh`.
+### Local: `.env` and `.env.example`
+
+`.env.example` is the documented template; `cp .env.example .env` (or `make env`).
+The values shipped are **development placeholders only** — deliberately weak and
+public so nobody can mistake them for credentials. `.env` is git-ignored and is
+never committed.
+
+`docker-compose.yml` reads these **8** with `${VAR:?…}`, so a missing one aborts
+compose with a named error:
+
+| Variable | Consumer | Purpose |
+|---|---|---|
+| `INVENTORY_DB_USER` | inventory-database, inventory-app | application role, not `postgres` |
+| `INVENTORY_DB_PASSWORD` | same | |
+| `INVENTORY_DB_NAME` | same | `inventory_db` |
+| `BILLING_DB_USER` | billing-database, billing-app | application role |
+| `BILLING_DB_PASSWORD` | same | |
+| `BILLING_DB_NAME` | same | `billing_db` |
+| `RABBITMQ_USER` | rabbit-queue, api-gateway-app, billing-app | **must not be `guest`** — the entrypoint deletes `guest` |
+| `RABBITMQ_PASSWORD` | same | |
+
+Optional overrides (safe defaults live in the code):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RABBITMQ_QUEUE` | `billing_queue` | queue name |
+| `DB_CONNECT_MAX_RETRIES` / `DB_CONNECT_RETRY_DELAY` | `180` / `2` | bounded DB-connect budget (360 s) |
+| `REDELIVERY_BACKOFF_SECONDS` | `5` | throttle before nack+requeue |
+| `RABBITMQ_SOCKET_TIMEOUT` / `RABBITMQ_PUBLISH_MAX_RETRIES` / `RABBITMQ_RETRY_DELAY` | `3` / `2` / `1` | bounded publish budget so a dead broker fails fast |
+| `RABBITMQ_TLS` | unset | force TLS on/off regardless of port |
+| `RABBITMQ_CA_FILE` | unset | PEM bundle for a private/self-signed broker CA; a **container-visible** path. Replaces the system trust store |
+| `RABBITMQ_TLS_VERIFY` | unset (verify ON) | insecure opt-out; local throwaway brokers only |
+
+Changing a `*_PASSWORD` takes effect on the next start without dropping the
+volume: `init-db.sh` reconciles the role and `entrypoint.sh` calls
+`change_password`.
+
+### AWS: `terraform.tfvars`
+
+`cp terraform/terraform.tfvars.example terraform/terraform.tfvars`. Three settings
+are marked `!!` and **MUST** be reviewed before the stack is demonstrated to
+anyone:
+
+| Setting | Default | Why you must change it |
+|---|---|---|
+| **`enable_acm_certificate`** (+ `alb_domain_name`, `alb_hosted_zone_id`) | `false` | With `false` the ALB gets a **self-signed** certificate. Browsers warn, and the API Gateway VPC Link integration validates the chain. Set `true` with a Route 53 domain you already own |
+| **`alarm_email`** | `""` | `""` means the topic and alarms exist with **no** email subscriber. Placeholder domains (`example.com`, `test.*`, `invalid.*`) are rejected at plan time. Any address must be **confirmed** before it receives anything |
+| **`allowed_origins`** | `["https://app.example.com"]` | CORS allow-list. A placeholder blocks every browser request from the real frontend |
+
+Also worth reviewing, not mandatory: `monthly_budget_limit` (default **300**),
+`single_nat_gateway` (default `false` for AZ-independent egress), and
+`enable_demo_cognito_user` (default `true` so `initiate-auth` works immediately —
+set `false` outside a demo, since the demo password lives in Terraform state
+either way).
+
+### Environment variable names across the three environments
+
+The names are the same in `.env`, `manifests/configmap.yaml` +
+`manifests/secrets.yaml`, and the ECS task definitions, which is what lets one
+application image run unchanged in all three.
+
+| Name | Where it is defined | Read by |
+|---|---|---|
+| `APP_PORT` | **per workload**, not the shared ConfigMap | `*/server.py` — 3000 gateway, 8080 the other two |
+| `INVENTORY_APP_HOST` / `INVENTORY_APP_PORT` | ConfigMap | `api-gateway/app/proxy.py:12-13` |
+| `INVENTORY_DB_HOST` / `_PORT` / `_NAME` | ConfigMap | `inventory-app/app/__init__.py:54-56` |
+| `INVENTORY_DB_USER` / `_PASSWORD` | **Secret** | `inventory-app/app/__init__.py:52-53` |
+| `BILLING_DB_HOST` / `_PORT` / `_NAME` | ConfigMap | `billing-app/app/__init__.py:53-55` |
+| `BILLING_DB_USER` / `_PASSWORD` | **Secret** | `billing-app/app/__init__.py:51-52` |
+| `RABBITMQ_HOST` / `_PORT` / `_QUEUE` | ConfigMap | `queue_sender.py:245-249`, `consume_queue.py:256-260` |
+| `RABBITMQ_USER` / `_PASSWORD` | **Secret** | both, via `_require_env()` which raises rather than defaulting |
+| `DB_CONNECT_MAX_RETRIES` / `DB_CONNECT_RETRY_DELAY` | code default / `.env` | both apps' reconnect loop |
+| `RABBITMQ_TLS` / `_CA_FILE` / `_TLS_VERIFY` | `.env` / ECS (port 5671 implies TLS) | both AMQP clients |
+| `REDELIVERY_BACKOFF_SECONDS` | `.env` | `consume_queue.py:237` |
+
+**`APP_PORT` is deliberately absent from `configmap.yaml`.** `envFrom` imports
+*every* key into *every* container with no per-key selection, so a single
+`APP_PORT: "3000"` there made `inventory-app` and `billing-app` bind 3000 while
+their `containerPort`, `targetPort` and both probes stayed on 8080 — the pods
+never went Ready, never joined their Service endpoints, the gateway returned 502,
+and the liveness probe SIGKILLed them. Each workload now declares its own `env:`
+entry, which takes precedence over anything `envFrom` would supply. The full
+post-mortem is in `manifests/configmap.yaml:14-29`.
+
+---
+
+## Usage
+
+### Obtain a JWT (AWS path)
+
+Fastest route, using the confidential demo client Terraform creates:
+
+```bash
+POOL=$(terraform -chdir=terraform output -raw cognito_user_pool_id)
+CID=$(terraform -chdir=terraform output -raw cognito_demo_client_id)
+# The demo client secret is NOT a Terraform output; read it back from Cognito.
+SECRET=$(aws cognito-idp describe-user-pool-client \
+  --user-pool-id "$POOL" --client-id "$CID" \
+  --query 'UserPoolClient.ClientSecret' --output text)
+EMAIL=$(terraform -chdir=terraform output -raw cognito_demo_user_email)
+PASS=$(terraform -chdir=terraform output -raw cognito_demo_user_password)
+
+AUTH=$(aws cognito-idp initiate-auth \
+  --auth-flow USER_PASSWORD_AUTH \
+  --auth-parameters USERNAME="$EMAIL",PASSWORD="$PASS" \
+  --client-id "$CID" --secret "$SECRET" \
+  --query AuthenticationResult.IdToken --output text)
+
+BASE=$(terraform -chdir=terraform output -raw app_base_url)   # https://…/api/movies
+```
+
+`cognito_demo_user_password` is a **sensitive** output, so `terraform output -raw`
+prints it (add `-raw`, not `-json`, or you get the redaction marker).
+
+Browser route: `terraform -chdir=terraform output cognito_hosted_ui_url` gives
+the hosted-UI login page, which returns the tokens to a registered callback URL
+(`https://localhost:3000/callback`).
+
+### Local: end-to-end through the load balancer
+
+```bash
+# 1. liveness of the edge - DB-independent on purpose
+curl -s http://localhost:3000/health
+# {"status":"healthy"}
+
+# 2. create a movie (gateway -> inventory-app -> inventory-database)
+curl -s -X POST http://localhost:3000/api/movies \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"README Demo","year":2026}'
+# e.g. {"description":"","id":5,"title":"README Demo"}   <- id is whatever is next
+
+# 3. read it back
+curl -s http://localhost:3000/api/movies
+# e.g. {"movies":[{"description":"","id":5,"title":"README Demo"}, ...]}
+
+# 4. queue an order (returns as soon as the broker confirms, NOT when the row lands)
+curl -s -X POST http://localhost:3000/api/billing \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"20","number_of_items":"2","total_amount":"49.99"}'
+# {"message":"{\"user_id\":\"20\",\"number_of_items\":\"2\",\"total_amount\":\"49.99\"} sent"}
+
+# 5. the consumer wrote the row (queried on billing-app directly: the gateway
+#    exposes only POST /api/billing)
+curl -s http://localhost:8082/orders
+# e.g. {"orders":[{"created_at":"...","id":11,"number_of_items":2,
+#                 "total_amount":49.99,"user_id":"20"}, ...]}
+```
+
+Or in one shot: `make test` — byte-compiles every source file, runs **18 unit
+tests** (9 in `inventory-app`, 9 in `billing-app`) and then a **6-step HTTP smoke
+test** through the load balancer. `make verify` adds the queue-depth check.
+
+`total_amount` comes back as `49.99`, never `49.989999`. Money is
+`NUMERIC(12,2)` in both the SQLAlchemy model (`srcs/billing-app/app/orders.py:14`)
+and the canonical SQL schema (`srcs/billing-database/init.sql:32`).
+
+### AWS: calling the protected routes
+
+```bash
+API_GW_URL=$(terraform -chdir=terraform output -raw api_gateway_invoke_url)
+
+# unauthenticated: succeeds by design (uptime monitor + ALB health check)
+curl -s "$API_GW_URL/health"
+
+# no token: 401 from the Cognito JWT authorizer
+curl -s -o /dev/null -w '%{http_code}\n' "$BASE"
+
+# with a valid token
+curl -s -H "Authorization: Bearer $AUTH" "$BASE"
+curl -s -X POST -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' \
+  -d '{"title":"AWS Demo","year":2026}' "$BASE"
+curl -s -X POST -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' \
+  -d '{"user_id":"20","number_of_items":"2","total_amount":"49.99"}' \
+  "${BASE%/api/movies}/api/billing"
+```
+
+### Reading the dashboard and the budget
+
+```bash
+aws cloudwatch get-dashboard --dashboard-name "$(terraform -chdir=terraform output -raw cloudwatch_dashboard_name)"
+aws cloudwatch describe-alarms --state-value ALARM
+aws cloudwatch get-metric-statistics --namespace AWS/AmazonMQ --metric-name MessageCount \
+  --dimensions Name=Broker,Value=cloud-design-prod-rabbitmq \
+  --start-time "$(date -u -d '1 hour ago' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" --period 60
+aws budgets describe-budget --budget-name "$(terraform -chdir=terraform output -raw budget_name)"
+aws sns list-topics
+```
+
+Useful reading order: dashboard widget 6 (ECS CPU) answers "did it scale?";
+widget 1 (API Gateway 4xx/5xx) answers "were requests rejected or failed?";
+widget 4 (queue depth) answers "is the consumer keeping up?".
+
+### Load test — procedure and measured result
+
+```bash
+# 200 GET /health requests, concurrency 20, one warm-up request per worker
+# so the numbers are not dominated by process start and TCP connect.
+python3 - <<'PY'
+import time, urllib.request
+from multiprocessing import Pool
+URL, N, C = "http://localhost:3000/health", 200, 20
+def worker(n):
+    try:
+        with urllib.request.urlopen(URL, timeout=10) as r: r.read()   # warm-up
+    except Exception: pass
+    out = []
+    for _ in range(n):
+        t0 = time.perf_counter()
+        with urllib.request.urlopen(URL, timeout=10) as r: r.read()
+        out.append((time.perf_counter() - t0) * 1000)
+    return out
+if __name__ == "__main__":
+    t0 = time.perf_counter()
+    with Pool(C) as p: lat = sorted(x for c in p.map(worker, [N//C]*C) for x in c)
+    wall = time.perf_counter() - t0
+    pct = lambda p: lat[max(0, min(len(lat)-1, int(round(p/100*len(lat)+0.5))-1))]
+    print(f"{len(lat)/wall:.1f} req/s  p50={pct(50):.2f}ms p95={pct(95):.2f}ms")
+PY
+
+# which replica served what (measured, not inferred)
+docker compose logs --no-log-prefix gateway-lb | grep -o 'upstream=[0-9.]*:3000' | sort | uniq -c
+```
+
+Five consecutive runs of the exact script above (p50/p95/p99 are client-side
+wall-clock per request; the last two columns come from the nginx access log for
+the same 1100 requests, warm-ups included):
+
+| Run | Throughput | client p50 | client p95 | client p99 | `upstream_response_time` p95 | Split |
+|---|---|---|---|---|---|---|
+| 1 | 327.3 req/s | 8.97 ms | 169.81 ms | 186.80 ms | — | — |
+| 2 | 424.1 req/s | 11.29 ms | 28.01 ms | 41.30 ms | — | — |
+| 3 | 362.6 req/s | 8.94 ms | 18.02 ms | 20.93 ms | — | — |
+| 4 | 460.2 req/s | 7.46 ms | 14.29 ms | 17.02 ms | — | — |
+| 5 | 462.8 req/s | 9.68 ms | 16.45 ms | 21.68 ms | — | — |
+| **all 1100 requests** | — | — | — | — | **15 ms** (p50 5 ms) | **561 / 539** |
+
+Every response was HTTP 200. Three things to read honestly out of this:
+
+- The absolute throughput **varies by ~40 % run to run** on a shared laptop
+  (327–463 req/s across five runs of the script above). Quote the range, never a
+  single number.
+- The client-side p95 is dominated by Python's own scheduling at concurrency 20,
+  which is why it is 10–20× the `upstream_response_time` p95 of **15 ms** — the
+  gateway container's own latency, aggregated over all 1100 requests.
+- The 561/539 split over 1100 requests is the load-balancing proof: `least_conn`
+  is distributing, not round-robin luck on two lucky requests.
+
+An earlier revision of this README quoted "412.8 req/s, p95 7.8 ms" from a
+different client. That figure was **not** reproducible here, so it has been
+replaced by the measurements above rather than repeated as a fact.
+
+Resident memory per container, `docker stats --no-stream`: gateway-lb
+**~10–12 MiB**, api-gateway **~30–34 MiB** each (×2), inventory-app **~48 MiB**,
+billing-app **~48–51 MiB**, inventory-database **~31–35 MiB**,
+billing-database **~24–27 MiB**, rabbit-queue **~144–149 MiB**. Ranges because
+these drift a few MiB between samples; the ordering (the broker dominates, the
+proxy is smallest) is the stable part.
+
+### Resilience drill — stop the consumer, keep taking orders
+
+```bash
+docker compose stop billing-app ; echo "exit=$?"     # exit=0  (graceful, not 137)
+docker compose exec rabbit-queue \
+  rabbitmqctl list_queues -p / name messages_ready messages_unacknowledged
+
+curl -s -X POST http://localhost:3000/api/billing -H 'Content-Type: application/json' \
+  -d '{"user_id":"readme-drill","number_of_items":"4","total_amount":"123.45"}'
+# 200 {"message":"… sent"}   <- the request path does not care that nobody is consuming
+
+docker compose exec rabbit-queue \
+  rabbitmqctl list_queues -p / name messages_ready messages_unacknowledged
+# billing_queue  1  0        <- order durably queued
+
+docker compose start billing-app
+# queue drained to 0 in 5 s; the order appears as row id 10, total_amount 123.45
+```
+
+`make consumer-drain` runs this whole sequence. The three results that matter:
+the consumer exits **0** rather than being SIGKILLed at 137; the order survives in
+the durable queue (`delivery_mode=Persistent`, `durable=True`); and it is
+persisted with exact decimal precision once the consumer returns.
+
+---
+
+## Deployment verification
+
+These are the commands the rubric asks an auditor to be shown
+(`docs/audit.md`, sections "Verify the deployment", "Evaluate the infrastructure
+setup", "Assess containerization and orchestration").
+
+```bash
+# --- are the microservices running, with no errors? (audit.md:62)
+docker ps
+docker compose ps
+docker compose logs --tail=50 inventory-app billing-app
+
+# --- is load balancing distributing traffic? (audit.md:66)
+docker compose logs --no-log-prefix gateway-lb | grep -o 'upstream=[0-9.]*:3000' | sort | uniq -c
+make lb-spread
+
+# --- Kubernetes path (audit.md:76)
+kubectl apply -k manifests/
+kubectl get all -n cloud-design
+kubectl describe deployment api-gateway      -n cloud-design
+kubectl describe pod -l app=inventory-app    -n cloud-design
+kubectl get networkpolicy                   -n cloud-design
+kubectl get hpa, pdb                        -n cloud-design
+
+# --- AWS path
+terraform -chdir=terraform plan
+
+CLUSTER=$(terraform -chdir=terraform output -raw ecs_cluster_name)
+# ecs_service_names is a map: {"api-gateway":"cloud-design-prod-api-gateway", ...}
+terraform -chdir=terraform output -json ecs_service_names
+GWSVC=$(terraform -chdir=terraform output -json ecs_service_names \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["api-gateway"])')
+
+aws ecs describe-services --cluster "$CLUSTER" --services "$GWSVC" \
+  --query 'services[].{desired:desiredCount,running:runningCount,lb:loadBalancers[0].targetGroupArn,deployments:deployments[].status}'
+aws ecs describe-task-definition --task-definition "$GWSVC" \
+  --query 'taskDefinition.containerDefinitions[].{name:name,image:image,ports:portMappings[].containerPort,env:environment[].name,secrets:secrets[].name,logDriver:logConfiguration.logDriver}'
+
+aws logs tail "/aws/microservices/cloud-design-prod/api-gateway" --since 10m
+aws elbv2 describe-target-health \
+  --target-group-arn "$(aws elbv2 describe-target-groups --names cloud-design-prod-apigw-tg \
+     --query 'TargetGroups[0].TargetGroupArn' --output text)"
+aws cloudwatch describe-alarms --state-value ALARM
+aws sns list-topics
+
+# --- the whole rubric, automatically, with real output
+bash scripts/run-audit-checks.sh
+bash scripts/test_cloud.sh
+```
+
+`scripts/run-audit-checks.sh` walks all 22 rubric items in `docs/audit.md`,
+executing the real command for each and printing its real stdout/stderr. It
+reports three verdicts, never two: `[PASS]`, `[FAIL]`, and `[INVALID]` — the
+last meaning "cannot be determined here", counted separately and **never** as a
+pass.
+
+Current real result on this machine: **PASS=173, FAIL=0, INVALID=4, NOTES=39**.
+Before this README was rewritten the same script reported **FAIL=2**, and both
+were documentation bugs found by the script itself: the README never mentioned
+`.env` even though `docker-compose.yml` reads eight credentials from it, and it
+instructed the broken `kubectl apply -f manifests/` form. Both are fixed above
+(and this section exists because a script caught them, not because someone
+re-read the prose).
+
+---
+
+## Cost management
+
+The five subsections below map one-to-one onto the five cost-management
+practices the brief asks for, so they keep the brief's numbering on purpose.
+
+### 1. Pricing model
+
+Everything is **pay-as-you-go**; there is no annual commitment and no idle
+capacity. Fargate bills per task-second (256 CPU / 512 MB per task = 0.25 vCPU /
+0.5 GB). `scripts/destroy.sh` exists because with PAYG, *stopping* is not free:
+an ALB costs ~$16/month whether or not it serves a byte, and an RDS instance bills
+until it is deleted.
+
+| Item | Size | ~Monthly (us-east-1, on-demand) |
+|---|---|---|
+| Amazon MQ `ACTIVE_STANDBY_MULTI_AZ` | `mq.t3.micro` ×2 | ~$79 |
+| RDS PostgreSQL Multi-AZ | `db.t4g.micro` ×2 + 20 GB gp3 | ~$53 |
+| NAT Gateways | ×2 (one per AZ) | ~$66 |
+| Application Load Balancer | 1 | ~$16 |
+| ECS Fargate | 4 tasks (1 + 1 + 2) | ~$37 |
+| KMS, ECR storage, logs, alarms | — | ~$9 |
+| **Steady state** | | **~$260/mo** |
+| **Peak** (gateway + inventory at max 3) | | **~$300/mo** |
+
+This table is the justification for `monthly_budget_limit = 300`: the 80 % actual
+notification then fires at $240 as a genuine early warning. The previous `$15`
+default was ~20× below the real run-rate, so its alarm fired every month.
+
+### 2. Monitoring usage and alerts
+
+- **AWS Budgets** (`cloud-design-prod-monthly-budget`, 300 USD): 80 % **actual**
+  and 100 % **forecasted** notifications to SNS and email.
+- **CloudWatch `EstimatedCharges` alarm** at the same 300 USD threshold, 6-hour
+  period.
+- **The SNS topic has a topic policy** so `budgets.amazonaws.com` and
+  `cloudwatch.amazonaws.com` can publish. Without it every notification is
+  silently dropped while the console shows healthy alarms — this was a real bug
+  in the previous revision.
+- AWS Billing Dashboard (console) for daily spend; the budget covers the monthly
+  envelope.
+
+### 3. Cleaning up
+
+```bash
+./scripts/destroy.sh            # kubectl delete -k manifests/ + terraform destroy -auto-approve
+./scripts/destroy.sh --kms      # ... and schedule KMS key deletion (see below)
+make down                       # local: stop and remove containers, keep volumes
+make down-v                     # local: also delete the named data volumes
+```
+
+`destroy.sh` makes **no cost claim it cannot verify**. It reports per resource
+class whether teardown actually happened and names the charges that **survive**
+`terraform destroy`:
+
+| Survives | Why | How to stop it |
+|---|---|---|
+| KMS keys | `PendingDeletion`, still billed, for the `deletion_window_in_days = 7` window | `./scripts/destroy.sh --kms`, or `aws kms schedule-key-deletion` |
+| Manual RDS snapshots | both instances use `skip_final_snapshot = true`, so Terraform takes none — but snapshots you created by hand are not deleted | `aws rds delete-db-snapshot --db-snapshot-identifier <id>` |
+| CloudWatch | log groups and alarms are destroyed, but the elapsed part of the month is still charged | wait for the month to roll over |
+| ECR | **not** a survivor here: the repositories use `force_delete = true` plus the 5-image lifecycle policy | verify with `aws ecr describe-repositories` |
+
+This is a deliberate change from the previous revision, which printed "Zero idle
+cloud costs" unconditionally — including when Terraform was not installed and
+nothing had been destroyed.
+
+### 4. Optimised resource allocation
+
+| Lever | Default | Effect if you change it |
+|---|---|---|
+| `single_nat_gateway` | **`false`** | `true` saves ~**$33/mo** but every private task loses its second NAT: an AZ failure or NAT maintenance window takes the whole application down. Only for a short-lived sandbox |
+| `ecs_use_fargate_spot` | **`false`** | `true` is up to ~70 % cheaper but tasks can be reclaimed with 2 minutes' warning. Would need `desired_count ≥ 2` on the request path to survive an interruption |
+| `db_instance_class` | `db.t4g.micro` | Graviton ARM; `db.t4g.small` is the next step if the CPU alarm fires |
+| `log_retention_days` | `30` | logs are a real line item; 7 is defensible for a demo |
+| `monthly_budget_limit` | `300` | validation rejects < 50 |
+
+### 5. Cost-management tooling used
+
+AWS Budgets, the CloudWatch `EstimatedCharges` metric, the CloudWatch dashboard,
+SNS topic + email subscription, the 11 alarms, `terraform output
+monthly_budget_limit_usd`, and `scripts/destroy.sh`. Not used, and honestly
+labelled as future work: Cost and Usage Report / CUR 2.0 into Athena, Compute
+Optimizer, Savings Plans recommendations.
+
+---
+
+## Challenges faced and what I would change
+
+1. **A shared ConfigMap key broke two services at once.** `APP_PORT: "3000"` in
+   `configmap.yaml` was imported by all three apps through `envFrom`, which has
+   no per-key selection, so `inventory-app` and `billing-app` bound port 3000
+   while their `containerPort`, `targetPort` and probes stayed on 8080. The pods
+   never went Ready, never joined their Service endpoints, the gateway returned
+   502, and the liveness probe SIGKILLed them — a `CrashLoopBackOff` that looks
+   like a database problem. Fix: each workload declares its own `env:` entry, and
+   the whole post-mortem is written into `manifests/configmap.yaml:14-29` so it
+   cannot be reintroduced.
+
+2. **An unconditional `basic_ack` silently discarded paid orders.** The consumer
+   acknowledged before it knew whether the insert had committed. On a database
+   blip, an order was destroyed with no error anywhere and a `200` already sent
+   to the customer. Fix: the ack/nack policy is now explicit and documented at
+   `srcs/billing-app/app/consume_queue.py:299-311` — ack only after commit, nack
+   + requeue on database failure, and a top-level `except` that nacks anything
+   escaping the handler. A DB outage now produces a growing queue instead of lost
+   revenue, which the drill in the Usage section demonstrates.
+
+3. **Money stored as a float.** `total_amount` was a float column, so totals
+   drifted by IEEE-754 rounding. Fix: `NUMERIC(12, 2)` in both the SQLAlchemy
+   model (`srcs/billing-app/app/orders.py:14`) and the canonical schema
+   (`srcs/billing-database/init.sql:32`), with `Decimal` coercion in the
+   validation helper and an explicit unit test
+   (`test_total_amount_stays_exact_decimal`). Both files carry a comment saying
+   they must stay in sync, because `create_all()` finds an existing table and
+   will happily keep money in a float column forever.
+
+4. **Passwords leaking through `/proc/<pid>/cmdline`.** `psql -v db_password=…`
+   and `rabbitmqctl add_user "$user" "$pass"` expose the secret to every process
+   in the container for the lifetime of the command. Fix: `init-db.sh:38-58`
+   writes the password into a `0600` file read by `psql -f` and deletes it
+   immediately; `entrypoint.sh:82,85` pipes the password on **stdin** so
+   `rabbitmqctl` prompts for it.
+
+5. **Liveness probes killing pods during the database retry loop.** With `/health`
+   wired to the database, a transient DB outage made the orchestrator SIGKILL the
+   container (exit 137) before the app's own reconnect loop could recover — the
+   self-healing logic was destroyed by the health check meant to enable it. Fix:
+   `/health` answers "is this process alive?" and touches nothing external;
+   `/ready` answers "should this receive traffic?", checks the database, and
+   returns 503 (`srcs/inventory-app/app/__init__.py:73-89`,
+   `srcs/billing-app/app/__init__.py:91-115`). The gateway's `/health` is
+   deliberately DB-independent for the same reason.
+
+6. **A cold PostgreSQL start outlasted the connect budget.** A fresh cluster was
+   measured needing ~145 s before it accepted connections, while the app budgeted
+   60 s — so the app exited and restarted twice. Fix: `DB_CONNECT_MAX_RETRIES`
+   defaults to 180 × 2 s = 360 s, and every workload has a `startupProbe` with
+   `failureThreshold: 60 × periodSeconds: 3` (a 180 s budget) that suspends
+   liveness and readiness until it succeeds.
+
+7. **AMQPS vs plaintext.** `terraform/amazon_mq.tf` strips the scheme and port off
+   the AWS endpoint, so on ECS `RABBITMQ_HOST` is a bare hostname and
+   `RABBITMQ_PORT = 5671` is the *only* remaining signal that TLS is required. A
+   plaintext publisher against a TLS-only broker fails every publish; a plaintext
+   consumer reconnects forever. Worse, the previous revision opened the broker's
+   5671 ingress rule but never the matching **egress** rule on the app security
+   group, so AMQPS was unreachable however the client was configured. Fix: both
+   the egress and ingress rules, and one shared detection rule implemented
+   identically in the publisher and the consumer
+   (`srcs/api-gateway-app/app/queue_sender.py:26-31`), so the two can never
+   disagree.
+
+8. **`aws_iam_openid_connect_provider` collided with the EKS one.** Declaring the
+   OIDC provider by hand while an EKS cluster exists in the same account fails,
+   because EKS auto-creates a provider with the same URL and the Terraform
+   resource tries to take ownership of it. This was one of the signals that the
+   EKS path was dead weight.
+
+9. **Removing the dual orchestrator.** The previous revision ran EKS *and* ECS,
+   with two load balancers and two data tiers, an EKS control plane costing
+   ~$73/month with no workloads on it, and `endpoint_public_access = false` with no
+   bastion — so `kubectl`, which the rubric explicitly asks to be demonstrated,
+   could never reach the cluster. The EKS path is gone; ECS on Fargate is the only
+   orchestrator Terraform provisions. Reasoning kept at
+   `terraform/orchestration.tf:1-16`.
+
+10. **`terraform plan` in the wrong region.** `availability_zones` defaulted to a
+    hard-coded `["us-east-1a","us-east-1b"]` while `aws_region` was a variable,
+    so changing region failed at apply with "invalid availability zone". Fix:
+    empty list means "discover the first two zones offered to this account"
+    (`vpc.tf:15`), with a plan-time `precondition` if the AZ list is shorter than
+    the subnet list.
+
+### What I would change next
+
+- **Close the ALB path.** The ALB is internet-facing and its `:443` listener
+  forwards `/api/*` with **no** authorizer, because the JWT authorizer lives on
+  API Gateway only. See [Known limitations](#known-limitations--verified-vs-not).
+- **One Secret per workload.** Today the three apps load a single Secret through
+  `envFrom`, so `inventory-app` holds the RabbitMQ and billing credentials and vice
+  versa. Recorded as a known limitation in `manifests/secrets.yaml:93-102`.
+- **`?sslmode=require`** on the application DSNs so `rds.force_ssl = 1` is
+  explicit at the client instead of implied by a libpq default.
+- **A CI pipeline** (GitHub Actions → ECR → ECS rolling deploy) so image pushes are
+  not a manual step, plus **Aurora PostgreSQL Serverless v2** instead of two
+  `db.t4g.micro` instances when the cost of standing by a standby matters more
+  than the simplicity of Multi-AZ.
+- **WAF and CloudFront** in front of API Gateway — the highest-value missing
+  control, and the natural next layer after a JWT authorizer.
+
+---
+
+## Bonus
+
+Claimed against `docs/readme.md`'s bonus list. Each item says exactly what exists.
+
+| Bonus item | Status | Evidence |
+|---|---|---|
+| **Use your own `crud-master` / `play-with-containers` / `orchestrator` solutions** | **Done** | The application sources in `srcs/` are that lineage (Flask blueprints, the proxy pattern, the queue-backed billing worker, the `orchestrator` Kubernetes manifests). Every file carries the reasoning for its own design decisions |
+| **Alerting** | **Done** | 11 CloudWatch alarms → SNS topic with a topic policy → email; AWS Budgets at 80 % actual / 100 % forecast |
+| **AWS Inspector for vulnerability scanning** | **Done** | `terraform/inspector2.tf`: Inspector v2 enabler for ECR + a CRITICAL/HIGH filter with `action = "NONE"` (reported, not suppressed) |
+| **ECR with scan-on-push** | **Done** | `terraform/ecr.tf`: 3 repos, `scan_on_push = true`, AES256, lifecycle policy keeping the last 5 images, and an explicit account-local repository policy |
+| **AWS Cloud Map service discovery** | **Done** | `terraform/service_discovery.tf`: private DNS namespace, `MULTIVALUE` routing, `health_check_custom_config`, registered by all three ECS services. One ALB, **no second load balancer** for east–west |
+| **Reusable audit automation** | **Done** | `scripts/run-audit-checks.sh` walks all 22 rubric items with real commands and reports PASS / FAIL / **INVALID** separately |
+| **A real load balancer in the demonstrable path** | **Done** | nginx `least_conn` in front of 2 `api-gateway-app` replicas, with `$upstream_addr` in the access log so the **561 / 539** distribution over 1100 requests is *measured* rather than asserted. Same algorithm family as the ALB target group |
+| **Retained, k3d-verified Kubernetes manifests** | **Done** | `manifests/` — 29 objects rendered by `kubectl kustomize`, applied to a live k3d cluster: 8 NetworkPolicies, 3 HPAs, 3 PDBs, topology spread, `preStop` drains, 3-tier split probes |
+| **Function as a Service (FaaS)** | **NOT implemented** | No `aws_lambda_function`. Future work |
+| **Content Delivery Network (CDN)** | **NOT implemented** | No `aws_cloudfront_distribution`. Future work |
+| **AWS WAF** | **NOT implemented** | No `aws_wafv2_*`. Future work |
+
+---
+
+## Submission checklist and teardown
+
+- [x] `README.md` — architecture diagrams, component descriptions, design rationale, prerequisites, setup, configuration, usage, verification
+- [x] `srcs/` — application source for all six components, with tests
+- [x] `terraform/` — 18 `.tf` files, 129 `resource` blocks (122 `aws_*`), 28 variables, 38 outputs, 6 `data` blocks, 0 modules
+- [x] `docker-compose.yml`, `Makefile`, `.env.example`, `.dockerignore`, `.gitignore`
+- [x] `manifests/` — 29 Kubernetes objects including `kustomization.yaml`
+- [x] `ecs-tasks/` — 6 standalone task-definition documents with placeholder ARNs (the authoritative ones are in `terraform/ecs_services.tf`)
+- [x] `scripts/` — `build_push.sh`, `deploy.sh`, `deploy-k3d.sh`, `destroy.sh`, `test_cloud.sh`, `run-audit-checks.sh`, `step_by_step_audit.py`
+- [x] `docs/` — the brief (`readme.md`), the rubric (`audit.md`) and the roleplay defence guide (`AUDIT_GUIDE.md`)
+
+**Teardown / cost protection.** Run this immediately after the audit:
+
+```bash
+./scripts/destroy.sh          # AWS: removes every Terraform-managed resource
+make down-v                   # local: removes containers AND the data volumes
+```
+
+KMS keys survive `terraform destroy` in `PendingDeletion` for the 7-day
+`deletion_window_in_days` set on the key, and keep billing until then;
+`./scripts/destroy.sh --kms` cancels that window and the script prints the exact
+`aws kms schedule-key-deletion` command either way. Nothing in this project runs
+continuously once the containers are stopped — there is no node fleet and no
+always-on worker to forget about.
+
+---
+
+## Known limitations / verified vs. not
+
+Stated first, because the fastest way to lose an auditor's trust is to let them
+find a gap you did not mention.
+
+### Verified live, on this machine, today
+
+| Claim | How it was verified |
+|---|---|
+| 7 services / 8 containers, all healthy | `docker compose ps`, `docker ps` |
+| End-to-end HTTP + async billing path | `make test` — 18 unit tests (9 + 9) + 6-step smoke through the load balancer; the row it writes comes back with `total_amount` `49.99`, and the resilience drill below writes `123.45` |
+| Graceful consumer shutdown | `docker compose stop billing-app` → **exit 0** (not 137) |
+| Order survives a consumer outage | `messages_ready = 1` while stopped, drained to 0 in **5 s** after restart |
+| Load balancing distribution | **561 / 539** over 1100 requests, read from the nginx access log |
+| Throughput | 327.3 / 424.1 / 362.6 / 460.2 / 462.8 req/s at concurrency 20 over five runs, every response HTTP 200; gateway p95 **15 ms** |
+| Image sizes | `docker images` — 108 / 152 / 154 MB app, 423 MB ×2 DB, 275 MB broker |
+| DB images are the upstream base | `docker history` — the Dockerfile adds 152 kB (`apk add su-exec bash`) + 24.6 kB (`init-db.sh`) + 20.5 kB (`init.sql`) = **197.1 kB** on a 423.19 MB `postgres:17-alpine` base, i.e. 0.05 %. **No size-reduction percentage is claimed for these images** — they are the official image plus three files |
+| Warm rebuild | 2.95 s (api-gateway), 1.69 s (inventory), 1.92 s (billing) with the layer cache warm |
+| Manifests render and apply | `kubectl kustomize manifests/` → 29 objects; applied to a live k3d cluster |
+| Static suite | `bash scripts/test_cloud.sh` → **50 PASS / 0 FAIL / 3 WARN** |
+| Rubric suite | `bash scripts/run-audit-checks.sh` → **PASS=173, FAIL=0, INVALID=4, NOTES=39** |
+| AMQPS behaviour | correct CA accepted; wrong CA rejected; wrong hostname rejected; plaintext client against a TLS listener refused |
+
+### Four verdicts that are INVALID, not PASS
+
+`scripts/run-audit-checks.sh` reports these as `[INVALID]` and never as a pass,
+because `aws` and `terraform` are **not installed in this environment** and no API
+Gateway is deployed:
+
+1. **`terraform fmt -check`** — cannot run; the HCL formatting verdict is
+   **unknown**, not "clean".
+2. **`terraform validate`** — cannot run; the HCL *semantic* verdict is
+   **unknown**. All Terraform evidence in this repo is static text analysis.
+3. **The credential-less request rejection test at API Gateway** — proving a
+   `401` requires a deployed endpoint. What *can* be proven locally is the static
+   fact that `authorizer_id` and `authorization_type = "JWT"` are set on all four
+   `/api/*` routes. No live 401 is claimed.
+4. **Live AWS resource inspection generally** — no `describe-*` call was executed,
+   so nothing in this README about an existing deployed stack is asserted as
+   observed. Every AWS statement is "Terraform declares …", never "the console
+   shows …".
+
+Treating an unrunnable check as a pass is the failure mode this distinction
+exists to prevent.
+
+### Real gaps in the solution
+
+- **The ALB path is unauthenticated.** `alb.tf` sets `internal = false` and the
+  ALB security group allows `0.0.0.0/0` on `:443`; the `:443` listener forwards
+  `/api/*` to `api-gateway`. The Cognito JWT authorizer is attached at **API
+  Gateway only**, so a request that skips API Gateway and addresses the ALB
+  directly reaches the application without a token. `terraform output
+  app_base_url_via_alb` documents exactly this. Fix: restrict the ALB `:443`
+  ingress to the VPC Link security group and keep the public path on API Gateway.
+- **One Secret for three apps** — `envFrom` gives every app every credential
+  (recorded in `manifests/secrets.yaml:93-102`).
+- **`sslmode` is not set client-side**, so TLS to RDS relies on libpq's
+  `prefer` default meeting a `force_ssl = 1` server.
+- **No mTLS between services.** API Gateway → ALB is TLS; ALB → `api-gateway`
+  (`:3000`) and `api-gateway` → `inventory-app` (`:8080`) are plaintext HTTP inside
+  private subnets, isolated by security groups only. A service mesh is future work.
+- **`manifests/ingress.yaml` fails silently without its prerequisites.** It needs
+  the AWS Load Balancer Controller (with an `IngressClass` named exactly `alb`)
+  and an ACM certificate ARN. Measured on a live k3d cluster: `kubectl apply`
+  **succeeds**, no event is emitted, and `status.loadBalancer.ingress` stays empty
+  forever. Check for the controller before concluding the manifests are wrong.
+- **`terraform.tfstate` is local and unprotected.** No S3 backend and no state
+  locking; the backend block is present but commented out at `main.tf:19-26`.
+- **No CI/CD.** Image push and deploy are manual.
+- **`ecs-tasks/*.json` are placeholders** (`123456789012`) and are not what
+  Terraform applies.
+- **RDS is 16.3 while the local images are PostgreSQL 17.** Intentional and
+  documented above, but it is a divergence a reviewer should know about.
+
+---
+
+## Documentation and audit tooling
+
+| Tool | What it does | Live result |
+|---|---|---|
+| `scripts/run-audit-checks.sh` | Walks all 22 rubric items in `docs/audit.md`, runs the real command for each, prints real stdout/stderr, and grades PASS / FAIL / **INVALID** / NOTE. Never hides a command | PASS=173, FAIL=0, INVALID=4, NOTES=39 |
+| `scripts/test_cloud.sh` | Static-only suite: reads files, parses manifests, grades Dockerfiles / Terraform / manifests / scripts. Deliberately separate from the live suite so a reviewer can tell reading-based proof from running-based proof | 50 PASS / 0 FAIL / 3 WARN |
+| `scripts/step_by_step_audit.py` | Sends the literal rubric commands to a terminal pane one at a time, so the examiner watches each command typed and its real output. `--list`, `--dry-run`, `--only <section>`, `--section`, `--pane` | — |
+| `scripts/build_push.sh` | Builds all six images, verifies each one exists, optionally pushes to ECR with `PUSH=1`, prints the real size table | — |
+| `scripts/deploy.sh` | AWS path: `sts get-caller-identity` → build+push → `init`/`validate`/`plan`/`apply` → `kubectl apply -k manifests/` → rollout waits | — |
+| `scripts/deploy-k3d.sh` | Local k3d path: creates the cluster with `metrics-server`, builds, `k3d image import`, applies the manifests, waits for rollouts | — |
+| `scripts/destroy.sh` | Teardown that reports per resource class whether it actually happened, and names the charges that survive | — |
+| `Makefile` | `make help` lists every target: `up`, `ps`, `logs`, `images`, `test`, `verify`, `lb-spread`, `consumer-drain`, `queue-drain`, `down`, `down-v` | — |
+| `docs/AUDIT_GUIDE.md` | Full roleplay defence: prepared answers to every stakeholder question, the five-pillar design review, and a per-question evidence index. Referenced by section title only here — read it for the answers themselves | — |
