@@ -83,6 +83,13 @@ resource "aws_iam_policy" "ecs_secrets_access" {
         ]
       },
       {
+        # FIX: needed by the MQ credentials secret as well, not only the two DB
+        # secrets. amazon_mq.tf now sets kms_key_id on aws_secretsmanager_secret
+        # .mq_credentials so all three share this one CMK, and a CMK-encrypted
+        # secret cannot be read by the execution role without kms:Decrypt on that
+        # key - without this statement the tasks would fail to launch with
+        # ResourceInitializationError. The grant is unchanged because the key
+        # itself was already the one all three secrets use.
         Effect   = "Allow"
         Action   = ["kms:Decrypt"]
         Resource = [aws_kms_key.rds.arn]

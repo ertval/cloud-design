@@ -2,10 +2,23 @@
 # Managed RabbitMQ Broker: Amazon MQ (Private Subnet)
 # ------------------------------------------------------------------------------
 
+# Broker credential.
+# FIX: `override_special` used to contain "=" and ":", which Amazon MQ rejects.
+# CreateBroker documents the password as "must not contain commas, colons, or
+# equal signs (,:=)" and CloudFormation encodes that as Pattern ^[^,:=]+$ for
+# AWS::AmazonMQ::Broker User.Password. random_password draws uniformly from the
+# combined alphabet with no floor on specials, so roughly 45% of generated values
+# contained a ":" or "=" and the broker simply refused to be created - and because
+# the result lives in Terraform state, every retry reproduced the SAME bad
+# password. Both characters are dropped below.
+# min_special = 1 so the generated password always exercises the special-character
+# path instead of relying on the 56% of draws that happen to avoid it; all 18
+# characters left in the alphabet satisfy CreateBroker.
 resource "random_password" "mq_admin" {
   length           = 24
   special          = true
-  override_special = "!#$%&*()-_=+[]{}<>:?"
+  override_special = "!#$%&*()-_+[]{}<>?"
+  min_special      = 1
 }
 
 locals {
@@ -22,6 +35,17 @@ locals {
 
 resource "aws_secretsmanager_secret" "mq_credentials" {
   name                    = "${local.name_prefix}-amazon-mq-credentials"
+  # FIX: this secret was the only one of the three with no CMK, so the broker
+  # admin password sat under the AWS-managed aws/secretsmanager key while the
+  # documentation claimed every credential was encrypted with the project's own
+  # key. It is now encrypted with the same key as the two RDS secrets.
+  # THE ORDERING TRAP THIS ALSO REMOVES: attaching a CMK to a secret that ECS
+  # tasks already read requires the task EXECUTION role to hold kms:Decrypt on
+  # that key. iam.tf already grants it (aws_iam_policy.ecs_secrets_access,
+  # aws_kms_key.rds), so the secret rotates in place. Adding kms_key_id later
+  # without that grant would make every task fail to launch on the next deploy
+  # with an opaque ResourceInitializationError and no Terraform-side signal.
+  kms_key_id              = aws_kms_key.rds.arn
   recovery_window_in_days = 0
 
   tags = local.common_tags

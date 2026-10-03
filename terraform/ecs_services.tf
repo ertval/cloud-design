@@ -7,7 +7,9 @@
 # Three services, matching the three applications in srcs/:
 #   api-gateway  : internet-facing, behind the ALB target group (:3000)
 #   inventory-app: private, discovered by api-gateway over Cloud Map (:8080)
-#   billing-app  : private, the ONLY RabbitMQ consumer -> desired_count 2
+#   billing-app  : private, the ONLY RabbitMQ consumer -> desired_count 2, and
+#                  additionally behind a second ALB target group (:8080) so
+#                  GET /api/billing/orders is reachable
 # ------------------------------------------------------------------------------
 
 locals {
@@ -63,10 +65,18 @@ resource "aws_ecs_task_definition" "api_gateway" {
         # aws_security_group_rule.app_egress_to_mq_amqps.
         { name = "RABBITMQ_HOST", value = local.mq_amqps_host },
         { name = "RABBITMQ_PORT", value = "5671" },
-        { name = "RABBITMQ_USER", value = var.mq_user },
         { name = "RABBITMQ_QUEUE", value = "billing_queue" }
       ]
       secrets = [
+        # FIX: RABBITMQ_USER used to be a plaintext `environment` entry. Anyone
+        # holding ecs:DescribeTaskDefinition can read a task definition, so a
+        # username injected as plaintext env is readable by every principal that
+        # can describe tasks, and it is stored verbatim in the task definition
+        # revision. The `username` key was already present in the secret JSON
+        # (amazon_mq.tf) and simply unused. valueFrom syntax is
+        # "<secret-arn>:<json-key>::" - the empty version/json-path stages take
+        # the whole top-level value of `username`.
+        { name = "RABBITMQ_USER", valueFrom = "${aws_secretsmanager_secret.mq_credentials.arn}:username::" },
         { name = "RABBITMQ_PASSWORD", valueFrom = "${aws_secretsmanager_secret.mq_credentials.arn}:password::" }
       ]
       healthCheck = {
@@ -114,10 +124,13 @@ resource "aws_ecs_task_definition" "inventory_app" {
         # never resolve or authenticate against the RDS instance.
         { name = "INVENTORY_DB_HOST", value = aws_db_instance.inventory.address },
         { name = "INVENTORY_DB_PORT", value = tostring(aws_db_instance.inventory.port) },
-        { name = "INVENTORY_DB_NAME", value = "inventory_db" },
-        { name = "INVENTORY_DB_USER", value = var.db_username }
+        { name = "INVENTORY_DB_NAME", value = "inventory_db" }
       ]
       secrets = [
+        # FIX: INVENTORY_DB_USER moved out of plaintext `environment` into the
+        # `username` key of the secret that already carried it (rds.tf) - see the
+        # RABBITMQ_USER note in the api-gateway task definition for why.
+        { name = "INVENTORY_DB_USER", valueFrom = "${aws_secretsmanager_secret.inventory_db.arn}:username::" },
         { name = "INVENTORY_DB_PASSWORD", valueFrom = "${aws_secretsmanager_secret.inventory_db.arn}:password::" }
       ]
       healthCheck = {
@@ -166,14 +179,17 @@ resource "aws_ecs_task_definition" "billing_app" {
         { name = "BILLING_DB_HOST", value = aws_db_instance.billing.address },
         { name = "BILLING_DB_PORT", value = tostring(aws_db_instance.billing.port) },
         { name = "BILLING_DB_NAME", value = "billing_db" },
-        { name = "BILLING_DB_USER", value = var.db_username },
         { name = "RABBITMQ_HOST", value = local.mq_amqps_host },
         { name = "RABBITMQ_PORT", value = "5671" },
-        { name = "RABBITMQ_USER", value = var.mq_user },
         { name = "RABBITMQ_QUEUE", value = "billing_queue" }
       ]
       secrets = [
+        # FIX: BILLING_DB_USER and RABBITMQ_USER moved out of plaintext
+        # `environment` into the `username` key of the secrets that already
+        # carried them (rds.tf, amazon_mq.tf).
+        { name = "BILLING_DB_USER", valueFrom = "${aws_secretsmanager_secret.billing_db.arn}:username::" },
         { name = "BILLING_DB_PASSWORD", valueFrom = "${aws_secretsmanager_secret.billing_db.arn}:password::" },
+        { name = "RABBITMQ_USER", valueFrom = "${aws_secretsmanager_secret.mq_credentials.arn}:username::" },
         { name = "RABBITMQ_PASSWORD", valueFrom = "${aws_secretsmanager_secret.mq_credentials.arn}:password::" }
       ]
       healthCheck = {
@@ -208,6 +224,19 @@ resource "aws_ecs_service" "api_gateway" {
   desired_count   = 1
   launch_type     = local.fargate_launch_type
 
+  # FIX: aws_appautoscaling_target.api_gateway owns this service's desiredCount,
+  # and Terraform and the autoscaler were fighting over it - after any scale-out
+  # the next plan wanted to set it back to 1 and the apply quietly scaled the
+  # service in behind the autoscaler's back.
+  # `ignore_changes` rather than dropping `desired_count`: the CreateService
+  # default for desiredCount is 0, so a service created without it starts with NO
+  # running tasks, and a target-tracking policy keyed on ECSServiceAverageCPUUtilization
+  # has no metric to react to with zero tasks - it would never scale out.
+  # 1 stays as the create-time value, autoscaling keeps it afterwards.
+  lifecycle {
+    ignore_changes = [desired_count]
+  }
+
   dynamic "capacity_provider_strategy" {
     for_each = var.ecs_use_fargate_spot ? [1] : []
     content {
@@ -237,10 +266,12 @@ resource "aws_ecs_service" "api_gateway" {
     container_port = 3000
   }
 
-  # Grace period for the ALB health checks declared in alb.tf. Only meaningful on
-  # a service that has a load_balancer block, which is why the two private
-  # services below deliberately do not set it.
-  health_check_grace_period_seconds = 60
+  # Grace period covering the cold-start database wait - see the long comment on
+  # aws_ecs_service.inventory_app below. 360 s, not 60: the container's own
+  # health check fails every 30 s from the moment the task starts, because the
+  # Flask app does not bind :8080 until its PostgreSQL retry loop gives up or
+  # succeeds, and on a cold `terraform apply` RDS is created in the same run.
+  health_check_grace_period_seconds = 360
   enable_execute_command            = true
 
   depends_on = [aws_lb_listener.https]
@@ -254,6 +285,12 @@ resource "aws_ecs_service" "inventory_app" {
   task_definition = aws_ecs_task_definition.inventory_app.arn
   desired_count   = 1
   launch_type     = local.fargate_launch_type
+
+  # Same autoscaler conflict as api-gateway above
+  # (aws_appautoscaling_target.inventory_app). See that comment.
+  lifecycle {
+    ignore_changes = [desired_count]
+  }
 
   dynamic "capacity_provider_strategy" {
     for_each = var.ecs_use_fargate_spot ? [1] : []
@@ -277,11 +314,22 @@ resource "aws_ecs_service" "inventory_app" {
     container_port = 8080
   }
 
-  # No health_check_grace_period_seconds here: AWS documents that argument as
-  # valid only for services with a load balancer, and these two are discovered
-  # through Cloud Map instead. Their health gating comes from the container
-  # healthCheck in the task definition.
-  enable_execute_command = true
+  # FIX (was missing, and the "no health_check_grace_period_seconds here"
+  # comment was wrong): the container probe (startPeriod 40 + interval 30 x
+  # retries 3) fails at roughly 130 s, but inventory-app does not bind :8080 until
+  # create_app() finishes its retry loop - DB_CONNECT_MAX_RETRIES(180) x
+  # DB_CONNECT_RETRY_DELAY(2) = 360 s of budget, needed because RDS is created in
+  # the same apply and a cold PostgreSQL was measured at ~145 s before it accepted
+  # connections. Without a grace period covering that wait, ECS killed the task
+  # during the DB connect on exactly the run where the DB was slowest.
+  # The removed comment claimed AWS only allows this argument on load-balancer-
+  # backed services. CreateService says otherwise - healthCheckGracePeriodSeconds
+  # is "the period of time ... that the Amazon ECS service scheduler ignores
+  # unhealthy Elastic Load Balancing, VPC Lattice, and CONTAINER health checks
+  # after a task has first started", and this service has a container health check
+  # in its task definition.
+  health_check_grace_period_seconds = 360
+  enable_execute_command            = true
 
   tags = local.common_tags
 }
@@ -320,11 +368,27 @@ resource "aws_ecs_service" "billing_app" {
     container_port = 8080
   }
 
-  # No health_check_grace_period_seconds here: AWS documents that argument as
-  # valid only for services with a load balancer, and these two are discovered
-  # through Cloud Map instead. Their health gating comes from the container
-  # healthCheck in the task definition.
-  enable_execute_command = true
+  # FIX: billing-app's HTTP surface (GET /api/billing/orders) was registered with
+  # Cloud Map but nothing called it, so it was unreachable from outside the VPC.
+  # Registering it with the second ALB target group is what makes
+  # aws_lb_listener_rule.billing_orders deliver those requests; no change to
+  # srcs/ was needed, which matters because that directory is owned by another
+  # team. The matching SG rules are app_ingress_from_alb_billing and
+  # alb_egress_to_billing_app.
+  load_balancer {
+    target_group_arn = aws_lb_target_group.billing.arn
+    container_name   = "billing-app"
+    container_port   = 8080
+  }
+
+  # Same 360 s cold-start reasoning as inventory_app above: this app also blocks in
+  # create_app() on a PostgreSQL retry loop before it binds :8080, and it is
+  # pinned at 2 tasks so a killed task is also a slower recovery.
+  health_check_grace_period_seconds = 360
+  enable_execute_command            = true
+
+  # ECS may only register targets with an ALB once the listener exists.
+  depends_on = [aws_lb_listener.https]
 
   tags = local.common_tags
 }

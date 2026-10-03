@@ -113,10 +113,20 @@ resource "aws_cognito_user_pool_client" "main" {
   allowed_oauth_scopes         = ["email", "openid", "profile"]
   supported_identity_providers = ["COGNITO"]
 
-  callback_urls = [
+  callback_urls = compact([
     "https://localhost:3000/callback",
     var.alb_domain_name != "" ? "https://${var.alb_domain_name}/callback" : "https://api.cloud-design.local/callback",
-  ]
+    # Required by the ALB's authenticate-cognito action (alb.tf
+    # aws_lb_listener.https): the load balancer redirects an unauthenticated
+    # browser to the hosted UI and Cognito hands the token back to
+    # https://<alb-host>/oauth2/idpresponse, so THAT exact URL has to be on the
+    # client's allow list or the redirect dies on invalid_redirect_uri. The
+    # custom-domain entry covers the ACM path; the ALB DNS name covers the
+    # self-signed default path, where there is no custom domain to name.
+    # compact() drops the empty string emitted when alb_domain_name is unset.
+    var.alb_domain_name != "" ? "https://${var.alb_domain_name}/oauth2/idpresponse" : "",
+    "https://${aws_lb.main.dns_name}/oauth2/idpresponse",
+  ])
   logout_urls = [
     "https://localhost:3000/logout",
     var.alb_domain_name != "" ? "https://${var.alb_domain_name}/logout" : "https://api.cloud-design.local/logout",

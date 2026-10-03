@@ -5,13 +5,21 @@
 # nothing can be pushed and every task definition fails to stabilise, so this
 # file is a hard prerequisite of ecs_services.tf.
 #
-# Push workflow (mirrors local.ecr_image_urls in ecs_services.tf):
+# Push workflow (mirrors local.ecr_image_urls in ecs_services.tf and
+# scripts/build_push.sh):
 #   REG=$(terraform output -raw ecr_registry_url)
 #   aws ecr get-login-password --region us-east-1 \
 #     | docker login --username AWS --password-stdin "$REG"
-#   docker build -f Dockerfiles/Dockerfile.api-gateway srcs/api-gateway-app \
+#   docker build -f srcs/api-gateway-app/Dockerfile srcs/api-gateway-app \
 #     -t "$REG/cloud-design/api-gateway:latest"
 #   docker push "$REG/cloud-design/api-gateway:latest"
+# The Dockerfile is at srcs/<component>/Dockerfile and the build context is that
+# same directory (so srcs/<component>/.dockerignore applies) - the previous
+# revision of this comment pointed at Dockerfiles/Dockerfile.api-gateway, a path
+# that does not exist anywhere in the repo. Note also that the on-disk component
+# directory is `api-gateway-app` while the repository/image name is
+# `cloud-design/api-gateway` (local.app_images below), so the -t tag and the
+# directory name are deliberately not the same string.
 # ------------------------------------------------------------------------------
 
 locals {
@@ -35,9 +43,15 @@ resource "aws_ecr_repository" "app" {
   # `terraform destroy` must not fail on repositories that still hold images.
   force_delete = true
 
-  # Scan every pushed image with the Inspector/ECR basic scanner (no extra
-  # charge). Together with inspector2.tf this satisfies the audit requirement to
-  # "regularly scan for vulnerabilities" without any manual action.
+  # Scan every pushed image (scan_on_push). COST CORRECTION: the previous
+  # revision of this comment claimed "no extra charge". That is true of ECR
+  # BASIC scanning only. Once aws_inspector2_enabler (inspector2.tf) is enabled
+  # for ECR, these scans are performed by Inspector's ENHANCED scanning and are
+  # billed per scan - roughly $0.09 per initial scan and $0.01 per re-scan in
+  # us-east-1, and every new CVE in the Inspector database triggers re-scans of
+  # the retained images. For three repositories with a 5-image lifecycle policy
+  # that is cents per month, not dollars, so it is still enabled - but it is not
+  # free and the budget estimate (var.monthly_budget_limit) includes it.
   image_scanning_configuration {
     scan_on_push = true
   }

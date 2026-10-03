@@ -133,15 +133,25 @@ variable "db_username" {
 # Messaging (Amazon MQ RabbitMQ)
 # ------------------------------------------------------------------------------
 variable "mq_engine_version" {
-  description = "RabbitMQ broker engine version"
+  description = "RabbitMQ broker engine version. 3.13 is supported on the mq.m7g instance family; Amazon MQ also offers 4.2, which requires mq.m7g and is the prerequisite for a future in-place 3.13 -> 4.2 upgrade."
   type        = string
   default     = "3.13"
 }
 
 variable "mq_host_instance_type" {
-  description = "Amazon MQ broker instance type"
+  description = <<-EOT
+    Amazon MQ broker instance type.
+    FIX: this defaulted to mq.t3.micro, which AWS has deprecated: it is "no longer
+    available for new broker creation" and reaches end of support on October 1,
+    2026, so `terraform apply` failed at CreateBroker. m7g.medium is the smallest
+    type Amazon MQ still offers for RabbitMQ (1 vCPU / 4 GiB) and is what AWS
+    itself recommends for evaluation; it is also the family RabbitMQ 4.x requires,
+    so moving the broker to 4.2 later is an in-place engine upgrade rather than a
+    replacement. Cost note: it is materially dearer than the retired t3.micro -
+    see var.monthly_budget_limit for the recalculated estimate.
+  EOT
   type        = string
-  default     = "mq.t3.micro"
+  default     = "mq.m7g.medium"
 }
 
 variable "mq_user" {
@@ -204,21 +214,26 @@ variable "monthly_budget_limit" {
     run-rate, so the budget alarm fired every single month and proved useless.
     Steady-state estimate for this design (us-east-1, on-demand Fargate):
 
-      Amazon MQ ACTIVE_STANDBY_MULTI_AZ mq.t3.micro x2 ......  ~$79
-      RDS PostgreSQL db.t4g.micro Multi-AZ x2 + storage ......  ~$53
-      NAT Gateways x2 .........................................  ~$66
-      Application Load Balancer ...............................  ~$16
-      ECS Fargate 4 x (0.25 vCPU / 0.5 GB) ....................  ~$37
-      KMS keys, ECR storage, CloudWatch logs/alarms ............  ~$9
-      ------------------------------------------------------------------
-      TOTAL ....................................................  ~$260/mo
+      Amazon MQ ACTIVE_STANDBY_MULTI_AZ mq.m7g.medium x2 + 200GB EBS each  ~$230
+      RDS PostgreSQL db.t4g.micro Multi-AZ x2 + storage ..................  ~$53
+      NAT Gateways x2 .....................................................  ~$66
+      Application Load Balancer ..........................................  ~$16
+      ECS Fargate 4 x (0.25 vCPU / 0.5 GB) ................................  ~$37
+      KMS keys, ECR storage + Inspector scans, CloudWatch logs/alarms ......  ~$9
+      --------------------------------------------------------------------
+      TOTAL ..............................................................  ~$410/mo
 
-    Peak (api-gateway + inventory-app auto-scaled to their max of 3) is ~$300/mo,
-    hence a 300 USD default: the 80% ACTUAL notification then fires at $240 as a
-    genuine early warning rather than as routine noise.
+    The MQ line is the one that moved: mq.t3.micro was ~$79 but AWS withdrew it
+    for new brokers (see var.mq_host_instance_type), and mq.m7g.medium is roughly
+    double the instance hours plus two 200 GB EBS volumes at $0.10/GB-month.
+    Peak (api-gateway + inventory-app auto-scaled to their max of 3, i.e. 8 tasks
+    instead of 4) is ~$450/mo, hence a 450 USD default: the 80% ACTUAL
+    notification then fires at $360 as a genuine early warning rather than as
+    routine noise. This is an estimate built from published unit prices, not a
+    quote - re-check it against the AWS Pricing Calculator before demoing.
   EOT
-  type    = number
-  default = 300
+  type        = number
+  default     = 450
 
   validation {
     condition     = var.monthly_budget_limit >= 50
@@ -230,6 +245,38 @@ variable "allowed_origins" {
   description = "CORS allowed origins for API Gateway. MUST be replaced with the real frontend domain(s) - see terraform.tfvars.example."
   type        = list(string)
   default     = ["https://app.example.com"]
+}
+
+# ------------------------------------------------------------------------------
+# Artefact / log-archive storage
+# ------------------------------------------------------------------------------
+variable "enable_artifact_bucket" {
+  description = <<-EOT
+    Create the S3 bucket that backs log- and artefact-archival (storage.tf). The
+    audit brief asks for "storage services using AWS S3 or similar" and the repo
+    previously contained no storage service at all. Set false to skip it for a
+    throwaway sandbox; an empty bucket costs nothing beyond the requests made
+    against it, so there is no reason to disable it for a real deployment.
+  EOT
+  type        = bool
+  default     = true
+}
+
+# ------------------------------------------------------------------------------
+# Database teardown
+# ------------------------------------------------------------------------------
+variable "db_final_snapshot" {
+  description = <<-EOT
+    Take a final manual snapshot of each RDS instance when Terraform destroys it.
+    FALSE BY DEFAULT, deliberately: it matches the behaviour scripts/destroy.sh
+    documents ("both instances use skip_final_snapshot = true, so terraform takes
+    none"), and the generated name is fixed, so a second destroy of a recreated
+    stack fails with AlreadyExists until the first snapshot is deleted. Turn it on
+    before destroying anything you care about, and delete the snapshots by hand
+    afterwards (snapshot storage is billed).
+  EOT
+  type        = bool
+  default     = false
 }
 
 # ------------------------------------------------------------------------------

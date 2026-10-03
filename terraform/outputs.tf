@@ -64,8 +64,13 @@ output "app_base_url" {
 }
 
 output "app_base_url_via_alb" {
-  description = "Base URL of the protected /api/movies resource reached directly at the ALB (bypasses the Cognito authorizer, so it is unauthenticated)"
+  description = "Base URL of the protected /api/movies resource reached directly at the ALB. NOT the documented path: the ALB :443 listener now has an authenticate-cognito action with on_unauthenticated_request = deny (alb.tf), so an unauthenticated call to this URL returns HTTP 401. Use api_gateway_invoke_url / app_base_url for the API Gateway path, or authenticate at the ALB with the hosted UI first."
   value       = "${local.alb_base_url}/api/movies"
+}
+
+output "billing_orders_url" {
+  description = "Authenticated URL for GET /api/billing/orders. Reaches billing-app directly through the second ALB target group (aws_lb_target_group.billing + aws_lb_listener_rule.billing_orders); POST /api/billing still goes through api-gateway, which publishes to RabbitMQ."
+  value       = "${aws_apigatewayv2_api.main.api_endpoint}/api/billing/orders"
 }
 
 # Authentication Outputs (AWS Cognito)
@@ -194,6 +199,17 @@ output "sns_alerts_topic_arn" {
 output "inspector2_findings_filter_name" {
   description = "AWS Inspector v2 filter surfacing CRITICAL/HIGH findings"
   value       = aws_inspector2_filter.critical_high.name
+}
+
+# Storage Outputs (Amazon S3)
+output "artifact_bucket_name" {
+  description = "Name of the S3 artefact / log-archive bucket (storage.tf). Nothing in this repository writes to it yet - it is the archive target for build artefacts and CloudWatch log exports. Null when var.enable_artifact_bucket = false."
+  value       = try(aws_s3_bucket.artifacts[0].bucket, null)
+}
+
+output "artifact_bucket_arn" {
+  description = "ARN of the S3 artefact / log-archive bucket. Null when var.enable_artifact_bucket = false."
+  value       = try(aws_s3_bucket.artifacts[0].arn, null)
 }
 
 # Cost Management Outputs

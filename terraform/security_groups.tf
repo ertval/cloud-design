@@ -4,6 +4,14 @@
 # The EKS control-plane security group and its three rules were removed with the
 # EKS path (see orchestration.tf). No private resource is reachable from outside
 # the VPC: only the ALB SG accepts 0.0.0.0/0, and only on 80 (redirect) / 443.
+#
+# TASK-TO-TASK IS 8080 ONLY, AND ONLY WITHIN THE APP SG. Every one of api-gateway,
+# inventory-app and billing-app shares aws_security_group.app, so a rule opened
+# with `self = true` is reachable by ALL THREE services - which is exactly why
+# :8080 is the only port opened: the app SG egress below also lets every task
+# reach db:5432 and mq:5671, so an all-ports self rule would hand a compromised
+# billing-app task a lateral-movement path to the inventory database and the
+# broker using its own credentials.
 # ------------------------------------------------------------------------------
 
 # 1. Public ALB Security Group (Internet-facing entrypoint)
@@ -51,6 +59,19 @@ resource "aws_security_group_rule" "alb_egress_to_app" {
   security_group_id        = aws_security_group.alb.id
 }
 
+# Second target group (alb.tf: aws_lb_target_group.billing) exposes
+# GET /api/billing/orders, which billing-app serves on :8080, so the ALB needs a
+# matching egress path. Without it the rule exists but every request 502s.
+resource "aws_security_group_rule" "alb_egress_to_billing_app" {
+  description              = "Forward traffic to the billing-app container on port 8080"
+  type                     = "egress"
+  from_port                = 8080
+  to_port                  = 8080
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.app.id
+  security_group_id        = aws_security_group.alb.id
+}
+
 # FIX (was missing entirely): API Gateway integrates with the ALB over the VPC
 # Link, and that integration targets the *HTTPS* listener (aws_lb_listener.https,
 # referenced by api_gateway.tf). Without this rule the VPC Link ENIs could not
@@ -77,7 +98,7 @@ resource "aws_security_group" "app" {
   })
 }
 
-# Inbound from ALB on port 3000
+# Inbound from ALB on port 3000 (api-gateway, the ALB target group in alb.tf)
 resource "aws_security_group_rule" "app_ingress_from_alb" {
   description              = "Allow inbound HTTP from ALB to API Gateway service"
   type                     = "ingress"
@@ -88,9 +109,28 @@ resource "aws_security_group_rule" "app_ingress_from_alb" {
   security_group_id        = aws_security_group.app.id
 }
 
-# Internal service-to-service communication on port 8080 (inventory and billing)
-resource "aws_security_group_rule" "app_ingress_internal_service" {
-  description       = "Allow internal service-to-service communication on port 8080"
+# Inbound from ALB on port 8080 (billing-app target group, see alb.tf). Only the
+# billing service listens on :8080 behind the ALB; inventory-app is reached over
+# Cloud Map, not the ALB.
+resource "aws_security_group_rule" "app_ingress_from_alb_billing" {
+  description              = "Allow inbound HTTP from ALB to billing-app service on 8080"
+  type                     = "ingress"
+  from_port                = 8080
+  to_port                  = 8080
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.alb.id
+  security_group_id        = aws_security_group.app.id
+}
+
+# Task-to-task on :8080 (api-gateway -> inventory-app). FIX: this used to be
+# `protocol = "-1", from_port = 0, to_port = 0`, which is ALL ports on ALL
+# protocols, self-referenced. Because all three services share this SG it also
+# opened billing-app -> db:5432 and billing-app -> mq:5671, and every task in the
+# tier already holds working credentials for both. It also subsumed the separate
+# 8080 ingress rule (app_ingress_internal_service), which has therefore been
+# deleted rather than left as a duplicate. Narrowed to tcp/8080.
+resource "aws_security_group_rule" "app_ingress_self" {
+  description       = "Allow task-to-task service calls on port 8080 only"
   type              = "ingress"
   from_port         = 8080
   to_port           = 8080
@@ -99,13 +139,18 @@ resource "aws_security_group_rule" "app_ingress_internal_service" {
   security_group_id = aws_security_group.app.id
 }
 
-# Task-to-task communication on any port (Cloud Map / intra-service fan-out)
-resource "aws_security_group_rule" "app_ingress_self" {
-  description       = "Allow tasks to communicate with each other"
-  type              = "ingress"
-  from_port         = 0
-  to_port           = 0
-  protocol          = "-1"
+# The egress half of the same :8080 call. FIX (was completely missing): security
+# groups are STATEFUL, so the 8080 ingress rule above only covers the RETURN
+# traffic of a connection a task itself opened. The initiating side still needs
+# egress, or the connection is dropped before it is ever made - which is why
+# GET/POST/PUT/DELETE /api/movies through API Gateway -> ALB -> api-gateway ->
+# inventory-app returned 502 on every call even though the ingress rule existed.
+resource "aws_security_group_rule" "app_egress_internal_service" {
+  description       = "Allow tasks to OPEN connections to sibling tasks on :8080 (Cloud Map)"
+  type              = "egress"
+  from_port         = 8080
+  to_port           = 8080
+  protocol          = "tcp"
   self              = true
   security_group_id = aws_security_group.app.id
 }

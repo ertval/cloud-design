@@ -49,8 +49,11 @@ db_username              = "dbadmin"
 # ------------------------------------------------------------------------------
 # Amazon MQ RabbitMQ (ACTIVE_STANDBY_MULTI_AZ)
 # ------------------------------------------------------------------------------
-mq_engine_version     = "3.13"
-mq_host_instance_type = "mq.t3.micro"
+mq_engine_version = "3.13"
+# NOT mq.t3.micro: AWS has deprecated that instance type for new brokers
+# (end of support 1 October 2026) and CreateBroker rejects it. mq.m7g.medium is
+# the smallest type still offered and is the prerequisite for RabbitMQ 4.x.
+mq_host_instance_type = "mq.m7g.medium"
 mq_user               = "rabbit_admin"
 
 # ------------------------------------------------------------------------------
@@ -75,8 +78,20 @@ log_retention_days     = 30
 # !! anything.
 alarm_email = ""
 
-# ~$260/month steady state; see the itemised estimate on var.monthly_budget_limit.
-monthly_budget_limit = 300
+# ~$410/month steady state (the broker move off the retired mq.t3.micro is what
+# raised it); see the itemised estimate on var.monthly_budget_limit.
+monthly_budget_limit = 450
+
+# ------------------------------------------------------------------------------
+# Storage / teardown
+# ------------------------------------------------------------------------------
+# S3 log- and artefact-archive bucket (storage.tf). Nothing writes to it yet.
+# Set false only for a throwaway sandbox.
+enable_artifact_bucket = true
+
+# Take a final manual RDS snapshot on `terraform destroy`. false reproduces the
+# default teardown scripts/destroy.sh documents.
+db_final_snapshot = false
 
 # ------------------------------------------------------------------------------
 # !! CORS - MUST be changed
