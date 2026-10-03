@@ -29,6 +29,33 @@ HOP_BY_HOP_HEADERS = {
 UPSTREAM_ATTEMPTS = 3
 UPSTREAM_TIMEOUT = 10
 
+# Client-facing copy for a dependency that cannot serve the request. These are
+# deliberately fixed strings with NO interpolated exception, host or port: the
+# internal topology (`inventory-app:8080`, `rabbit-queue`) is exactly what a
+# client should not learn, and `requests`/pika/psycopg2 error strings are full
+# of it. The detail goes to the log line next to it, which is where an operator
+# needs it.
+DEPENDENCY_UNAVAILABLE_ERROR = (
+    "Upstream service is temporarily unavailable. Please retry shortly."
+)
+BROKER_UNAVAILABLE_ERROR = (
+    "The order could not be queued because the messaging service is unavailable. "
+    "Please retry shortly."
+)
+
+
+def _upstream_5xx(response):
+    """True when an upstream 5xx must be re-labelled as a gateway 503.
+
+    A 5xx from a dependency means *that* service failed, not that this gateway
+    has a bug. Relaying it verbatim would (a) tell an operator our code is
+    broken, (b) pollute the 5XX error budget and 5XX alarms, and (c) hand the
+    client the upstream's raw error page - which for a database outage is a
+    waitress HTML page and, further down, a traceback. 4xx is relayed unchanged:
+    a client error is the client's, not a dependency outage.
+    """
+    return response.status_code >= 500
+
 
 def _sanitise_subpath(subpath: str) -> str | None:
     """Reject traversal or encoded-separator payloads before building a URL.
@@ -47,6 +74,13 @@ def _sanitise_subpath(subpath: str) -> str | None:
     if lowered.startswith("/") or lowered.endswith("/"):
         return None
     if any(ch.isspace() for ch in subpath):
+        return None
+    # C0/C7 control characters, NUL above all. They are never legitimate in a
+    # path segment: they are how request-smuggling and parser-confusion tricks
+    # start, and `requests` percent-encodes them into the upstream request line.
+    # Without this, `/api/movies/1%00` reached inventory-app, which answered 500
+    # - a client error reported as a server fault.
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in subpath):
         return None
     return subpath
 
@@ -72,7 +106,8 @@ def _forward(method, target_url, headers, body, query):
         except requests.exceptions.RequestException as e:
             last_error = e
             logger.warning(
-                f"Upstream attempt {attempt}/{UPSTREAM_ATTEMPTS} to {target_url} failed: {e}"
+                f"Upstream attempt {attempt}/{UPSTREAM_ATTEMPTS} to {target_url} failed: "
+                f"{describe_error(e)}"
             )
             # Only retry connection errors or idempotent methods (do not retry read timeouts on POST)
             is_idempotent = method.upper() in {"GET", "HEAD", "OPTIONS", "PUT", "DELETE"}
@@ -101,25 +136,48 @@ def proxy_movies(subpath=""):
     headers["X-Forwarded-Proto"] = request.scheme
     headers["X-Forwarded-Host"] = request.host
 
+    # Read the body BEFORE the try: an over-long body raises Flask's
+    # RequestEntityTooLarge, which must surface as the 413 it is rather than be
+    # folded into the dependency-unavailable path below.
+    request_body = request.get_data()
+
     try:
         resp = _forward(
             request.method,
             target_url,
             headers,
-            request.get_data(),
+            request_body,
             request.args
         )
-
-        response_headers = [
-            (k, v) for k, v in resp.headers.items() if k.lower() not in HOP_BY_HOP_HEADERS
-        ]
-
-        logger.info(f"Proxied {request.method} {request.path} -> {target_url} [Status: {resp.status_code}]")
-        return Response(resp.content, status=resp.status_code, headers=response_headers)
-
     except requests.exceptions.RequestException as e:
-        logger.error(f"Error forwarding request to inventory service at {target_url}: {e}")
-        return jsonify({"error": f"Inventory service unavailable: {str(e)}"}), 502
+        # Connection refused, DNS failure, read timeout: the inventory service
+        # could not be reached. 503, not 500 and not 502 - the request is
+        # retryable and no application logic failed. The detail (including the
+        # internal host and port) stays in the log.
+        logger.error(
+            f"Inventory service at {target_url} could not be reached after "
+            f"{UPSTREAM_ATTEMPTS} attempts for {request.method} {request.path}: "
+            f"{describe_error(e)}"
+        )
+        return jsonify({"error": DEPENDENCY_UNAVAILABLE_ERROR}), 503
+
+    if _upstream_5xx(resp):
+        # The upstream failed (typically because ITS database is down). Report
+        # that as 503 with our own body rather than relaying its error page,
+        # which leaks both the internal hostname and a traceback.
+        logger.error(
+            f"Inventory service at {target_url} returned {resp.status_code} for "
+            f"{request.method} {request.path}; surfacing 503 to the client. "
+            f"Upstream body: {resp.text[:512]!r}"
+        )
+        return jsonify({"error": DEPENDENCY_UNAVAILABLE_ERROR}), 503
+
+    response_headers = [
+        (k, v) for k, v in resp.headers.items() if k.lower() not in HOP_BY_HOP_HEADERS
+    ]
+
+    logger.info(f"Proxied {request.method} {request.path} -> {target_url} [Status: {resp.status_code}]")
+    return Response(resp.content, status=resp.status_code, headers=response_headers)
 
 
 @proxy_bp.route("/api/billing", methods=["POST"], strict_slashes=False)
@@ -136,5 +194,10 @@ def create_billing_order():
         logger.info(f"Billing message enqueued: {raw_body}")
         return jsonify({"message": f"{raw_body} sent"}), 200
     except Exception as e:
+        # The broker is a dependency: unreachable, refusing or unroutable is a
+        # 503 the client may retry, not a 500 that blames this service. The
+        # response body is a fixed string because pika's error text contains the
+        # broker hostname ("[Errno -2] Name does not resolve" names it once
+        # resolved), which must not be resolved client-side.
         logger.error(f"Failed to queue billing message: {describe_error(e)}")
-        return jsonify({"error": f"Failed to submit order to queue: {describe_error(e)}"}), 500
+        return jsonify({"error": BROKER_UNAVAILABLE_ERROR}), 503

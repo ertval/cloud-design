@@ -30,6 +30,7 @@ _spec.loader.exec_module(validation)
 
 InvalidOrderError = validation.InvalidOrderError
 coerce_order_payload = validation.coerce_order_payload
+MAX_USER_ID_LENGTH = validation.MAX_USER_ID_LENGTH
 
 
 class CoerceOrderPayloadTest(unittest.TestCase):
@@ -77,6 +78,48 @@ class CoerceOrderPayloadTest(unittest.TestCase):
     def test_error_message_names_the_failure(self):
         with self.assertRaisesRegex(InvalidOrderError, "user_id"):
             coerce_order_payload({"user_id": ""})
+
+
+class UserIdLengthBoundaryTest(unittest.TestCase):
+    """The VARCHAR(255) boundary on `orders.user_id`.
+
+    An over-long user_id cannot be stored, so leaving it to the database turns
+    one such message into an infinite redelivery that blocks the head of the
+    queue for every order behind it. It must be rejected as a payload error.
+    """
+
+    def test_accepts_a_user_id_of_exactly_the_maximum_length(self):
+        user_id = "u" * MAX_USER_ID_LENGTH
+        self.assertEqual(
+            coerce_order_payload({"user_id": user_id, "total_amount": "1.00"})[0],
+            user_id,
+        )
+
+    def test_rejects_a_user_id_one_character_over_the_maximum(self):
+        with self.assertRaises(InvalidOrderError):
+            coerce_order_payload({"user_id": "u" * (MAX_USER_ID_LENGTH + 1)})
+
+    def test_rejects_a_very_long_user_id(self):
+        # The 900 KB payload that wedged the live queue.
+        with self.assertRaises(InvalidOrderError):
+            coerce_order_payload({"user_id": "x" * 900_000})
+
+    def test_message_names_the_field_the_limit_and_the_actual_length(self):
+        with self.assertRaises(InvalidOrderError) as ctx:
+            coerce_order_payload({"user_id": "u" * 300})
+        self.assertIn("255", str(ctx.exception))
+        self.assertIn("300", str(ctx.exception))
+
+    def test_limit_is_measured_after_stripping(self):
+        padded = "  " + "u" * MAX_USER_ID_LENGTH + "  "
+        self.assertEqual(len(coerce_order_payload({"user_id": padded})[0]), MAX_USER_ID_LENGTH)
+
+    def test_money_is_still_exact_for_a_maximum_length_user_id(self):
+        amount = coerce_order_payload(
+            {"user_id": "u" * MAX_USER_ID_LENGTH, "total_amount": "0.30"}
+        )[2]
+        self.assertIsInstance(amount, Decimal)
+        self.assertEqual(str(amount), "0.30")
 
 
 if __name__ == "__main__":

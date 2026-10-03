@@ -51,8 +51,15 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/Movie'
-        '502':
-          description: The inventory service could not be reached.
+        '503':
+          description: |
+            The inventory service could not serve the request. Returned when the
+            upstream call fails outright (connection refused, DNS failure,
+            timeout) or when the inventory service itself answers 5xx - typically
+            because its database is unreachable. The dependency being unavailable
+            is not a gateway bug, so this is 503 (retryable) rather than 5xx.
+            The response body carries a generic message; the upstream detail is
+            written to the api-gateway-app log.
           content:
             application/json:
               schema:
@@ -71,9 +78,17 @@ paths:
               properties:
                 title:
                   type: string
+                  maxLength: 255
+                  description: |
+                    At most 255 characters, matching the `VARCHAR(255)` column in
+                    srcs/inventory-database/init.sql. A longer title is rejected
+                    with a 400 rather than being truncated by the database.
                   example: A new movie
                 description:
                   type: string
+                  description: |
+                    Stored in an unbounded `TEXT` column, so there is no length
+                    limit to enforce. The 1 MiB request-body limit still applies.
                   example: Very short description
       responses:
         '200':
@@ -83,11 +98,26 @@ paths:
               schema:
                 $ref: '#/components/schemas/Movie'
         '400':
-          description: Missing or invalid title
-        '502':
           description: |
-            The inventory service could not be reached. The gateway retries the
-            upstream call a bounded number of times before returning this.
+            The payload is not storable. The body names the offending field and
+            the reason, for each of these cases:
+              * `Request body must be a JSON object` - the body is not a JSON object
+              * `Field 'title' is required and cannot be empty` - no title on create
+              * `Field 'title' cannot be empty` - title present but blank
+              * `Field 'title' must be at most 255 characters (received N)` - over-long title
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Field 'title' must be at most 255 characters (received 256)
+        '413':
+          description: The request body exceeds the 1 MiB limit (nginx client_max_body_size).
+        '503':
+          description: |
+            The inventory service could not be reached, or it answered 5xx
+            (typically a database outage). The gateway retries the upstream call
+            a bounded number of times before returning this.
           content:
             application/json:
               schema:
@@ -155,6 +185,7 @@ paths:
               properties:
                 title:
                   type: string
+                  maxLength: 255
                 description:
                   type: string
       responses:
@@ -164,8 +195,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Movie'
+        '400':
+          description: |
+            The payload is not storable. The body names the offending field and
+            the reason (blank title, or a title longer than 255 characters).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Field 'title' must be at most 255 characters (received 300)
         '404':
           description: Movie not found
+        '503':
+          description: The inventory service could not be reached, or it answered 5xx.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
     delete:
       summary: Delete movie by ID
       parameters:
@@ -231,8 +278,21 @@ paths:
                     example: '{"user_id": "20", "number_of_items": "99", "total_amount": "250"} sent'
         '400':
           description: Invalid request payload
-        '500':
-          description: Failed to reach message broker
+        '503':
+          description: |
+            The order could not be queued because the message broker was
+            unreachable, refused the connection or returned the message as
+            unroutable. This is a dependency outage, not a gateway fault, so it is
+            503 (retryable) rather than 500. The publish is attempted a bounded
+            number of times first. The response body is a fixed generic message:
+            the broker hostname and the driver's error text go to the
+            api-gateway-app log, never to the client.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: The order could not be queued because the messaging service is unavailable. Please retry shortly.
 
 components:
   schemas:
@@ -241,7 +301,10 @@ components:
       properties:
         error:
           type: string
-          example: Inventory service unavailable
+          description: |
+            A stable, generic message. Internal hostnames, ports, driver error
+            text and tracebacks are deliberately excluded and logged server-side.
+          example: Upstream service is temporarily unavailable. Please retry shortly.
     Movie:
       type: object
       properties:

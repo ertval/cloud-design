@@ -9,6 +9,20 @@ crash the worker, because an unacknowledged crash would block the queue.
 
 from decimal import Decimal, InvalidOperation
 
+# `orders.user_id` is VARCHAR(255) (srcs/billing-database/init.sql, matching
+# String(255) in app/orders.py). A longer id cannot be stored: PostgreSQL raises
+# StringDataRightTruncation on every attempt.
+#
+# It has to be rejected HERE, as a payload error, rather than left to the
+# database. A permanently unpersistable message must NOT be requeued: with
+# prefetch_count=1 an over-long user_id is redelivered, fails five times, is
+# nacked and redelivered again - forever - which blocks the head of the queue
+# and every legitimate order behind it. Rejecting it as an InvalidOrderError
+# routes it into the existing poison-payload path (acknowledge and discard),
+# which is the correct treatment for a message that can never succeed. A
+# genuine database outage is still nacked with requeue=True and retried.
+MAX_USER_ID_LENGTH = 255
+
 
 class InvalidOrderError(ValueError):
     """Raised when a queue payload cannot be coerced into a valid order."""
@@ -37,5 +51,10 @@ def coerce_order_payload(payload):
 
     if not user_id:
         raise InvalidOrderError("user_id cannot be empty")
+    if len(user_id) > MAX_USER_ID_LENGTH:
+        raise InvalidOrderError(
+            f"user_id must be at most {MAX_USER_ID_LENGTH} characters "
+            f"(received {len(user_id)})"
+        )
 
     return user_id, number_of_items, total_amount

@@ -12,6 +12,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Shown to any client while the database is unreachable. Fixed text on purpose:
+# `str(OperationalError)` names the internal host ("could not translate host name
+# \"billing-database\"") and the database name. The exception goes to the log,
+# which is where an operator needs it.
+DATABASE_UNAVAILABLE_MESSAGE = "The billing database is currently unavailable"
+
 
 def _require_env(name: str) -> str:
     """Return required secret env var or raise (no hardcoded fallback for secrets).
@@ -44,7 +50,7 @@ def _env_or_default(name: str, default: str) -> str:
     return value.strip()
 
 
-def create_app():
+def create_app(stop_event=None):
     app = Flask(__name__)
 
     # Secrets MUST come from env; host/port/db-name keep safe non-secret defaults.
@@ -71,10 +77,19 @@ def create_app():
     # cluster PostgreSQL needed ~145s to accept connections (initdb + role,
     # database and table creation), while a 30 x 2s = 60s budget made the app
     # exit and be restarted twice before the database was up.
+    #
+    # `stop_event` (the SIGTERM event installed by server.py BEFORE this call)
+    # is honoured between attempts: without that check a `docker stop` arriving
+    # during a cold start would have to wait out the entire budget - up to
+    # 180 x 2s = 360s - and be SIGKILLed (exit 137). Returns (None, None) so the
+    # caller can exit 0 instead.
     max_retries = int(_env_or_default("DB_CONNECT_MAX_RETRIES", "180"))
     retry_delay = float(_env_or_default("DB_CONNECT_RETRY_DELAY", "2"))
     session_factory = None
     for attempt in range(1, max_retries + 1):
+        if stop_event is not None and stop_event.is_set():
+            logger.info("Shutdown requested while waiting for the billing database; abandoning startup.")
+            return None, None
         try:
             with engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
@@ -100,6 +115,9 @@ def create_app():
     #               restarted.
     @app.route("/health", methods=["GET"])
     def health():
+        # Liveness is unauthenticated and therefore public: DB-independent and
+        # carrying nothing beyond this literal - no version, host, configuration
+        # or row counts.
         return jsonify({"status": "healthy"}), 200
 
     @app.route("/ready", methods=["GET"])
@@ -112,7 +130,14 @@ def create_app():
                 session.close()
             return jsonify({"status": "ready", "database": "reachable"}), 200
         except Exception as ready_err:
-            return jsonify({"status": "not-ready", "error": str(ready_err)}), 503
+            # The driver message names the internal host, so it is logged and not
+            # returned. A client only learns that this instance is not ready.
+            logger.error(f"Readiness probe failed: {ready_err!r}")
+            return jsonify({
+                "status": "not-ready",
+                "database": "unreachable",
+                "error": DATABASE_UNAVAILABLE_MESSAGE,
+            }), 503
 
     @app.route("/orders", methods=["GET"])
     @app.route("/api/billing/orders", methods=["GET"])

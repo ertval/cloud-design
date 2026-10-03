@@ -4,6 +4,7 @@ import logging
 from flask import Flask, jsonify
 from sqlalchemy import text
 from sqlalchemy.engine import URL
+from sqlalchemy.exc import InterfaceError, OperationalError
 from app.extensions import db
 from app.movies import movies_bp
 
@@ -12,6 +13,12 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] [inventory-app] %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Shown to any client while the database is unreachable. Fixed text on purpose:
+# `str(OperationalError)` contains the internal host ("could not translate host
+# name \"inventory-database\"") and the database name, which is internal
+# topology a client has no use for. The exception itself is logged in full.
+DATABASE_UNAVAILABLE_MESSAGE = "The inventory database is currently unavailable"
 
 
 def _require_env(name: str) -> str:
@@ -70,6 +77,31 @@ def create_app():
     db.init_app(app)
     app.register_blueprint(movies_bp)
 
+    # A database outage is a DEPENDENCY failure, so it must be reported as 503
+    # rather than escaping as an unhandled exception (which waitress turns into a
+    # generic 500 page). A 500 tells an operator this service is broken, burns
+    # the 5XX error budget and trips 5XX alarms for what is a transient,
+    # self-healing outage of PostgreSQL. Registered for the two exception classes
+    # SQLAlchemy raises when it cannot talk to the server; IntegrityError /
+    # DataError / ProgrammingError deliberately stay 500s because those ARE bugs.
+    #
+    # Only these two SPECIFIC classes are registered on purpose. A catch-all
+    # `@app.errorhandler(Exception)` looks tempting - it would turn every
+    # unexpected error into a tidy JSON 500 - but Flask resolves a handler by
+    # walking the exception's MRO, so it also swallows HTTPException: `/nope`
+    # and `PATCH /api/movies/1` were observed returning 500 instead of 404 and
+    # 405. Anything genuinely unexpected still surfaces as waitress's 500 page,
+    # which leaks nothing either.
+    @app.errorhandler(InterfaceError)
+    @app.errorhandler(OperationalError)
+    def _database_unavailable(err):
+        logger.error(f"Database operation failed: {err!r}")
+        try:
+            db.session.rollback()
+        except Exception:  # pragma: no cover - the session is already poisoned
+            logger.debug("Rollback after database failure raised", exc_info=True)
+        return jsonify({"error": DATABASE_UNAVAILABLE_MESSAGE}), 503
+
     # Liveness and readiness are deliberately different endpoints. /health must
     # not depend on the database, otherwise a transient database outage makes
     # the orchestrator kill the container (exit 137) before the app's own
@@ -78,6 +110,9 @@ def create_app():
     # being restarted.
     @app.route("/health", methods=["GET"])
     def health():
+        # Liveness is unauthenticated and therefore public: it must stay
+        # DB-independent and carry nothing beyond this literal - no version, no
+        # host, no configuration, no row counts.
         return jsonify({"status": "healthy"}), 200
 
     @app.route("/ready", methods=["GET"])
@@ -86,7 +121,19 @@ def create_app():
             db.session.execute(text("SELECT 1"))
             return jsonify({"status": "ready", "database": "reachable"}), 200
         except Exception as ready_err:
-            return jsonify({"status": "not-ready", "error": str(ready_err)}), 503
+            # The full driver/psycopg2 message goes to the log; the client gets a
+            # stable, host-free body. Roll back so a failed probe does not leave
+            # a poisoned session behind for the next request.
+            logger.error(f"Readiness probe failed: {ready_err!r}")
+            try:
+                db.session.rollback()
+            except Exception:  # pragma: no cover
+                logger.debug("Rollback after failed readiness probe raised", exc_info=True)
+            return jsonify({
+                "status": "not-ready",
+                "database": "unreachable",
+                "error": DATABASE_UNAVAILABLE_MESSAGE,
+            }), 503
 
     # Wait for database readiness and initialize schema.
     # The budget must comfortably exceed a COLD database start: on a fresh

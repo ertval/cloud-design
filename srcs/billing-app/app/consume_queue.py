@@ -237,6 +237,81 @@ def ssl_options_for(raw_host: str, port: int) -> pika.SSLOptions | None:
 REDELIVERY_BACKOFF_SECONDS = _env_float("REDELIVERY_BACKOFF_SECONDS", 5.0)
 
 
+class _ShutdownWatchdog:
+    """Wakes a consumer that is blocked inside `channel.start_consuming()`.
+
+    `start_consuming()` parks this thread in the AMQP socket read and never looks
+    at `stop_event`, so a shutdown has to be turned into a `stop_consuming()` call
+    through pika's thread-safe callback mechanism.
+
+    THE BUG THIS REPLACES: the thread that did that was created INSIDE the
+    connection loop, a few lines above the blocking call. A SIGTERM landing in
+    that window set `stop_event` with no watcher alive to act on it, so
+    `start_consuming()` blocked forever, the process burned the whole 20 s grace
+    period and Docker SIGKILLed it (exit 137) instead of exiting 0.
+
+    The ordering here removes the window instead of narrowing it:
+
+      * ONE watchdog is started before the loop, so it always exists. There is
+        no longer a moment in which a connection is live and unwatched.
+      * `set_active()` publishes the (connection, channel) pair BEFORE
+        `start_consuming()` is called, and it takes the lock, so the watcher can
+        never observe a half-published channel.
+      * `set_active()` also re-checks `stop_event` under the lock, which closes
+        the other direction: a stop that happened while the connection was being
+        established is acted upon immediately instead of being lost.
+      * `start_consuming()` is additionally guarded by an explicit
+        `stop_event.is_set()` check, so a pre-set event can never reach the
+        blocking call.
+
+    The thread is a daemon, so it can never keep the process alive.
+    """
+
+    def __init__(self, stop_event):
+        self._stop_event = stop_event
+        self._lock = threading.Lock()
+        self._active = None
+
+    def start(self):
+        threading.Thread(
+            target=self._run,
+            daemon=True,
+            name="BillingQueueShutdownWatcher",
+        ).start()
+
+    def set_active(self, connection, channel):
+        """Publish the channel the consumer is about to block on."""
+        with self._lock:
+            self._active = (connection, channel)
+            already_stopping = self._stop_event.is_set()
+        if already_stopping:
+            logger.info("Shutdown already requested; stopping the consumer without entering start_consuming().")
+            self._stop_now()
+
+    def clear_active(self):
+        with self._lock:
+            self._active = None
+
+    def _run(self):
+        self._stop_event.wait()
+        self._stop_now()
+
+    def _stop_now(self):
+        with self._lock:
+            active = self._active
+        if active is None:
+            # Nothing is blocked on the AMQP socket: the reconnect loop's
+            # `while not stop_event.is_set()` guard is what ends the loop.
+            logger.info("Shutdown requested while no AMQP channel was open; nothing to interrupt.")
+            return
+        connection, channel = active
+        logger.info("Shutdown requested; closing the AMQP channel to unblock start_consuming().")
+        try:
+            connection.add_callback_threadsafe(channel.stop_consuming)
+        except Exception as e:  # pragma: no cover - connection already gone
+            logger.debug(f"Could not schedule stop_consuming: {e}")
+
+
 def start_consuming(db_session_factory, stop_event=None):
     """Consume billing orders from RabbitMQ until `stop_event` is set.
 
@@ -246,11 +321,20 @@ def start_consuming(db_session_factory, stop_event=None):
     """
     if stop_event is None:
         stop_event = threading.Event()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            signal.signal(sig, lambda *_: (
-                logger.info("Shutdown signal received; stopping queue consumer"),
-                stop_event.set(),
-            ))
+        if threading.current_thread() is threading.main_thread():
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                signal.signal(sig, lambda *_: (
+                    logger.info("Shutdown signal received; stopping queue consumer"),
+                    stop_event.set(),
+                ))
+        else:
+            # signal.signal() is only legal on the main thread; raising here
+            # would abort the consumer thread on a silent path.
+            logger.warning(
+                "start_consuming() was called from a non-main thread without a "
+                "stop_event, so it cannot install signal handlers itself. Pass a "
+                "threading.Event() from the main thread so SIGTERM is honoured."
+            )
 
     # Non-secrets keep safe defaults; secrets MUST come from env.
     raw_host = _env_or_default("RABBITMQ_HOST", "rabbit-queue")
@@ -283,11 +367,21 @@ def start_consuming(db_session_factory, stop_event=None):
         f"{rabbitmq_host}:{rabbitmq_port} tls={'on' if ssl_options else 'off'}"
     )
 
+    # Started BEFORE the first connection attempt, so it outlives every
+    # reconnect and no connection can ever be live without a watcher.
+    watchdog = _ShutdownWatchdog(stop_event)
+    watchdog.start()
+
     while not stop_event.is_set():
         connection = None
         try:
             logger.info("Attempting connection to RabbitMQ broker...")
             connection = pika.BlockingConnection(parameters)
+            # The connect above can block for seconds. A SIGTERM during it must
+            # not be followed by an immediate block in start_consuming().
+            if stop_event.is_set():
+                logger.info("Shutdown requested while connecting; not opening a channel.")
+                break
             channel = connection.channel()
 
             # Ensure the queue is durable
@@ -383,22 +477,13 @@ def start_consuming(db_session_factory, stop_event=None):
 
             channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=False)
 
-            # `start_consuming()` blocks this thread in the AMQP socket read and
-            # never checks stop_event, so a shutdown request would otherwise be
-            # ignored until the next message arrived. A watcher thread closes
-            # the loop through pika's thread-safe callback mechanism.
-            def _stop_on_shutdown():
-                stop_event.wait()
-                try:
-                    connection.add_callback_threadsafe(channel.stop_consuming)
-                except Exception as e:
-                    logger.debug(f"Could not schedule stop_consuming: {e}")
-
-            threading.Thread(
-                target=_stop_on_shutdown,
-                daemon=True,
-                name="BillingQueueShutdownWatcher"
-            ).start()
+            # Publish the channel to the watchdog BEFORE the blocking call, so
+            # a shutdown arriving at any instant either reaches the watchdog (and
+            # schedules stop_consuming) or is caught by the check below.
+            watchdog.set_active(connection, channel)
+            if stop_event.is_set():
+                logger.info("Shutdown requested before start_consuming(); leaving the loop.")
+                break
 
             channel.start_consuming()
 
@@ -413,6 +498,7 @@ def start_consuming(db_session_factory, stop_event=None):
             logger.error(f"Unexpected error in consumer loop: {e}. Retrying in 3 seconds...")
             time.sleep(3)
         finally:
+            watchdog.clear_active()
             if connection and connection.is_open:
                 try:
                     connection.close()
