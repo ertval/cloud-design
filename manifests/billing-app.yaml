@@ -131,9 +131,13 @@ metadata:
 spec:
   # MUST resolve to a headless Service -- see billing-app-service below.
   serviceName: billing-app-service
-  replicas: 1
-  # Ordered, one at a time: a rolling update must never have two consumers
-  # briefly racing on the same queue during a normal deploy.
+  replicas: 2
+  # `replicas: 2` matches the HPA floor (`minReplicas: 2` below) and the ECS
+  # path's minimum capacity, so two consumers share the queue at steady state
+  # by design (RabbitMQ delivers each message to exactly one consumer; manual
+  # ack with prefetch_count=1 keeps redelivery safe). Ordered, one at a time:
+  # a rolling update still brings consumers up/down sequentially rather than
+  # churning both at once.
   podManagementPolicy: OrderedReady
   updateStrategy:
     type: RollingUpdate
@@ -281,9 +285,14 @@ spec:
   selector:
     app: billing-app
 ---
-# `maxUnavailable: 1` rather than `minAvailable: 1` -- the HPA floor is 1, so a
-# `minAvailable: 1` PDB would deadlock `kubectl drain` at the default size.
-# Full rationale in api-gateway.yaml.
+# Unlike the two request-path workloads, this PDB is real, and the reason is the
+# replica count: `replicas: 2` matches the HPA floor (`minReplicas: 2`), so
+# `maxUnavailable: 1` always retains one consumer. A queue consumer that is
+# voluntarily evicted with its single peer stops draining, so this is the one
+# workload where the budget earns its keep. `minAvailable: 1` would pin the floor
+# harder still, but 2 replicas is already the minimum that keeps an AZ failure
+# from stopping order processing; the rationale for the floors is in
+# api-gateway.yaml.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

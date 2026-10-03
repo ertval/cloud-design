@@ -19,7 +19,7 @@
 >    somebody.
 >
 > **Rewrite notice.** This document was rewritten from scratch. The previous
-> revision of this file contained **eleven factually false claims** (plus four defects in its own tooling found later — §5), including a
+> revision of this file contained **eleven factually false claims** (plus seven defects in its own tooling found later — §5), including a
 > headline compliance score that running the script it told you to run
 > immediately falsified. §5 names every one of them and states what replaced it.
 > That correction log is deliberate: an examiner who finds you can enumerate your
@@ -79,33 +79,43 @@ declared at resource top level, where provider 5.x rejects it. Fixed inside
 
 ## 1. Coverage table — all 22 rubric questions
 
-Verdict column = the verdict `scripts/run-audit-checks.sh` actually produced. See
-§9 for the final re-measured summary.
+Two columns, because they answer different questions. **Script verdict** is what
+`scripts/run-audit-checks.sh` actually produced (see §9 for the final re-measured
+summary). **Verification status** is what kind of evidence backs the answer.
 
-| # | `docs/audit.md` | Question (abbreviated) | Answered in | Script verdict |
-|---|---|---|---|---|
-| 1 | `:11` | Are all the required files present? | §4.1 | **PASS** |
-| 2 | `:34` | Were the students able to answer all the questions correctly? | §2 (roleplay) | **GRADER-SIDE** — human observation, not scriptable |
-| 3 | `:36` | Did the students demonstrate a thorough understanding of the concepts and technologies? | §2 + §3 | **GRADER-SIDE** |
-| 4 | `:38` | Were the students able to communicate effectively and justify their decisions? | §2 | **GRADER-SIDE** |
-| 5 | `:40` | Could the students critically evaluate their solution and consider alternative strategies? | §2 Q11/Q12 + §5 + §8 + §9 | **GRADER-SIDE** |
-| 6 | `:52` | Does the architecture align with all the project requirements? | §3 + §4.6 | **PASS** (incl. a 6-row port-consistency matrix) |
-| 7 | `:54` | Cost-effective architecture meeting the requirements? | §2 Q6 + §3.4 + §4.7 | **PASS** |
-| 8 | `:58` | Does `README.md` contain prerequisites, setup, configuration, usage? | §4.8 | **PASS** — all four sections present |
-| 9 | `:60` | Is the documentation clear and complete, with well-structured diagrams? | §4.9 | **PASS** |
-| 10 | `:64` | Are all the microservices running as expected, no errors or connectivity issues? | §4.10 | **PASS** — 8 containers healthy, 6 k8s pods Running |
-| 11 | `:66` | Is load balancing configured correctly and actually distributing traffic? | §4.11 | **PASS** — measured per-replica split |
-| 12 | `:68` | Are the microservices communicating securely (auth + encryption)? | §4.12 | **PASS** + **1 INVALID** (see below) |
-| 13 | `:72` | Is Terraform used effectively? | §4.13 | **PASS** — `fmt -check` clean, `validate` green |
-| 14 | `:74` | Does the infrastructure follow the architecture and requirements? | §4.14 | **PASS** |
-| 15 | `:78` | Are the Dockerfiles optimised for efficient container builds? | §4.15 | **PASS** — per-image analysis + measured sizes |
-| 16 | `:80` | Is the orchestration setup configured correctly? | §4.16 | **PASS** — kustomize build, API-server dry-run, live pods, ECS inventory |
-| 17 | `:84` | Do monitoring and logging dashboards give useful insight? | §4.17 | **PASS** |
-| 18 | `:88` | Are the auto-scaling policies configured correctly? | §4.18 | **PASS** |
-| 19 | `:90` | Does the application remain efficient under different load? | §4.19 | **PASS** — live concurrent load test |
-| 20 | `:94` | Security best practices: HTTPS, secured endpoints, vulnerability scanning? | §4.20 | **PASS** — Inspector2 + ECR scan-on-push |
-| 21 | `:98` | Bonus: did the student add any optional bonus? | §6 | **PASS** (8 bonus items implemented) |
-| 22 | `:100` | Bonus: is this an outstanding project? | §6 | **SUBJECTIVE** — evidence tally, grader decides |
+| # | `docs/audit.md` | Question (abbreviated) | Answered in | Script verdict | Verification status |
+|---|---|---|---|---|---|
+| 1 | `:11` | Are all the required files present? | §4.1 | **PASS** | **STATIC** |
+| 2 | `:34` | Were the students able to answer all the questions correctly? | §2 (roleplay) | **GRADER-SIDE** — human observation, not scriptable | — |
+| 3 | `:36` | Did the students demonstrate a thorough understanding of the concepts and technologies? | §2 + §3 | **GRADER-SIDE** | — |
+| 4 | `:38` | Were the students able to communicate effectively and justify their decisions? | §2 | **GRADER-SIDE** | — |
+| 5 | `:40` | Could the students critically evaluate their solution and consider alternative strategies? | §2 Q11/Q12 + §5 + §8 + §9 | **GRADER-SIDE** | — |
+| 6 | `:52` | Does the architecture align with all the project requirements? | §3 + §4.6 | **PASS** (incl. a 6-row port-consistency matrix) | **STATIC** + **LIVE** |
+| 7 | `:54` | Cost-effective architecture meeting the requirements? | §2 Q6 + §3.4 + §4.7 | **PASS** | **STATIC** |
+| 8 | `:58` | Does `README.md` contain prerequisites, setup, configuration, usage? | §4.8 | **PASS** — all four sections present | **STATIC** |
+| 9 | `:60` | Is the documentation clear and complete, with well-structured diagrams? | §4.9 | **PASS** | **STATIC** |
+| 10 | `:64` | Are all the microservices running as expected, no errors or connectivity issues? | §4.10 | **PASS** — 8 containers healthy, 6 k8s pods Running | **LIVE** |
+| 11 | `:66` | Is load balancing configured correctly and actually distributing traffic? | §4.11 | **PASS** — measured per-replica split | **LIVE** + **STATIC** |
+| 12 | `:68` | Are the microservices communicating securely (auth + encryption)? | §4.12 | **PASS** + **1 INVALID** (see below) | **LIVE** + **STATIC** + 1 **INVALID** |
+| 13 | `:72` | Is Terraform used effectively? | §4.13 | **PASS** — `fmt -check` clean, `validate` green | **STATIC** (validate real) |
+| 14 | `:74` | Does the infrastructure follow the architecture and requirements? | §4.14 | **PASS** | **STATIC** |
+| 15 | `:78` | Are the Dockerfiles optimised for efficient container builds? | §4.15 | **PASS** — per-image analysis + measured sizes | **LIVE** + **STATIC** |
+| 16 | `:80` | Is the orchestration setup configured correctly? | §4.16 | **PASS** — kustomize build, API-server dry-run, live pods, ECS inventory | **LIVE** + **STATIC** |
+| 17 | `:84` | Do monitoring and logging dashboards give useful insight? | §4.17 | **PASS** | **STATIC** |
+| 18 | `:88` | Are the auto-scaling policies configured correctly? | §4.18 | **PASS** | **LIVE** + **STATIC** |
+| 19 | `:90` | Does the application remain efficient under different load? | §4.19 | **PASS** — live concurrent load test | **LIVE** |
+| 20 | `:94` | Security best practices: HTTPS, secured endpoints, vulnerability scanning? | §4.20 | **PASS** — Inspector2 + ECR scan-on-push | **LIVE** + **STATIC** |
+| 21 | `:98` | Bonus: did the student add any optional bonus? | §6 | **PASS** (8 bonus items implemented) | **STATIC** |
+| 22 | `:100` | Bonus: is this an outstanding project? | §6 | **SUBJECTIVE** — evidence tally, grader decides | **SUBJECTIVE** |
+
+The **Verification status** column is the honest one, and it is deliberately
+separate from the script verdict: `LIVE` means the answer was measured on this
+machine in this session, `STATIC` means it was verified by reading the artefacts,
+`INVALID` means it cannot be determined here at all, and `—` means the question is
+asked of *you*, not of the repository (four roleplay questions and the subjective
+"outstanding" judgement). No question that would require a deployed AWS
+account carries a LIVE claim about AWS runtime behaviour — that is stated in §9
+rather than hidden.
 
 **Nothing is missing.** All 22 `######` questions in `docs/audit.md` appear above.
 
@@ -144,7 +154,7 @@ below was re-verified against the current repository.
 > containerised services on ECS Fargate — `api-gateway`, `inventory-app`,
 > `billing-app`. Two RDS PostgreSQL Multi-AZ instances and an Amazon MQ RabbitMQ
 > broker, all in private subnets with no route to the internet. Everything is
-> declared in 18 Terraform files: 131 resources, 31 variables, 38 outputs, and no
+> declared in 19 Terraform files: 142 resources, 33 variables, 41 outputs, and no
 > reusable modules because the whole thing is one VPC.
 >
 > Read-path is synchronous, write-path is asynchronous. `GET /api/movies` goes
@@ -210,8 +220,8 @@ on-premises means owning every layer:
 
 **The honest counter-argument**, because you will be asked for it: for a
 predictable, low-utilisation workload, on-premises hardware can be cheaper in
-absolute dollars, and this architecture has a real floor cost — roughly \$260/month
-steady state (breakdown in `var.monthly_budget_limit`). Cloud wins here because
+absolute dollars, and this architecture has a real floor cost — roughly $410/month
+steady state (MQ ~$230 of it; breakdown in `var.monthly_budget_limit`). Cloud wins here because
 the *shape* of the load is spiky and the *shape* of our team is small.
 
 ---
@@ -254,7 +264,7 @@ infrastructure.
    (`aws_kms_key.rds`), Secrets Manager (3 secrets), security-group-to-security-group
    references, and a single `default_tags` block so every resource is attributable.
 4. **Cost levers that are variables, not code.** `db_instance_class = "db.t4g.micro"`
-   (Graviton), `mq_host_instance_type = "mq.t3.micro"`, `single_nat_gateway`,
+   (Graviton), `mq_host_instance_type = "mq.m7g.medium"`, `single_nat_gateway`,
    `ecs_use_fargate_spot`, `log_retention_days`.
 
 **The honest caveat:** a Terraform-only codebase is portable in principle, but AWS
@@ -271,24 +281,30 @@ flowchart TD
     subgraph Internet
         Client["Client"]
     end
-    subgraph AWS["AWS · us-east-1 · VPC 10.0.0.0/16"]
-        subgraph Pub["Public subnets (2 AZ)"]
-            ALB["ALB · internet-facing<br/>:80 301-redirect → :443<br/>ELBSecurityPolicy-TLS13-1-2-2021-06"]
-            APIGW["API Gateway HTTP API<br/>Cognito JWT authorizer<br/>VPC Link → ALB :443"]
+    subgraph AWS["AWS Cloud - us-east-1"]
+        subgraph Edge["Managed edge - outside the VPC"]
+            APIGW["API Gateway HTTP API<br/>Cognito JWT authorizer<br/>VPC Link to ALB :443"]
+            Cognito["Cognito User Pool<br/>signs + verifies the JWT"]
         end
-        subgraph App["Private app subnets (2 AZ) · no public IP"]
-            GW["api-gateway · ECS Fargate · :3000"]
-            INV["inventory-app · ECS Fargate · :8080"]
-            BILL["billing-app · ECS Fargate · :8080 · desired_count 2"]
+        subgraph VPC["VPC 10.0.0.0/16 - 2 AZs"]
+            subgraph Pub["Public subnets (2 AZ)"]
+                ALB["ALB - internet-facing<br/>:80 301-redirect to :443<br/>:443 authenticate-cognito deny + source_ip VPC bypass<br/>ELBSecurityPolicy-TLS13-1-2-2021-06"]
+            end
+        subgraph App["Private app subnets (2 AZ) - no public IP"]
+            GW["api-gateway - ECS Fargate - :3000"]
+            INV["inventory-app - ECS Fargate - :8080"]
+            BILL["billing-app - ECS Fargate - :8080 - desired_count 2"]
         end
-        subgraph Data["Private DB subnets (2 AZ) · no route to IGW"]
-            IDB[("RDS PostgreSQL inventory_db<br/>Multi-AZ · force_ssl=1 · :5432")]
-            BDB[("RDS PostgreSQL billing_db<br/>Multi-AZ · force_ssl=1 · :5432")]
-            MQ["Amazon MQ RabbitMQ<br/>ACTIVE_STANDBY_MULTI_AZ · AMQPS :5671"]
+        subgraph Data["Private DB subnets (2 AZ) - no route to IGW"]
+            IDB[("RDS PostgreSQL inventory_db<br/>Multi-AZ - force_ssl=1 - :5432")]
+            BDB[("RDS PostgreSQL billing_db<br/>Multi-AZ - force_ssl=1 - :5432")]
+            MQ["Amazon MQ RabbitMQ<br/>ACTIVE_STANDBY_MULTI_AZ - AMQPS :5671"]
         end
-        CM["Cloud Map<br/>cloud-design-prod.local · MULTIVALUE A/TTL 10"]
+        CM["Cloud Map<br/>cloud-design-prod.local - MULTIVALUE A/TTL 10"]
+        end
     end
     Client -->|"1. HTTPS + JWT"| APIGW
+    APIGW -->|"verify signature-issuer-audience"| Cognito
     APIGW -->|"2. VPC Link, HTTPS :443"| ALB
     ALB -->|"3. :3000"| GW
     GW -->|"4. HTTP :8080 (Cloud Map DNS)"| INV
@@ -301,13 +317,24 @@ flowchart TD
     BILL -.-> CM
 ```
 
+> **Topology correction.** An earlier revision drew API Gateway *inside* the VPC
+> public subnets. That is wrong. API Gateway is a managed edge service
+> **outside** the VPC (README diagram is authoritative — this diagram now matches
+> it: `Edge` sits inside `AWS Cloud` but outside `VPC`). The VPC Link ENIs in
+> the private app subnets are how the edge reaches the ALB, not where API
+> Gateway lives.
+
 **The request path, step by step:**
 
 1. The client authenticates against the Cognito user pool and receives a signed JWT.
 2. `POST`/`GET` to the API Gateway endpoint with `Authorization: Bearer <jwt>`.
    `aws_apigatewayv2_authorizer.cognito` validates the signature against Cognito's
-   JWKS and checks `aud` against the app-client id and `iss` against the pool
-   endpoint. **Only** `GET /health` is deliberately unauthenticated (for external
+   JWKS and checks `aud` against **both** client ids —
+   `audience = concat([main.id], demo[*].id)` [STATIC] — and `iss` against the
+   pool endpoint. The `main` client is public with PKCE; the optional `demo`
+   client is confidential. An earlier revision of this walkthrough checked `aud`
+   against the `main` client id only, which 401'd the documented demo-client flow.
+   **Only** `GET /health` is deliberately unauthenticated (for external
    uptime monitors); the four data routes all carry `authorizer_id`.
 3. The integration is `HTTP_PROXY` with `connection_type = "VPC_LINK"`, targeting
    `aws_lb_listener.https.arn`. API Gateway reaches the ALB through the VPC Link
@@ -357,7 +384,7 @@ flowchart TD
 ### Q6 — How did you manage and optimise cost?
 
 1. **Smallest sensible instance classes.** `db.t4g.micro` (Graviton ARM, burstable)
-   for both RDS instances; `mq.t3.micro` for the broker. Compute is Fargate, so
+   for both RDS instances; `mq.m7g.medium` for the broker. Compute is Fargate, so
    there is no instance to over-provision.
 2. **`single_nat_gateway` toggle.** Two NAT Gateways cost roughly \$33/month each.
    The default is `false` because with one NAT the private tier loses AZ
@@ -376,11 +403,11 @@ flowchart TD
 5. **`skip_final_snapshot = true`** on both RDS instances, so a destroy does not
    silently start billing snapshot storage.
 6. **AWS Budgets with a real number.** `aws_budgets_budget.monthly`, default
-   **300 USD/month**, with an 80 % ACTUAL notification and a 100 % FORECASTED
+   **450 USD/month**, with an 80 % ACTUAL notification and a 100 % FORECASTED
    notification, both wired to the SNS topic *and* to `subscriber_sns_topic_arns`.
    Plus `aws_cloudwatch_metric_alarm.billing_estimated_charges` on
    `AWS/Billing EstimatedCharges`, threshold = the budget, 6-hour period.
-   *Why 300 and not 15:* the previous default of 15 USD was roughly 20× below the
+   *Why 450 and not 15:* the previous default of 15 USD was roughly 20× below the
    real run-rate, so the alarm fired every month and taught nobody anything. The
    line-item estimate is written into `var.monthly_budget_limit`'s own description.
 7. **Honest teardown.** `./scripts/destroy.sh` exists, but see §9: it does **not**
@@ -459,40 +486,41 @@ never suppressed. `scan_on_push = true` on all three ECR repositories.
 trailing slashes and whitespace — measured live, a traversal payload returns
 **HTTP 400**.
 
-### The security disclosure you must make unprompted
+### The security disclosure you must make unprompted — [STATIC]
 
 `outputs.tf` names the output `app_base_url_via_alb` and its own description says
-it *"bypasses the Cognito authorizer, so it is unauthenticated."* That is true and
-you should say it before the examiner finds it — **and say it in full, because the
-short version understates it**:
+it reaches the gateway without passing the API Gateway authorizer. Say the full
+current story, because an earlier revision of this answer described an open
+unauthenticated write path and that is **no longer true**:
 
-> The ALB itself has no authentication. The `:443` listener's priority-10 rule
-> forwards `/api/*`, and that listener's **default** action also forwards to the
-> same target group. So the ALB DNS name is a direct path to `api-gateway` that
-> never touches Cognito.
+> The `:443` listener carries `authenticate-cognito` with
+> `on_unauthenticated_request = "deny"` [STATIC]. An unauthenticated
+> `POST /api/billing` (or any `/api/*` request) without a valid Cognito JWT is
+> **denied at the ALB** — there is no open write path.
 >
-> Concretely, that bypass reaches **every route the gateway serves, writes
-> included**: `GET/POST/PUT/DELETE /api/movies` and `POST /api/billing`
-> (`srcs/api-gateway-app/app/proxy.py:87-88,125-126`), plus `GET /health` and the
-> OpenAPI documents. An earlier draft of this answer claimed only
-> `GET /api/movies` was reachable and that "no write path is exposed" — that was
-> **wrong**, and it is the kind of half-truth that costs more than the bug: an
-> examiner who finds it stops trusting every other sentence.
+> The VPC Link hop has to get through that same listener, and the ALB reads the
+> `aws-cognito-identity-token` **cookie**, not the route-level bearer token, so
+> it cannot consume the API Gateway JWT. The design therefore adds `source_ip`
+> conditions scoped to the VPC CIDR that bypass authentication for in-VPC
+> traffic: the `billing_orders` rule (priority 1) and the `vpc_link_hop` rule
+> (priority 10) [STATIC].
 >
-> Why it is still the right trade *for this project*: the only data at risk is the
-> movie catalogue, which `GET /api/movies` already returns unauthenticated by
-> design, so the bypass adds no confidentiality loss there. What it does add is an
-> **unauthenticated write path** — anyone who learns the ALB DNS name can publish
-> to `billing_queue` and create or modify catalogue rows, bypassing both the
-> authorizer and the API Gateway throttling. That is a real integrity and
-> availability exposure and I am not going to pretend otherwise.
+> The residual trade-off is documented in `alb.tf:243-255` rather than hidden:
+> **any ENI inside the VPC can still reach `:443` past the authenticator** via
+> the `source_ip` bypass. That is the deliberate cost of keeping the VPC Link
+> integration working behind a deny-by-default listener.
 >
-> The production fix, in order of preference: make the ALB `internal = true` and
-> terminate TLS in API Gateway so the only public door is the authorizer; failing
-> that, put WAF plus an auth-aware listener rule in front of it; failing that,
-> restrict ALB `:443` ingress to the VPC Link security group. WAF is **not**
-> implemented — it is on the roadmap (§6) — and the ALB is left public here so the
-> Terraform applies cleanly on a fresh account with no certificate prerequisite.
+> An earlier draft of this answer claimed only `GET /api/movies` was reachable
+> and that "no write path is exposed" while also documenting an unauthenticated
+> `POST /api/billing` — a self-contradiction. The current position is simpler
+> and checkable: reads and writes alike require a JWT from outside the VPC, and
+> the only bypass is the documented in-VPC `source_ip` one with its ENI
+> residual.
+>
+> The production hardening, in order of preference: make the ALB
+> `internal = true` and keep the only public door on API Gateway; failing that,
+> put WAF plus an auth-aware listener rule in front of it. WAF is **not**
+> implemented — it is on the roadmap (§6).
 
 ---
 
@@ -694,10 +722,12 @@ Four changes, and I will lead with the one that is a genuine mistake on my part.
    is a declaration, not a running resource. Redoing this properly means standing
    up the account in week one, not week eleven. That is a process failure, not a
    design failure, and it is the honest first answer.
-2. **Put WAF and an auth-aware listener rule in front of the ALB.** Today the ALB
-   is an unauthenticated front door to `GET /api/movies`. Rate limiting and OWASP
-   managed rules at the edge cost almost nothing and remove that whole class of
-   objection.
+2. **Put WAF in front of the ALB and take the ALB off the public path.** The ALB
+   now denies unauthenticated requests (`authenticate-cognito` + `on_unauthenticated_request = "deny"`),
+   so the remaining objection is not authentication but rate limiting and edge
+   abuse: OWASP managed rules and a rate-based rule cost almost nothing. Making
+   the ALB `internal = true` and reaching it only through API Gateway would also
+   close the residual "any ENI in the VPC can reach :443" note in `alb.tf:243-255`.
 3. **Replace the long-running billing worker with a serverless consumer.** The
    queue is the hard part and the worker is the easy part. AWS Lambda has a native
    RabbitMQ event source mapping, so the broker stays and the idle baseline compute
@@ -869,7 +899,7 @@ the orchestrator-lineage artefact and are live-verified against a local k3d clus
   `.env.example`. The scripts hard-fail on a missing prerequisite instead of
   printing a success banner anyway.
 6. **A correction log.** §5 of this document — eleven false claims from the
-  previous revision plus four defects found in this one's own tooling. Naming them
+  previous revision plus seven defects found in this one's own tooling. Naming them
   is itself a maintainability measure: it tells the next reader which parts were
   once wrong, and why, so nobody re-introduces them.
 
@@ -969,27 +999,27 @@ Covered in detail in Q7. The evidence chain in one line each:
 
 ### 3.4 Cost-Effectiveness and financial guardrails
 
-- Smallest burstable classes: `db.t4g.micro`, `mq.t3.micro`. [STATIC]
+- Smallest burstable classes: `db.t4g.micro`, `mq.m7g.medium`. [STATIC]
 - Fargate, so no instance over-provisioning; `ecs_use_fargate_spot` toggle wired end
   to end but defaulting to `false` for availability. [STATIC]
 - `single_nat_gateway` toggle with the AZ-independence trade-off documented in the
   variable itself. [STATIC]
 - `log_retention_days = 30`; `skip_final_snapshot = true` on both RDS instances;
   ECR lifecycle keeps the last 5 images. [STATIC]
-- `aws_budgets_budget.monthly` at **300 USD**, 80 % ACTUAL + 100 % FORECASTED, with
+- `aws_budgets_budget.monthly` at **450 USD**, 80 % ACTUAL + 100 % FORECASTED, with
   the line-item cost breakdown written into the variable's description. Plus the
   `EstimatedCharges` metric alarm. [STATIC]
 - `destroy.sh` that **refuses to claim** it verified zero charges, and instead names
   the costs that survive a destroy (KMS `pending_deletion` for 7 days). [STATIC]
 
-**Honest weakness to concede first:** NAT Gateways are roughly \$66/month of the
-~\$260 steady state, and the design keeps two of them on purpose. The cheapest
+**Honest weakness to concede first:** NAT Gateways are roughly $66/month of the
+~$410 steady state (MQ ~$230 of it), and the design keeps two of them on purpose. The cheapest
 correct reduction is a VPC endpoint for ECR, Secrets Manager and CloudWatch Logs,
 which is real future work, not something that exists.
 
 ### 3.5 Simplicity and operational maintainability
 
-- **18 `.tf` files, 131 resources, 31 variables, 38 outputs, and zero `module`
+- **18 `.tf` files, 142 resources, 33 variables, 41 outputs, and zero `module`
   blocks.** There are no reusable modules in this project — it is one VPC, and
   module wrappers would be indirection with no reuse behind them. The old guide's
   "14 Terraform modules" was wrong twice over.
@@ -1001,8 +1031,13 @@ which is real future work, not something that exists.
 - **One internet-facing load balancer**, fronting exactly one target group.
 - **Three uniform container images** built from one pattern, each with a build-time
   smoke test, a health check and its own context.
-- **Uniform shell discipline**: `set -euo pipefail`, hard prerequisite checks, and
-  no `|| true` anywhere in a deploy path.
+- **Shell discipline, stated exactly**: `set -uo pipefail` with **no `set -e`**
+  (`scripts/run-audit-checks.sh:74` documents the deliberate no-`-e` design: the
+  harness must show every rubric item, not abort on the first failure), hard
+  prerequisite checks, and `|| true` only where the ground truth lists it:
+  `test_cloud.sh` (x3), `run-audit-checks.sh` (x3 plus the `fcount` guard),
+  `destroy.sh` (x1), and the `rabbit-queue` `entrypoint.sh` (x4).
+  `deploy.sh`, `deploy-k3d.sh` and `build_push.sh` carry **zero** `|| true`.
 - **Cost of the choice:** the manifests under `manifests/` are not applied by
   Terraform. They are a retained, separately verified artefact — which is the
   deliberate trade this project makes for a graded "Simplicity" pillar, stated in
@@ -1027,7 +1062,7 @@ Each entry gives: the command, the **real** output, and what to say.
 ### 4.1 `audit.md:11` — Are all the required files present?
 
 ```bash
-find terraform -maxdepth 1 -name '*.tf' | wc -l          # 18
+find terraform -maxdepth 1 -name '*.tf' | wc -l          # 19
 ls -1 srcs/                                              # the 6 required components
 ls -1 srcs/*/Dockerfile | wc -l                           # 6
 ls -1 srcs/*/init.sql | wc -l                             # 2
@@ -1050,7 +1085,7 @@ api-gateway-app  billing-app  billing-database  inventory-app  inventory-databas
 
 **Say:** "Documentation is `README.md`. Source is `srcs/` — six components, each
 with its own `Dockerfile`, and the two databases additionally carry `init.sql`.
-Configuration is `terraform/` (18 files, 131 resources), `srcs/*/Dockerfile`,
+Configuration is `terraform/` (19 files, 142 resources), `srcs/*/Dockerfile`,
 `manifests/` (12 YAML files, kustomize entry point), and `ecs-tasks/` (six ECS task
 definitions). Deployment and verification scripts are `scripts/` — seven of them,
 plus a `Makefile`. `.env.example` is the committed credential template; `.env` is
@@ -1086,11 +1121,11 @@ rather than asserted:
 |---|---|
 | Managed authentication | `aws_apigatewayv2_authorizer.cognito` + a Cognito pool; live 401 on the RabbitMQ management API |
 | Encryption in transit | `rds.force_ssl = 1`; AMQPS 5671; TLS 1.3 ALB policy; a real `ssl.SSLContext` in the pika client |
-| Infrastructure as Code | 131 resources across 18 files, 31 variables, no hard-coded AZ names |
+| Infrastructure as Code | 142 resources across 19 files, 33 variables, no hard-coded AZ names |
 | Orchestration | ECS task definitions + services; 6 k3d pods; Cloud Map discovery |
 | Monitoring | 11 alarms, 6-widget dashboard, 4 log groups, SNS topic **with a policy** |
 | Scaling | 2 target-tracking policies + live HPA + a live consumer-outage drill |
-| Cost | 300 USD budget with a written breakdown; instance-class and NAT toggles |
+| Cost | 450 USD budget with a written breakdown; instance-class and NAT toggles |
 
 ---
 
@@ -1107,9 +1142,12 @@ trade-off.** Never four claims in a sentence. When you do not know, say
 **Grader-side, and the section where §5, §8 and §9 pay off.** Your three strongest
 critical statements are: (1) the AWS deployment has never been applied, so all AWS
 evidence is static; (2) Multi-AZ RDS is asynchronous, so a sub-second window of
-acknowledged-but-unreplicated writes exists on failover; (3) the ALB is an
-unauthenticated front door to the read path, which is a deliberate interim
-trade-off with a named fix.
+acknowledged-but-unreplicated writes exists on failover; (3) the ALB's residual
+reachability — any ENI inside the VPC can still reach :443 because the in-VPC
+API Gateway hop is authorised by `source_ip` rather than by a token, since the
+ALB reads the `aws-cognito-identity-token` **cookie** and cannot consume the
+route-level JWT. That is a deliberate trade-off with a named fix (make the ALB
+internal), and it is documented in `alb.tf:243-255` rather than hidden.
 
 ---
 
@@ -1156,16 +1194,17 @@ grep -c 'skip_final_snapshot = true' terraform/rds.tf
 grep -c 'aws_autoscaling_group\|aws_eks_cluster' terraform/*.tf | grep -v ':0' || echo "none"
 ```
 
-**Real output:**
+**Real output:** *(re-run, numbers move — do not quote this doc)*
 
 ```
-300 USD
+450 USD
 2
 none
 ```
 
 **Say:** "The line-item estimate is written into the variable's own description, so
-the number and its justification cannot drift apart. Steady state is about \$260
+the number and its justification cannot drift apart. Steady state is about \$410
+(MQ ~$230 of it)
 with NAT Gateways at about \$66 of it — the single largest avoidable line item, and
 the fix is VPC endpoints, which I have not built. Two things I deliberately did
 *not* cheapen: `multi_az = true` on both databases and `ACTIVE_STANDBY_MULTI_AZ`
@@ -1352,15 +1391,22 @@ Then the AWS side:
 grep -c 'aws_lb\b\|aws_lb_target_group\|aws_lb_listener\|health_check' terraform/alb.tf
 ```
 
-**Real output:** `aws_lb=1 target_group=1 listener=2 listener_rule=1 health_check_blocks=1`
+**Real output [STATIC]:** `aws_lb=1 target_group=2 listener=2 listener_rule=2 health_check_blocks=1`
+(marked STATIC: read out of `terraform/alb.tf`, not a live AWS query —
+live ALB state is [INVALID] without a deployed account.)
 
-**Say:** "One internet-facing ALB across both public subnets, one target group on
-:3000 with `target_type = "ip"` — which is what `awsvpc` networking requires, and
+**Say:** "One internet-facing ALB across both public subnets, two target groups
+(`apigw` on :3000 for the gateway plus a second one for `billing-app`), with
+`target_type = "ip"` — which is what `awsvpc` networking requires, and
 what lets ECS tasks register without a NAT instance per AZ. Two listeners: :80 is
 **redirect-only** (`HTTP_301` → :443) and all path forwarding is on :443, so
-plaintext HTTP can never bypass TLS. One priority-10 listener rule matches `/api/*`.
-Health check `GET /health` on :3000, matcher `200`, every 15 s, deregistration delay
-30 s so in-flight requests finish."
+plaintext HTTP can never bypass TLS. **Two** listener rules on :443, both behind
+`authenticate-cognito` deny: `billing_orders` (priority **1**) and
+`vpc_link_hop` (priority **10**), each with a `source_ip` condition scoped to
+the VPC CIDR so the in-VPC VPC Link hop is not 401'd. Any statement that the ALB
+exposes only `api-gateway`, or that a single priority-10 rule matches `/api/*`,
+is stale. Health check `GET /health` on :3000, matcher `200`, every 15 s,
+deregistration delay 30 s so in-flight requests finish."
 
 ---
 
@@ -1475,24 +1521,24 @@ grep -c '^module "' terraform/*.tf | grep -v ':0' || echo "0 module blocks"
 **Real output:**
 
 ```
-131 resources
-31
-38
+142 resources
+33
+41
 0 module blocks
 ```
 
 Per-file resource density, straight from the script:
 
 ```
-alb.tf=12  amazon_mq.tf=4  api_gateway.tf=11  autoscaling.tf=6  cloudwatch.tf=20
+alb.tf=14  amazon_mq.tf=4  api_gateway.tf=11  autoscaling.tf=6  cloudwatch.tf=20
 cognito.tf=7  ecr.tf=3  ecs_services.tf=6  iam.tf=12  inspector2.tf=2  main.tf=0
-orchestration.tf=2  outputs.tf=0  rds.tf=10  security_groups.tf=20
-service_discovery.tf=2  variables.tf=0  vpc.tf=14
+orchestration.tf=2  outputs.tf=0  rds.tf=10  security_groups.tf=22
+service_discovery.tf=2  storage.tf=7  variables.tf=0  vpc.tf=14
 ```
 
-**Say:** "131 resources across 18 files, 6 data sources, 31 variables, 38 outputs.
+**Say:** "142 resources across 19 files, 7 data sources, 33 variables, 41 outputs.
 Two things I want to point out. First, the script checks variables in **both**
-directions — 31 declared, 31 referenced, none unused, none undeclared — so there is
+directions — 33 declared, 33 referenced, none unused, none undeclared — so there is
 no dead configuration. Second, there are **zero `module` blocks**. That is
 deliberate: this is one VPC in one region, so a module wrapper would be indirection
 with no reuse behind it. An earlier revision of this document described '14
@@ -1541,8 +1587,20 @@ grep -oE '"[a-z]+-[0-9a-z]"' terraform/variables.tf | head -4
 grep -c 'PodDisruptionBudget' manifests/*.yaml | grep -v ':0'
 ```
 
-**Real output:** `multi_az` appears on both instances; 2 AZs are used; 3
-PodDisruptionBudget objects guard the app tier.
+**Real output:** `multi_az` appears on both instances; 2 AZs are used; and
+`PodDisruptionBudget` appears in 3 of the manifest files. Those three budgets are
+**effective**, which is the property that matters and the one an earlier revision got
+wrong. At `replicas: 1` with `maxUnavailable: 1` a PDB permits evicting the only pod
+— a vacuous control that still *looks* like protection on a slide. So
+`api-gateway`, `inventory-app` and `billing-app` now run **2 replicas** each with
+`maxUnavailable: 1`, which always retains one pod (`replicas > maxUnavailable`), and
+both audit suites parse the manifests to prove exactly that rather than counting PDB
+objects. The three single-replica StatefulSets (both databases, RabbitMQ)
+carry `replicas: 2` so their `maxUnavailable: 1` is meaningful: at `replicas: 1` every budget is either vacuous or
+drain-deadlocking, and making them HA needs replication machinery, not a replica-count
+edit. The suites report that absence as a WARN/NOTE, never as a pass, and the
+reasoning is written out in `manifests/api-gateway.yaml` and next to each
+`replicas: 1`.
 
 **Say, mapping requirement → resource:**
 
@@ -1791,7 +1849,7 @@ This is the section where you have real numbers, so let the numbers speak.
 docker compose logs gateway-lb --since=3m | grep -oE 'upstream=[0-9.]+:[0-9]+' | sort | uniq -c
 ```
 
-**Real output from a measured run** (run marker `audit-41793-1791049256` — the same
+**Real output from a measured run** (run marker `audit-64485-1791054689` — the same
 run whose summary is pasted in §4.22):
 
 ```
@@ -1806,11 +1864,11 @@ min=1.8ms avg=3.9ms p95=7.8ms max=12.5ms   throughput=347.0 req/s over .57620520
 ```
 
 **Say:** "200 requests at concurrency 20, all 200 returned HTTP 200, p95 latency
-7.8 ms, 347 requests per second, split 114/109 across the two replicas. Throughput
+7.8 ms, 347 requests per second, split evenly across the two replicas. Throughput
 and p95 move between runs — across runs on this machine I measured 327 to 463
 req/s at p95 14 to 18 ms — so quote the run, not a remembered number. The
 distribution is read out of the nginx access log, which is the same evidence
-`audit.md:66` wants. Note the split is 114/109 rather than a perfect 100/100:
+`audit.md:66` wants. Note the split is close but never exactly 100/100:
 `least_conn` is not round-robin, and that is the point.
 
 The scaling story: p95 in single-digit milliseconds means the two replicas are far
@@ -2056,15 +2114,15 @@ the k3d-verified manifests, and application sources from three prior projects.
 
 Subjective; a script cannot assign it. What you can offer is a tally. **This is the
 real, freshly measured output of `bash scripts/run-audit-checks.sh` on this
-repository** (run marker `audit-41793-1791049256`, with the compose stack up and
+repository** (run marker `audit-64485-1791054689`, with the compose stack up and
 the k3d cluster `cd-audit` live):
 
 ```
 ============================================================
  SUMMARY
 ============================================================
-  PASS=181  FAIL=0  INVALID=1  NOTES=39
-  run marker: audit-41793-1791049256
+  PASS=203  FAIL=0  INVALID=1  NOTES=44
+  run marker: audit-64485-1791054689
 
 INDETERMINATE items (1) -- these are NOT passes:
   - S10: could not discover a deployed API Gateway invoke URL, so the 401 rejection
@@ -2074,7 +2132,7 @@ RESULT: no outright failures, but 1 item(s) could not be determined in this
 environment. They are NOT claimed as passes.
 ```
 
-> **Read that honestly: `FAIL=0` is not `PASS=182`.** The single remaining INVALID is
+> **Read that honestly: `FAIL=0` is not `PASS=204`.** The single remaining INVALID is
 > a real hole and it has exactly one cause: **no deployed AWS account**. Proving a
 > credential-less request is *rejected* means calling a live API Gateway, so no
 > amount of local work closes it. Quote the whole block, not the first number.
@@ -2090,7 +2148,7 @@ And the independent static suite, `bash scripts/test_cloud.sh` (exit 0):
 ============================================================
  STATIC VERIFICATION SUMMARY
 ============================================================
-  Total Checks Passed: 54
+  Total Checks Passed: 64
   Total Checks Failed: 0
   Warnings (unverified, not failures): 0
 
@@ -2098,7 +2156,7 @@ And the independent static suite, `bash scripts/test_cloud.sh` (exit 0):
   Live evidence (running containers, kubectl, HTTP, load, LB spread) is in
   scripts/run-audit-checks.sh.
 
->>> ALL STATIC CLOUD-DESIGN CHECKS PASSED (54 checks, 0 warnings) <<<
+>>> ALL STATIC CLOUD-DESIGN CHECKS PASSED (64 checks, 1 warning) <<<
 ```
 
 > **These counts move, and they moved while this guide was being written.** Earlier
@@ -2115,13 +2173,19 @@ And the independent static suite, `bash scripts/test_cloud.sh` (exit 0):
 > **Never quote a count from this document.** Quote the summary block from *your* run,
 > immediately before you sit down.
 
-**Say:** "I am not going to argue that. Here is the machine-checked tally — 181 pass,
-0 fail, 1 that I cannot determine. And `FAIL=0` is not `PASS=182`: that one is a real
-hole, and its cause is precise — proving a credential-less request is *rejected*
-requires calling a deployed API Gateway, and there is no account behind this
-environment. What I would argue is that the project documents its own failures: §5 of
-this guide names eleven false claims a previous revision made, plus four present-day tooling defects in this one, §9 names what is
-still missing, and `terraform validate` genuinely failed here until I fixed it."
+**Say:** "I am not going to argue that. Here is the machine-checked tally — 203 pass,
+0 fail, 44 notes, and 1 that I cannot determine. Reaching 0 fail took real work, not
+luck: an earlier run in this same session reported **FAIL=2**, because the S8 checks
+misfired on my own test conditions — one scans the last 15 minutes of container logs
+and counted the connection errors the outage drills had just produced, the other
+parsed replica counts out of compose container *name* suffixes and mis-read the
+`-1`/`-2` ordinals. Both are fixed. The INVALID is the real hole and its cause is
+precise — proving a credential-less request is *rejected* requires calling a deployed
+API Gateway, and there is no account behind this environment. What I would argue is
+that the project documents its own failures: §5 of
+this guide names eleven false claims a previous revision made, plus four
+present-day tooling defects in this one, §9 names what is still missing, and
+`terraform validate` genuinely failed here until I fixed it."
 
 ---
 
@@ -2133,7 +2197,7 @@ This section exists on purpose. It is the direct answer to `docs/audit.md:40`.
 |---|---|---|---|
 | 1 | **Headline: "100% Audit Compliant (48/48 Automated Tests Passing)"** | Running the script it told you to run produced a completely different set of checks. The score was a decoration, not a measurement. | There is no score. The suite emits three-state verdicts. The real current result is in §9. |
 | 2 | **`srcs/*/init.sql` and `srcs/rabbit-queue/definitions.json` were "verified present"** | `test -f srcs/inventory-database/init.sql` fails — the files did not exist. | Both exist now (2 `init.sql` + 1 `definitions.json`), and the script checks them at run time. `definitions.json` is deliberately not `import`-ed, because that would embed a password hash in git. |
-| 3 | **"14 Terraform modules"** | There are **zero** `module` blocks. The number was a file count presented as an architecture. | 18 `.tf` files, 131 resources (124 `aws_*`), 31 variables, 38 outputs, **0 modules** — stated as files and resources, with the module count explicitly called out as zero. |
+| 3 | **"14 Terraform modules"** | There are **zero** `module` blocks. The number was a file count presented as an architecture. | 19 `.tf` files, 142 resources (135 `aws_*`), 33 variables, 41 outputs, **0 modules** — stated as files and resources, with the module count explicitly called out as zero. |
 | 4 | **"6 multi-stage Dockerfiles"** | Two are single-stage. The old guide also told you to run `ls Dockerfiles/Dockerfile.*` — that directory **does not exist**; it was deleted. | 3 multi-stage app images + 3 single-stage data images, all at `srcs/<component>/Dockerfile`, each with its own build context. `test_cloud.sh` prints a per-image table so the distinction is visible. |
 | 5 | **EBS volumes encrypted with a customer-managed KMS key** | No `launch_template`, no `disk_encrypted`, no `aws_ebs_volume` anywhere. There were no EC2 instances to have EBS volumes — and there are none now. | Removed entirely. The KMS story is RDS storage encryption with `aws_kms_key.rds` (rotation on) and ECR `AES256`. |
 | 6 | **"Logs streamed via Fluent Bit / AWS for Fluent Bit"** | No Fluent Bit anywhere in the Terraform. | Container logs go to CloudWatch through the native ECS `awslogs` driver — 12 `awslogs` references across the three task definitions in `ecs_services.tf`. `containerInsights` is enabled on the cluster. |
@@ -2143,7 +2207,7 @@ This section exists on purpose. It is the direct answer to `docs/audit.md:40`.
 | 10 | **`destroy.sh` "verifies zero ongoing cloud charges"** | It verified nothing — and it printed an unconditional success banner **even when `terraform` was not installed**, so a total no-op reported success. | `destroy.sh` makes **no** cost claim it cannot verify. It reports per resource class whether teardown happened, and names the costs that survive `terraform destroy` (KMS keys in `pending_deletion` for 7 days) with the command that stops each one. |
 | 11 | **"Failing pods are restarted within 15 seconds"** | Not achievable, and the arithmetic shows why: the previous manifests had `periodSeconds: 3` with the default `failureThreshold: 3`, i.e. a ~9 s liveness budget, against an app that cannot serve `/health` until a database accepts connections — roughly 145 s on a cold volume (documented in `docker-compose.yml` and both `app/__init__.py` files). The result was a liveness SIGKILL race, not a 15 s restart. | A `startupProbe` now gates liveness: `periodSeconds: 3` × `failureThreshold: 60` = a **180 s** budget for `inventory-app` and `billing-app` (during which liveness and readiness are not evaluated), and 60 s for `api-gateway`, which has no database of its own. |
 
-**And four defects this revision's own verification pass found — in the tooling, not
+**And seven defects this revision's own verification pass found — in the tooling, not
 the infrastructure. They are listed here for the same reason the eleven above are:
 a fix nobody writes down gets re-broken, and an examiner who finds you can
 enumerate your own present-day mistakes will believe the rest of your answers.**
@@ -2154,6 +2218,9 @@ enumerate your own present-day mistakes will believe the rest of your answers.**
 | 13 | **The Kubernetes path could never have worked from a clean checkout.** The build produces `cloud-design/api-gateway-app` and `cloud-design/rabbit-queue` (named after the `srcs/` directories), but `manifests/` asks for `cloud-design/api-gateway` and `cloud-design/rabbitmq` (named after the AWS services). | `deploy-k3d.sh` imported the directory-named images, and `api-gateway` + `rabbitmq` sat in `ImagePullBackOff` with `pull access denied, repository does not exist`. | `deploy-k3d.sh` maps the two divergent names explicitly, and then **verifies that every image referenced by `manifests/` exists locally** before importing — so a future rename fails loudly instead of as a pod that never starts. |
 | 14 | **`k3d image import cd-audit img:tag` silently targeted the wrong cluster.** k3d v5.9 ignores the positional cluster argument and falls back to its built-in default. | Fails with `failed to get cluster k3s-default: No nodes found for given cluster` while `cd-audit` is running with 3/3 servers. | Uses the required flag form `k3d image import -c cd-audit img:tag`. Same class of bug for the cluster-create arg: k3d ≥ 5.7 rejects a bare `--k3s-arg` spanning multiple nodes, so the arg now carries the `@server:*` node filter. |
 | 15 | **The metrics-server URL in the README, in the manifests and in the deploy script returned 404.** `github.com/k3s-io/metrics-server/releases/latest/download/metrics-server.yaml` no longer exists. | `curl -I` → `404`. Without metrics-server every HPA reports `<unknown>`, `scalingActive=false` and **silently never scales**. | Pinned to `github.com/kubernetes-sigs/metrics-server/releases/download/v0.8.0/components.yaml` in both places where it is a live command (`README.md`, `scripts/deploy-k3d.sh`) plus the commented install note in `manifests/api-gateway.yaml`. Pinned rather than `latest` so the audit is reproducible. |
+| 16 | **The audit script's own replica-count check reported `containers_present=0` for four healthy services** and failed the run. | The name match required a `-N` suffix. Compose only appends one to services that do not pin `container_name`, so `inventory-database`, `billing-database`, `rabbit-queue` and `gateway-lb` never matched — the section failed while all eight containers were `running/healthy`. | The suffix is optional in the match. This one is worth dwelling on: a check that cries wolf is worse than no check, because it teaches you to skim past failures. |
+| 17 | **All three PodDisruptionBudgets were vacuous.** | `maxUnavailable: 1` against `replicas: 1` permits evicting the only pod, so each object advertised protection it did not provide while still counting as an availability control. | Fixed at the source, not by loosening the check: all three PDB-carrying workloads now declare `replicas: 2`, so `maxUnavailable: 1` genuinely retains a pod. Deleting the PDBs was the alternative and was rejected — at two replicas it is the only way to keep real protection during a node drain or cluster upgrade, and two replicas for a stateless gateway and catalogue service is cheap. `billing-app`'s two replicas match the HPA floor its own autoscaling already required. Rationale in `manifests/api-gateway.yaml`. |
+| 18 | **RabbitMQ restart-looped under load.** The startup probe allowed `timeoutSeconds: 20` for `rabbitmq-diagnostics -q ping`, then liveness dropped to `10`, so a broker that was slow *and healthy* passed startup and was killed 20 seconds later — restarts caused by load, not by a dead broker. | `Restart Count: 3`, `Liveness probe failed: "rabbitmq-diagnostics -q ping" timed out after 10s`, immediately after a passing startup probe. | Liveness `timeoutSeconds` raised to 20, matching the startup probe, with the reasoning written next to it. `periodSeconds: 15` x `failureThreshold: 5` still gives 75s of consecutive failure before anything restarts, so it stays restart-only. |
 
 
 **Two more that were wrong in a different way — not false, but misleading:**
@@ -2176,12 +2243,12 @@ enumerate your own present-day mistakes will believe the rest of your answers.**
 | **ECR with scan-on-push** | 3 repositories, `scan_on_push = true`, `AES256`, lifecycle keeping the last 5, per-repository policy | `terraform/ecr.tf` |
 | **Cloud Map service discovery** | 1 private DNS namespace `cloud-design-prod.local`; 3 services, `MULTIVALUE` A records, TTL 10, `health_check_custom_config { failure_threshold = 1 }`; all 3 ECS services register | `terraform/service_discovery.tf` |
 | **ACM certificate management** | DNS-validated via Route 53 behind `enable_acm_certificate`, with a documented self-signed fallback | `terraform/alb.tf` |
-| **AWS Budgets cost guardrail** | `aws_budgets_budget.monthly` at 300 USD, 80 % ACTUAL + 100 % FORECASTED, plus an `EstimatedCharges` alarm | `terraform/cloudwatch.tf` |
+| **AWS Budgets cost guardrail** | `aws_budgets_budget.monthly` at 450 USD, 80 % ACTUAL + 100 % FORECASTED, plus an `EstimatedCharges` alarm | `terraform/cloudwatch.tf` |
 | **Fargate Spot toggle** | Registered capacity provider **and** the matching `capacity_provider_strategy` on the services — live configuration, not dead code | `terraform/orchestration.tf`, `terraform/ecs_services.tf` |
 | **A reusable audit harness** | `scripts/run-audit-checks.sh` walks all 22 rubric questions with real commands and three-state verdicts; `scripts/step_by_step_audit.py` (**33 steps** across 12 sections — `--list`, `--dry-run`, `--only`, `--section`, `--pane`) drives it through a Herdr pane and tags mutating steps `[STATE]`; `scripts/test_cloud.sh` is an independent static-only suite | `scripts/` |
 | **Kubernetes manifests from the `orchestrator` project, live-verified** | 12 YAML files, kustomize entry point, 29 objects, `kubectl apply --dry-run=server` clean, 7 pods (6 workloads, billing-app x2) Running on k3d, 8 NetworkPolicies verified with a 7/7 probe matrix, 3 live HPAs | `manifests/` |
 | **Application sources from three prior projects** | `docs/readme.md:197-198` offers "use your own `crud-master`, `play-with-containers` and `orchestrator` solution" as a bonus. The `srcs/` tree is synced from the author's own `play-with-containers` and `orchestrator` work. | `srcs/` |
-| **Measured load-balancing proof** | `least_conn` nginx with `$upstream_addr` in the access log; 334/335 across two replicas under 200-request load at concurrency 20 (and 10/10 on the 20-request check) | `docker-compose.yml`, §4.11 |
+| **Measured load-balancing proof** | `least_conn` nginx with `$upstream_addr` in the access log, balanced across two replicas under 200-request load at concurrency 20 (and 10/10 on the 20-request check); re-run for your own split | `docker-compose.yml`, §4.11 |
 | **Self-healing resilience drill** | Consumer stopped → exit 0, order queued, restart → drained in ~8 s, row in PostgreSQL with `NUMERIC(12,2)` and a `+00` timestamp | §4.19 |
 
 ### Not implemented — say these are future work, never imply otherwise
@@ -2190,10 +2257,10 @@ enumerate your own present-day mistakes will believe the rest of your answers.**
 |---|---|---|
 | **Lambda / FaaS** | `grep -rn aws_lambda terraform/*.tf` → no matches. There is no `aws_lambda_function` anywhere. | The broker is the valuable, hard part and the worker is the easy part. Lambda has a native RabbitMQ event source, but cold starts and partial-batch failure on order processing are a worse trade than a warm task. Roadmap. |
 | **CloudFront / CDN** | `grep -rn aws_cloudfront terraform/*.tf` → no matches. | The only cacheable route is the movie catalogue, which is a handful of small JSON responses. A CDN in front of an API Gateway that fronts a VPC Link adds cost and a TLS-invalidation problem for very little benefit at this scale. If a static frontend existed, this would change. Roadmap. |
-| **AWS WAF** | `grep -rn aws_wafv2 terraform/*.tf` → no matches. | This is the gap I would close first, because today the ALB is an unauthenticated front door to the read path (see Q7). Rate limiting and the OWASP managed rule set cost almost nothing. Roadmap — and the first item in Q11. |
+| **AWS WAF** | `grep -rn aws_wafv2 terraform/*.tf` → no matches. | This is the gap I would close first. The ALB now denies unauthenticated requests (see Q7), so what remains is edge abuse rather than an open door: rate limiting and the OWASP managed rule set cost almost nothing and sit in front of the Cognito authenticator. Roadmap — and the first item in Q11. |
 | **EKS** | `grep -rn aws_eks terraform/*.tf` → **no matches**. Zero `aws_eks_*` resources remain. | Removed deliberately, for three reasons written into `orchestration.tf`: a ~\$73/month control plane with no workloads; `endpoint_public_access = false` with no bastion in the design, so `kubectl` could never have reached it while the rubric explicitly asks you to demonstrate `kubectl`; and two orchestrators failing the graded Simplicity pillar. The manifests are retained as the orchestrator-lineage artefact and verified on k3d instead. |
 | **EC2 node Auto Scaling group** | No `aws_autoscaling_group`. | Went with EKS. Compute is Fargate, which is why the design is smaller. |
-| **S3 object storage** | No `aws_s3_bucket`. | Nothing in the requirements stores objects. |
+| **S3 object storage** | `terraform/storage.tf` declares one bucket, toggleable via `var.enable_artifact_bucket` (default on): SSE AES256, versioning, full public-access block, lifecycle rules, and a TLS-only + encrypted-upload bucket policy. | It is for **build artefacts and log archival**. Nothing in the application writes to it — there is no `boto3` call anywhere in `srcs/` and no task-definition mount. Do not claim the app uses it. |
 | **Service mesh / internal mTLS** | No mesh resources. | Over-engineering for three services. Documented as a gap instead of shipped. |
 | **VPC endpoints** | None declared. | Would remove the largest avoidable line item (NAT Gateway data processing, ~\$66/month across two gateways). Next cost optimisation. |
 
@@ -2233,7 +2300,7 @@ the four things I cannot prove."
 ### 1 · Repo content, `audit.md:11` (1 min)
 
 ```bash
-find terraform -maxdepth 1 -name '*.tf' | wc -l     # 18
+find terraform -maxdepth 1 -name '*.tf' | wc -l     # 19
 ls -1 srcs/*/Dockerfile | wc -l                      # 6
 ls -1 srcs/*/init.sql | wc -l                        # 2
 ls -1 scripts/*.sh scripts/*.py | wc -l              # 7
@@ -2298,9 +2365,9 @@ do before you do it. To restore afterwards: `kubectl delete -k manifests/`
 ### 7 · Terraform, `audit.md:72` (2 min) — the honest one
 
 ```bash
-grep -c '^resource "' terraform/*.tf | awk -F: '{s+=$2} END {print s" resources"}'   # 131
+grep -c '^resource "' terraform/*.tf | awk -F: '{s+=$2} END {print s" resources"}'   # 142
 grep -c '^module "' terraform/*.tf | grep -v ':0' || echo "0 module blocks"
-terraform --version    # command not found -> say it out loud, do not hide it
+terraform --version    # v1.9.5 is installed; plan/apply still INVALID without credentials -> say it out loud, do not hide it
 ```
 
 Show `./scripts/deploy.sh --static-only` as the no-spend rehearsal, and
@@ -2472,13 +2539,13 @@ answer is one you can defend with evidence.
 > outage means orders are *refused at the gateway*, not buffered elsewhere. Adding a
 > second broker and mirroring between them is real future work.
 
-**6. "Why \$300 and not \$15?"**
-> Because \$15 was wrong. The real steady state for this design is about \$260/month,
+**6. "Why \$450 and not \$15?"**
+> Because \$15 was wrong. The real steady state for this design is about \$410/month (MQ ~$230 of it),
 > so a \$15 budget fired every single month and taught an auditor nothing — the alarm
 > becomes noise and then gets ignored. The line-item breakdown is written into
 > `var.monthly_budget_limit`'s own description so the number and its justification
 > cannot drift apart, and there is a `validation` block refusing anything below 50.
-> With 300, the 80 % ACTUAL notification fires at \$240 as a genuine early warning.
+> With 450, the 80 % ACTUAL notification fires at \$360 as a genuine early warning.
 > The largest avoidable line item is NAT Gateway at about \$66/month; VPC endpoints
 > would remove most of it and I have not built them.
 
@@ -2496,19 +2563,22 @@ answer is one you can defend with evidence.
 > and `rabbitmq-service` to `10.42.0.21`.
 
 **8. "Your ALB has no authentication. Isn't that a hole?"**
-> It is a real gap and it is deliberate and temporary. The HTTPS listener's
-> priority-10 rule forwards `/api/*`, and the listener's **default** action also
-> forwards to the same target group, so the ALB DNS name reaches `api-gateway`
-> without touching Cognito — `outputs.tf` even names that output
-> `app_base_url_via_alb` and says so in its description. That bypass reaches
-> **every route the gateway serves, writes included**: `GET/POST/PUT/DELETE
-> /api/movies` and `POST /api/billing`, plus `GET /health` and the OpenAPI
-> documents. Fix, in order of preference: make the ALB `internal = true` and
-> keep the public path on API Gateway; failing that, put WAF plus an
-> auth-aware listener rule in front of it; failing that, restrict the ALB `:443`
-> ingress to the VPC Link security group. Left public here so `terraform apply`
-> succeeds on a fresh account with no certificate prerequisite. WAF is not
-> implemented; it is the first item on my roadmap.
+> It was, and it is now closed by default with one documented residual. The
+> `:443` listener carries `authenticate-cognito` with
+> `on_unauthenticated_request = "deny"`, so an unauthenticated `POST
+> /api/billing` from outside the VPC is **denied** — there is no open write
+> path [STATIC]. Because the ALB reads the `aws-cognito-identity-token` cookie
+> rather than the bearer token, the in-VPC VPC Link hop cannot present a
+> legible credential, so two `source_ip` rules scoped to the VPC CIDR bypass
+> authentication for in-VPC traffic: `billing_orders` (priority 1) and
+> `vpc_link_hop` (priority 10) [STATIC]. The residual — any ENI inside the VPC
+> can reach `:443` past the authenticator — is documented in `alb.tf:243-255`.
+> `outputs.tf` still names the direct `app_base_url_via_alb` output so nobody
+> has to discover it. Fix, in order of preference: make the ALB
+> `internal = true` and keep the public path on API Gateway; failing that, put
+> WAF plus an auth-aware listener rule in front of it. Left public here so
+> `terraform apply` succeeds on a fresh account with no certificate
+> prerequisite. WAF is not implemented; it is the first item on my roadmap.
 
 **9. "`terraform plan` — show me."**
 > `terraform` **is** installed here (v1.9.5), so I can run the parts that cost
@@ -2523,7 +2593,7 @@ answer is one you can defend with evidence.
 > credentials, and there is none on this machine. The audit script therefore
 > reports those two as **INVALID** rather than passing them on the strength of a
 > static grep, which is the honest classification. What else I can show is the
-> static inventory — 131 resources, 31 variables all declared and all referenced,
+> static inventory — 142 resources, 33 variables all declared and all referenced,
 > zero `module` blocks, no `0.0.0.0/0` ingress on the data tier, no state in git —
 > and `./scripts/deploy.sh --static-only` performs the validation half without
 > spending anything.
@@ -2588,31 +2658,39 @@ in this audit.
 
 That is the whole list now. It used to be four, and two of the other three were
 **mislabelled**: an earlier draft of this guide reported `aws` and `terraform` as
-"NOT INSTALLED" (`command not found`, exit 127) and therefore treated
+not installed (`command not found`, exit 127) and therefore treated
 `terraform fmt -check` and `terraform validate` as undeterminable. Both binaries
 are in fact installed — `aws-cli/2.36.44` and `Terraform v1.9.5` — and both checks
 now run for real and pass. The gap was never the binary; it was the missing
-*account*. Conflating the two would have handed an examiner a false excuse, which
-is worse than having no excuse.
+*account* (`aws sts get-caller-identity` returns `NoCredentials`). Conflating the
+two would have handed an examiner a false excuse, which is worse than having no
+excuse.
 
 **Reproduce it yourself.** `bash scripts/run-audit-checks.sh` and read the
 `SUMMARY` block. The real output at the time this guide was written:
 
 ```
-  PASS=181  FAIL=0  INVALID=1  NOTES=39
+  PASS=203  FAIL=0  INVALID=1  NOTES=44
+  run marker: audit-64485-1791054689
 ```
 
-So the honest one-line status of this repository is **181 proven, 0 failures,
-1 genuinely undeterminable** — and that one needs a deployed AWS account, not more
-local work. Note what `FAIL=0` does **not** mean: it does not mean the AWS
-deployment exists, because nothing in the suite can see that.
+So the honest one-line status of this repository is **203 proven, 0 failures,
+1 genuinely undeterminable**. `FAIL=0` was not free: an earlier run in this same
+session reported **FAIL=2**, both caused by the suite misreading my own test
+conditions — the S8 log check counts connection-error lines left in the last 15
+minutes of container logs by the outage drills, and the S8 replica-count check
+requires a `-N` suffix that compose only appends to services which do not pin
+`container_name`. Both are fixed, so the number above is reproducible rather than a
+lucky draw. The INVALID needs a deployed AWS account, not more local work. Note what this tally does **not**
+mean: it does not mean the AWS deployment exists, because nothing in the suite can
+see that.
 
 ### 9.2 Things that are missing by design, not by accident
 
 | Gap | Detail |
 |---|---|
 | The AWS deployment has never been applied | The single largest gap. Everything AWS-side in this guide is a declaration verified by static analysis, not a running resource. `orchestration.tf`, `iam.tf`, `security_groups.tf`, `alb.tf` and `outputs.tf` all carry comments about resources that were removed *because* they were only valid in a deployed account. |
-| The ALB is an unauthenticated front door | See Q7 and §8 item 8. Fix: WAF + auth-aware listener rule, or remove the ALB from the public path. |
+| The ALB remains reachable from inside the VPC | Unauthenticated requests are **denied** (`authenticate-cognito`, `on_unauthenticated_request = "deny"`), but the in-VPC API Gateway hop is authorised by `source_ip = vpc_cidr`, so any ENI in the VPC can still reach :443. See Q7, §8 item 8 and `alb.tf:243-255`. Fix: `internal = true` + WAF at the edge. |
 | Internal east-west traffic is plaintext HTTP | `api-gateway` → `inventory-app` on :8080 inside private subnets. Protected by security groups, not TLS. Fix: service mesh, which is over-engineering for three services — so it stays documented. |
 | No WAF, no CDN, no Lambda, no EKS | §6. All roadmap. |
 | No VPC endpoints | The largest avoidable cost line (~2 × NAT Gateway ≈ \$66/month). |
@@ -2620,9 +2698,9 @@ deployment exists, because nothing in the suite can see that.
 | `ecs-tasks/*.json` are a hand-maintained reference, not what Terraform applies | They now say `RABBITMQ_PORT = 5671` and carry placeholder ARNs (`123456789012`, placeholder MQ host/ARNs). `terraform/ecs_services.tf` is the real source (5671). The script validates both, so they are consistent in *shape* but not in Amazon-MQ-specific values. Same placeholder pattern: `manifests/ingress.yaml` ships `arn:aws:acm:us-east-1:123456789012:certificate/REPLACE_ME_VALIDATED_ACM_CERT_ARN` plus host `cloud-design.example.com`, and `terraform.tfvars.example`/`variables.tf` default `allowed_origins` to `["https://app.example.com"]` — replace all three before any real deployment. |
 | 3 `__pycache__/*.pyc` files are tracked in git | `.gitignore` cannot untrack them. `test_cloud.sh` warns with the exact `git rm -r --cached` command. Harmless, but it is untidy and it is reported. |
 | A stale path in a comment | `terraform/ecr.tf` documents its push workflow with `docker build -f Dockerfiles/Dockerfile.api-gateway srcs/api-gateway-app`. That path no longer exists after the `Dockerfiles/` consolidation; it should read `-f srcs/api-gateway-app/Dockerfile`. It is a comment, not a functional command, but an examiner who greps for `Dockerfiles/` will find it. |
-| Local PostgreSQL is 17, AWS is declared as 16 | The container images build `FROM postgres:17-alpine` (upstream `PG_VERSION=17.11`); `terraform/rds.tf` declares `engine_version = "16.3"` with a `postgres16` parameter group. That is a deliberate version floor for the managed service, but it *is* a divergence between the demonstrated stack and the deployed one. Say so if asked; aligning `rds.tf` to 17 is a one-line change plus a parameter-group family change. |
+| Local PostgreSQL is 17, AWS is declared as 16 | The container images build `FROM postgres:17-alpine` (upstream `PG_VERSION=17.11`); `terraform/rds.tf` declares `engine_version = "16.9"` with a `postgres16` parameter group. That is a deliberate version floor for the managed service, but it *is* a divergence between the demonstrated stack and the deployed one. Say so if asked; aligning `rds.tf` to 17 is a one-line change plus a parameter-group family change. |
 | A publish to a dead broker takes ~10 s, not the 3 s the socket timeout implies | Measured live: `POST /api/billing` with the broker stopped returns HTTP 500 after 9.99 s, because Docker's embedded DNS drops the hostname and burns ~5 s of resolver timeout per attempt. Bounded rather than hung, and the read path is unaffected — but see §8 challenge 5 before quoting a number. |
-| A fragile check in the audit script | `scripts/run-audit-checks.sh:647` looks for a Prerequisites heading with `^#+[[:space:]]*prerequisites`, which will not match a *numbered* heading such as `## 7. Prerequisites`. During this work it reported `README has no Prerequisites section` as a FAIL against a README that had exactly that section, under the heading `## 7. Prerequisites`. The heading has since been changed to `## Prerequisites` and the check now passes — but the fragility remains: renumber that heading and the check breaks again, for no real reason. |
+| A fragile check in the audit script | `scripts/run-audit-checks.sh` (~line 793) looks for a Prerequisites heading with `^#+[[:space:]]*prerequisites`, which will not match a *numbered* heading such as `## 7. Prerequisites`. During this work it reported `README has no Prerequisites section` as a FAIL against a README that had exactly that section, under the heading `## 7. Prerequisites`. The heading has since been changed to `## Prerequisites` and the check now passes — but the fragility remains: renumber that heading and the check breaks again, for no real reason. |
 | Destructive demos leave log evidence | `S8` in the audit suite scans the last 15 minutes of container logs for connection errors. A resilience drill run less than 15 minutes beforehand will therefore register as a **FAIL**. Recreate the affected containers or wait out the window. This is the suite working correctly, not a bug — but know it before you rehearse and audit back to back. |
 
 ### 9.3 The one thing to fix before the audit, if you have time
@@ -2640,7 +2718,7 @@ Use this as a lookup during the audit. Every row was verified against the curren
 repository. Resource names are cited in preference to line numbers, because resource
 names are stable and line numbers are not.
 
-### 10.1 The 18 Terraform files and what each owns
+### 10.1 The 19 Terraform files and what each owns
 
 | File | Resources | Owns |
 |---|---|---|
@@ -2660,34 +2738,34 @@ names are stable and line numbers are not.
 | `inspector2.tf` | 2 | `aws_inspector2_enabler` (ECR), CRITICAL/HIGH filter with `action = "NONE"` |
 | `autoscaling.tf` | 4 | 2 targets (min 1 / max 3) + 2 target-tracking policies at 60 % |
 | `cloudwatch.tf` | 20 | 4 log groups, SNS topic + topic policy + email subscription, 11 alarms, 6-widget dashboard, budget, billing alarm |
-| `variables.tf` | 0 | 31 variables with descriptions and validation blocks |
-| `outputs.tf` | 0 | 38 outputs |
+| `variables.tf` | 0 | 33 variables with descriptions and validation blocks |
+| `outputs.tf` | 0 | 41 outputs |
 
-Totals: **18 files, 131 resources (124 `aws_*`), 6 data sources, 31 variables,
-38 outputs, 0 `module` blocks.**
+Totals: **18 files, 142 resources (135 `aws_*`), 7 data sources, 33 variables,
+41 outputs, 0 `module` blocks.**
 
 ### 10.2 Rubric item → evidence
 
 | `audit.md` | Primary evidence | Tag |
 |---|---|---|
-| `:11` required files | `README.md`, `docs/audit.md`, `srcs/` × 6 (each with `Dockerfile`; the two DBs also with `init.sql`), `scripts/` × 7, `terraform/` × 18, `manifests/` × 12, `ecs-tasks/` × 6, `Makefile`, `.env.example` | LIVE |
+| `:11` required files | `README.md`, `docs/audit.md`, `srcs/` × 6 (each with `Dockerfile`; the two DBs also with `init.sql`), `scripts/` × 7, `terraform/` × 19, `manifests/` × 12, `ecs-tasks/` × 6, `Makefile`, `.env.example` | LIVE |
 | `:19-32` 14 roleplay questions | §2 above | spoken |
 | `:34,36,38,40` grader observations | §2, §3, §5, §8, §9 | grader |
 | `:46-50` 5 pillars | §3.1–3.5, each with an evidence trail | mixed |
 | `:52` architecture aligns | Port-consistency matrix across 5 artefacts (§4.6); `aws_db_instance` × 2, `aws_ecs_task_definition` × 3, `aws_mq_broker` × 1 | LIVE + STATIC |
-| `:54` cost-effective | `aws_budgets_budget.monthly` (300), `single_nat_gateway`, `ecs_use_fargate_spot`, `db.t4g.micro`, `mq.t3.micro`, `log_retention_days = 30`, `skip_final_snapshot` × 2 | STATIC |
+| `:54` cost-effective | `aws_budgets_budget.monthly` (450), `single_nat_gateway`, `ecs_use_fargate_spot`, `db.t4g.micro`, `mq.m7g.medium`, `log_retention_days = 30`, `skip_final_snapshot` × 2 | STATIC |
 | `:58` README content | Prerequisites (path A local / path B AWS / optional), setup, `.env` from `.env.example` via `make env`, usage, roadmap, teardown | STATIC |
 | `:60` docs clear | 4 Mermaid blocks (3 in `README.md`, 1 here) with balanced fences; 29 kustomize objects enumerated by kind | STATIC |
 | `:64` running, no errors | 8 containers healthy; `/health` + `/api/movies/` + both `/ready` → 200; UID 10001; 6 k3s pods `1/1 Running`, 0 restarts | LIVE |
-| `:66` load balancing | nginx `least_conn`, `$upstream_addr` logged, 334/335 across 2 replicas under load (10/10 on the 20-request check); ALB target group `ip`/3000/`/health`/200/15 s/30 s deregistration | LIVE + STATIC |
+| `:66` load balancing | nginx `least_conn` with `$upstream_addr` in the access log, balanced across 2 replicas (10/10 on the 20-request check); ALB target groups `ip`/`/health`/200/15 s/30 s deregistration. Re-run and quote **your** split — never this document's remembered one | LIVE + STATIC |
 | `:68` secure comms | 401 on the RabbitMQ management API; `authorizer_id` on 4 of 5 routes; `rds.force_ssl = 1`; AMQPS 5671 with verification on; traversal → 400 | LIVE + STATIC + **1 INVALID** |
-| `:72` Terraform effective | 131 resources / 18 files / 31 vars all declared and used / 0 modules; `terraform fmt -check` clean; `terraform validate` **succeeds**; `.gitignore` excludes state | STATIC (validate observed) |
-| `:74` infra follows design | Resource-per-component map (§4.14); `multi_az` × 2; 2 AZs; 3 PodDisruptionBudgets; ALB-controller Ingress annotation | STATIC |
+| `:72` Terraform effective | 142 resources / 19 files / 33 vars all declared and used / 0 modules; `terraform fmt -check` clean; `terraform validate` **succeeds**; `.gitignore` excludes state | STATIC (validate observed) |
+| `:74` infra follows design | Resource-per-component map (§4.14); `multi_az` × 2; 2 AZs; 3 *effective* PodDisruptionBudgets (replicas 2 > maxUnavailable 1) + 3 deliberate absences on single-replica StatefulSets; ALB-controller Ingress annotation | STATIC |
 | `:78` Dockerfiles optimised | 3 multi-stage + 3 single-stage; 108/152/154/275/423/423 MB; 197 KB delta on the DB images (424 MB upstream base); warm rebuild 4.84 s; `--chmod` on a COPY in 6/6; package cache disabled in 6/6; `.dockerignore` in 6/6 | LIVE |
 | `:80` orchestration correct | kustomize → 29 objects; `apply -f` **partially applies then exits 1** (shown, §4.16); `--dry-run=server` accepted; 7 pods live; ECS 1 cluster / 3 services / 3 task defs / capacity providers; `awsvpc` × 6; 12 `awslogs` refs; Cloud Map 3 registrations | LIVE + STATIC |
 | `:84` monitoring | 4 log groups with retention; 11 alarms; SNS topic **with** topic policy (11 alarm actions); 6-widget dashboard; `aws_api_gateway_account` | STATIC |
 | `:88` auto-scaling | 2 targets 1→3 at 60 %, cooldowns 60/300; `desired_count` 1/1/2; 3 live HPAs with real percentages; alarms on the same threshold | LIVE + STATIC |
-| `:90` efficient under load | 200 req @ c20: all 200 HTTP 200, p95 7.8 ms, 347 req/s, split 114/109; consumer-outage drill: exit 0, `messages_ready=1`, drained in ~8 s, row in PostgreSQL; 7/7 NetworkPolicy probe matrix | LIVE |
+| `:90` efficient under load | 200 req @ c20: all 200 HTTP 200, p95 ~8 ms, ~350 req/s, near-even replica split (quote your own run); consumer-outage drill: exit 0, `messages_ready=1`, drained in ~8 s, row in PostgreSQL; 7/7 NetworkPolicy probe matrix | LIVE |
 | `:94` security best practices | ACM + TLS 1.3/1.2 + 301 redirect; Cognito JWT authorizer; Inspector2 enabler + filter; ECR `scan_on_push`; KMS at rest; `rds.force_ssl`; no hardcoded credential defaults; `REPLACE_ME_*` secrets only | LIVE + STATIC |
 | `:98` bonus | §6 implemented table (8+ items) | LIVE + STATIC |
 | `:100` outstanding | Evidence tally (§4.22) | subjective |
@@ -2704,13 +2782,13 @@ Totals: **18 files, 131 resources (124 `aws_*`), 6 data sources, 31 variables,
 | `kubectl apply -k manifests/` (mutating) | **Yes — but it changes the cluster** |
 | `jq`, `python3 -m unittest` | **Yes** |
 | `bash scripts/test_cloud.sh`, `bash scripts/run-audit-checks.sh` | **Yes** |
-| `aws <anything>` | **No — not installed** |
-| `terraform init / fmt / validate / plan / apply / output / destroy` | **No — not installed** |
+| `aws <anything>` | **No credentials** — `aws-cli/2.36.44` is installed, `sts get-caller-identity` returns `NoCredentials` |
+| `terraform init / fmt / validate / plan / apply / output / destroy` | **init / fmt / validate only** — Terraform v1.9.5 is installed; `plan`/`apply` need credentials |
 | `kubectl apply -f manifests/` | **No — it partially applies everything in alphabetical order, then errors on `kind: Kustomization` and exits 1** |
 
 ### 10.4 One-line answers to the four questions you will be asked first
 
-1. **"How big is it?"** — 18 Terraform files, 131 resources, 31 variables, 38
+1. **"How big is it?"** — 19 Terraform files, 142 resources, 33 variables, 41
    outputs, 6 microservices components, 6 Dockerfiles, 12 manifests, 7 scripts.
 2. **"Is it deployed?"** — No. The Terraform has never been applied, so all AWS
    evidence is static. What is running is the identical 8-container stack locally

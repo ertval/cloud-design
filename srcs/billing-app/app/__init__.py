@@ -4,6 +4,7 @@ import logging
 from flask import Flask, jsonify
 from sqlalchemy import text
 from sqlalchemy.engine import URL
+from sqlalchemy.exc import InterfaceError, OperationalError
 from app.orders import Order, get_db_engine, init_db
 
 logging.basicConfig(
@@ -162,6 +163,17 @@ def create_app(stop_event=None):
         try:
             orders = session.query(Order).order_by(Order.id.asc()).all()
             return jsonify({"orders": [o.to_dict() for o in orders]}), 200
+        except (InterfaceError, OperationalError) as db_err:
+            # A database outage is a DEPENDENCY failure -> 503, mirroring
+            # inventory-app's _database_unavailable handler. Without this the
+            # exception escapes as waitress's generic 500 page. The driver
+            # message names the internal host, so it is logged, not returned.
+            logger.error(f"Database operation failed: {db_err!r}")
+            try:
+                session.rollback()
+            except Exception:  # pragma: no cover - session already poisoned
+                logger.debug("Rollback after database failure raised", exc_info=True)
+            return jsonify({"error": DATABASE_UNAVAILABLE_MESSAGE}), 503
         finally:
             session.close()
 

@@ -268,7 +268,7 @@ TF_COUNT="$(find "${TF_DIR}" -maxdepth 1 -name '*.tf' -type f 2>/dev/null | wc -
 # "module" blocks are counted separately from .tf FILES on purpose. The two are
 # routinely conflated ("18 modules") and they are not the same thing: this
 # codebase has 0 `module` blocks, it is a flat root-module configuration split
-# across 18 files. Saying "18 modules" is precisely the error that a rewrite of
+# across 19 files. Saying "18 modules" is precisely the error that a rewrite of
 # the audit guide was created to destroy.
 TF_MODULE_BLOCKS="$(grep -hE '^module[[:space:]]+"' "$TF_DIR"/*.tf 2>/dev/null | wc -l | tr -d ' ')"
 README_BYTES="$(wc -c < "${ROOT_DIR}/README.md" 2>/dev/null | tr -d ' ')"
@@ -886,6 +886,14 @@ if [ "${COMPOSE_STACK_UP}" -eq 1 ]; then
   # invisible and the count was never compared with the declared scale: with one
   # gateway replica killed this section still printed "all 7 compose services
   # report running/healthy".
+  #
+  # The name match below is `(<svc>)(-[0-9]+)?` and the numeric suffix is
+  # OPTIONAL on purpose. Compose only appends `-N` to services that do not pin
+  # `container_name`; the four services that do (both databases, the broker and
+  # gateway-lb) are named exactly `<project>-<svc>`. Requiring the suffix made
+  # those four report containers_present=0 and failed the section while all
+  # eight containers were running and healthy -- a false FAIL is worse than no
+  # check, because it trains you to ignore the output.
   compose_expected() { # compose_expected <service>  -> declared replicas, or 1
     awk -v s="$1" '
       $0 ~ "^  " s ":[[:space:]]*$" {f=1; next}
@@ -899,7 +907,7 @@ if [ "${COMPOSE_STACK_UP}" -eq 1 ]; then
   for s in api-gateway-app inventory-app billing-app inventory-database billing-database rabbit-queue gateway-lb; do
     want="$(compose_expected "${s}")"; count_ok "${want}" || want=1
     rows="$(cd "${ROOT_DIR}" && docker compose ps -a --format '{{.Name}}|{{.State}}|{{if .Health}}{{.Health}}{{else}}no-healthcheck{{end}}' 2>/dev/null \
-            | awk -F'|' -v s="$s" '$1 ~ ("(^|-)" s "-[0-9]+$") {print}')"
+            | awk -F'|' -v s="$s" '$1 ~ ("(^|-)" s "(-[0-9]+)?$") {print}')"
     have="$(grep -c . <<<"${rows}" | head -1)"
     count_ok "${have}" || have=0
     states=""; good=0

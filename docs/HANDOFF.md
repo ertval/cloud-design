@@ -1,10 +1,21 @@
 # Handoff — cloud-design audit hardening
 
-**Date:** 2026-10-03 21:20 UTC
+> **SUPERSEDED IN PART — read this first.** This document was written at 21:20 UTC
+> and described the state at commit `b7b761a`. Five commits and one full
+> verification round landed after it. The corrected end state is in
+> [§0 — Where things actually ended up](#0--where-things-actually-ended-up) below,
+> which supersedes §4, §6.1, §6.2, §6.3, §6.4 and §6.6. §1 (the honesty
+> constraint), §5 (the thirteen fixed defects), §7.5 (adversarial review) and §8
+> (the do-not list) still stand, with the corrections noted there.
+
+**Date:** 2026-10-03 21:20 UTC · **last updated:** 2026-10-03 22:40 UTC
 **Repo:** `/home/ertval/code/zone-modules/cloud-design`
 **Branch:** `main` -> `origin` (`https://platform.zone01.gr/git/ekaramet/cloud-design.git`)
-**Final HEAD:** `b7b761a`. Working tree clean; local `main` is identical to `origin/main`.
-**Agents running at handoff:** none. All three work waves finished (see §4).
+**HEAD at handoff:** `b7b761a` · **HEAD now:** `1dcb1f3`, 0 ahead / 0 behind `origin/main`
+**Working tree:** 11 modified files, **uncommitted** — see §0.3.
+**Agents running now:** none of mine. A **second session in another pane
+(`wF`) is concurrently editing this same repo** — see §0.4, because it will
+corrupt any tally you take while it writes.
 
 The four commits on top of the previous baseline `ba14ad9`, each produced by a separate
 agent that committed its own work:
@@ -21,14 +32,115 @@ committed independently. Nothing is uncommitted.
 
 ---
 
-## 1. Read this first — the honesty constraint
+## 0. Where things actually ended up
 
-`aws` and `terraform` are **not installed** and there are **no AWS credentials** on this box.
+*(added 22:40 UTC — this section supersedes §4, §6.1, §6.2, §6.3, §6.4 and §6.6)*
+
+### 0.1 Every remaining open item is closed except one
+
+| §6 item | Status | Evidence |
+|---|---|---|
+| 6.1 vacuous PDBs + 3 missing StatefulSet PDBs | **CLOSED** | `test_cloud.sh` went 60 PASS / 1 FAIL -> **64 PASS / 0 FAIL / 1 WARN**. `api-gateway` and `inventory-app` moved to `replicas: 2` so `maxUnavailable: 1` actually retains a pod; `billing-app` is a StatefulSet at `replicas: 2`. The three single-replica StatefulSets (both DBs, RabbitMQ) carry **no** PDB on purpose — at `replicas: 1` every budget is vacuous or drain-deadlocking — and each says so next to its `replicas:` line |
+| 6.2 app fixes have no live evidence | **CLOSED**, one item stays unknown | All four fixes measured live (below). The 900 KB body **did not reproduce** as a 500 on any variant tried: 921 643 B legal body -> 200 via both the gateway and `:8081`; 1.1 MB -> 413 from nginx, but 1.1 MB direct to `:8081` -> 200 because inventory-app sets no `MAX_CONTENT_LENGTH`. Cause of the original 500 remains **unknown**; do not write a cause into any document |
+| 6.3 docs still contain the review's findings | **CLOSED** | Both documents rewritten. Every stale claim is gone: unauthenticated-POST contradiction, `set -euo` claim, PKCE claim, arch-diagram topology, `echo $?` command, JWT audience, cost table, versions, the hardcoded accusation line, `334+335=669`, the "ALB exposes only api-gateway" claim, and the "manifests PDBs are a working control" claim |
+| 6.4 audit numbers are stale | **CLOSED** | Re-run, pasted verbatim, never hand-edited. `test_cloud.sh` -> **64 PASS / 0 FAIL / 1 WARN**. `run-audit-checks.sh` -> **PASS=203 FAIL=0 INVALID=1 NOTES=44**, marker `audit-64485-1791054689` |
+| 6.5 Herdr `w6:p2` demonstration | **NOT DONE — still outstanding** | See §0.5 |
+| 7.7 answer all 22 `docs/audit.md` questions | **CLOSED** | `docs/AUDIT_GUIDE.md` §1 now carries a **Verification status** column (`LIVE` / `STATIC` / `INVALID` / `—`) beside the script verdict, for all 22 |
+| 7.5 fresh adversarial review | **DONE** | Two independent read-only reviews (srcs+scripts, and terraform+manifests+docs). Reachability gating **preserved** — see §0.2 |
+
+### 0.2 The two fixes that review found, and the three that were already fine
+
+Fixed and **verified live** in this session:
+
+1. **`srcs/billing-app/app/__init__.py`** — `list_orders()` had no
+   `OperationalError` / `InterfaceError` handler, so a billing-DB outage escaped as an
+   unhandled 500 with raw Werkzeug HTML while inventory-app correctly returned 503.
+   Measured before: `GET /orders` -> 500. Measured after, with `billing-database`
+   stopped: **`GET /orders` -> 503** `{"error":"The billing database is currently
+   unavailable"}`, `/health` -> 200, `/ready` -> 503.
+2. **`srcs/api-gateway-app/app/proxy.py`** — the edge check accepted `user_id: 0`
+   (its minimum is `INT32_MIN`) while the consumer rejects 0, so such an order was
+   published and then acked-and-discarded as a poison pill: a gateway 200 with a
+   silently dropped order. Measured after: `POST /api/billing {"user_id":0,...}` ->
+   **400** `{"error":"Field 'user_id' cannot be zero"}`; `user_id: 7` -> 200 unchanged.
+3. **`manifests/rabbitmq.yaml`** — the header comments promised the readiness sentinel
+   `/tmp/rabbitmq-queue-ready` while the probe tested `/tmp/rabbit-queue-ready`. The
+   **probe was right** (`srcs/rabbit-queue/entrypoint.sh:22` is the source of truth);
+   the comments were wrong and now match. As written, the probe was never wrong at
+   runtime, but the file contradicted itself in three places.
+
+Already correct, verified rather than changed: `app_egress_internal_service` exists
+(the dead read path stays fixed), MQ `override_special` has no `,:=`, `mq.m7g.medium`,
+RDS `16.9` on both instances, JWT audience is
+`concat([main.id], demo[*].id)`, ALB has `authenticate-cognito` + `deny` +
+`source_ip` VPC bypass, `billing-app` keeps `desired_count = 2` with **no**
+`ignore_changes`, `health_check_grace_period_seconds = 360`, all `*_USER` values are in
+`secrets`, the MQ secret has `kms_key_id`, `storage.tf` has zero references from
+`ecs_services.tf` (so nothing in the app writes to S3, as documented).
+
+**Reachability gating still works.** `probe_environment()`
+(`scripts/run-audit-checks.sh:284-307`) runs before every `step()`, sets
+`COMPOSE_STACK_UP` / `CLUSTER_REACHABLE` from live probes only, and unreachable
+environments call `invalid()`, never `pass()`. Demonstrated accidentally but
+conclusively this session: a full run taken while the compose stack happened to be
+down reported **PASS=176 FAIL=0 INVALID=6** — the four live sections migrated to
+INVALID instead of silently passing on empty output. Stack up, same script:
+**PASS=203 FAIL=0 INVALID=1**.
+
+### 0.3 Uncommitted, on purpose
+
+11 modified files, nothing committed (no commit was requested):
+
+```
+README.md  docs/AUDIT_GUIDE.md  docs/HANDOFF.md
+manifests/{api-gateway,billing-app,billing-database,inventory-app,inventory-database,rabbitmq}.yaml
+scripts/run-audit-checks.sh
+srcs/api-gateway-app/app/proxy.py  srcs/billing-app/app/__init__.py
+```
+
+### 0.4 A second session is editing this repo right now
+
+Workspace `wF` is running an adversarial-review fan-out against the same working
+tree. Two consequences:
+
+- It fixed the S8 replica-count check itself (`scripts/run-audit-checks.sh:902`, the
+  container-name regex now tolerates a missing `-N` suffix), which is why the tally
+  went from `FAIL=2` to `FAIL=0`.
+- **It also rewrote parts of `README.md` and `docs/AUDIT_GUIDE.md` underneath me.**
+  I reconciled the tallies, but before trusting any number in those two files, take
+  `git diff` and re-run both suites. A full run taken while it was mid-write failed
+  with `line 2081: syntax error near unexpected token 'fi'` — the file was being
+  rewritten between reads. `bash -n` is clean now.
+
+Also note for whoever reconciles this: the audit numbers are only meaningful with the
+compose stack **up**. The S8 log check counts connection errors in the last 15 minutes
+of container logs, so **run the outage drills before the audit, not during it.**
+
+### 0.5 The one thing still outstanding: the Herdr demonstration
+
+§6.5 is untouched. Nothing has been run in `w6:p2`. The CLI is available:
+
+```bash
+herdr pane list --workspace "$HERDR_WORKSPACE_ID"
+herdr pane run --help      # inspect the invocation syntax before first use
+```
+
+The current workspace is `wF`, not `w6`, so the pane id has to be confirmed rather
+than assumed.
+
+> **CORRECTION (added 22:40 UTC).** The first line of this section was wrong and has
+> been wrong in every document that repeated it: `aws` and `terraform` **are**
+> installed — `aws-cli/2.36.44` and `Terraform v1.9.5`. What is missing is the
+> **account**, not the binaries: `aws sts get-caller-identity` returns
+> `NoCredentials`. Consequently `terraform fmt -check` and `terraform validate`
+> **run for real and pass**, and only the items below are `INVALID`.
+
+**There are no AWS credentials on this box and nothing has ever been applied.**
 
 Therefore the following are permanently `INVALID` until someone runs them on a real AWS
 account, and **no document in this repo may ever present them as passing**:
 
-- `terraform fmt -check`, `terraform validate`, `terraform plan`, `terraform apply`
+- `terraform plan`, `terraform apply` (and any `aws` call that talks to an account)
 - any live inspection of an ALB / RDS / MQ / ECS / API Gateway resource
 - proof that API Gateway actually returns `401` for an unauthenticated request
 - ACM certificate issuance, Route53 records, Cognito hosted-UI login
@@ -70,6 +182,12 @@ top-level `Dockerfiles/` directory was deleted.
 ---
 
 ## 4. Agent wave status — read before trusting anything
+
+> **SUPERSEDED by §0** — the wave table below describes the 21:20 state. Two of the
+> three waves were later found to be incomplete: the Terraform wave's fixes all
+> verified clean, but the Application wave had a 500-vs-503 hole in `list_orders` and
+> an edge/consumer validation mismatch (both fixed, §0.2), and the Scripts wave's
+> claims were correct.
 
 | Wave | Owner | Status | Verified? |
 |---|---|---|---|
@@ -148,6 +266,10 @@ and an inaccurate `try()` explanation.
 ---
 
 ## 6. Open items
+
+> **MOSTLY SUPERSEDED by §0.1**, which gives the status and evidence for each item.
+> The text below is kept as the original statement of what was wrong, because §0
+> refers back to it.
 
 ### 6.1 The one failing check — a real defect in `manifests/`
 
@@ -254,24 +376,23 @@ behind. The four wave commits plus the baseline are all on the remote.
 
 ## 7. Next actions, in order
 
-1. **Own `manifests/`** and fix §6.1 — vacuous PDBs and the three missing StatefulSet
-   PDBs. Then confirm `test_cloud.sh` FAIL -> 0 FAIL.
-2. **Run the Docker verification** for §6.2 and paste the real output: rebuild, then the
-   255/256-char title boundary, the DB-down 503 drill, the broker-down 503 drill with a
-   hostname-free body, the SIGTERM exit-code drill (use `docker inspect`, not `echo $?` —
-   `docker stop` returns the *command's* status), and the full end-to-end billing flow.
-   Investigate the 900 KB 500.
-3. **Rewrite the docs** against §6.3. Treat it as a rewrite, not a patch — §5.5 changed
-   the security model. Remove every transcript you cannot reproduce.
-4. **Re-run both suites** and update the counts from the real output (§6.4).
-5. **Fresh adversarial review** of `srcs/`, `scripts/`, `manifests/`, docs and
-   `terraform/`. The previous mutation agent injected 26 defects and its full detection
-   table was truncated out of the transcript — re-run rather than assume coverage. The
-   three-state PASS/FAIL/INVALID design and its reachability gating genuinely work (the
-   reviewer could not force a false PASS by killing the cluster: 23 checks correctly
-   migrated PASS -> INVALID). **Preserve that property.**
-6. **Do the Herdr `w6:p2` demonstration** (§6.5).
-7. **Answer all 22 `docs/audit.md` questions** and state the verification status of each.
+*(status as of 22:40 UTC; see §0 for the evidence)*
+
+1. ~~**Own `manifests/`** and fix §6.1~~ — **DONE.** 3 effective PDBs, 0 FAIL.
+2. ~~**Run the Docker verification**~~ — **DONE** for the four fixed defects; the
+   900 KB 500 **did not reproduce** and stays an open unknown (§0.1).
+3. ~~**Rewrite the docs** against §6.3~~ — **DONE**, as a rewrite.
+4. ~~**Re-run both suites** and update the counts from real output~~ — **DONE**:
+   64/0/1 and 203/0/1/44.
+5. ~~**Fresh adversarial review**~~ — **DONE**, two scopes, read-only; reachability
+   gating re-confirmed (§0.2).
+6. **Do the Herdr `w6:p2` demonstration** (§6.5) — **STILL OUTSTANDING.** This is
+   the only item from the original list that nobody has touched.
+7. ~~**Answer all 22 `docs/audit.md` questions**~~ — **DONE**, with a verification
+   status per question in `docs/AUDIT_GUIDE.md` §1.
+8. **NEW — reconcile the concurrent session.** `wF` is still editing `README.md` and
+   `docs/AUDIT_GUIDE.md` (§0.4). Re-run both suites and re-check the tallies after it
+   stops, then commit all 12 files together.
 
 ## 8. Do not
 

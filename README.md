@@ -9,8 +9,8 @@ applications sit on **Amazon ECS on Fargate** behind one internet-facing
 entrypoint; **Amazon RDS PostgreSQL Multi-AZ** and **Amazon MQ for RabbitMQ**
 (`ACTIVE_STANDBY_MULTI_AZ`, AMQPS only) form a data tier with no route to the
 internet. East–west traffic is resolved privately by **AWS Cloud Map**. Everything
-is described in Terraform: 18 `.tf` files, 131 `resource` blocks, 31 variables,
-38 outputs.
+is described in Terraform: 19 `.tf` files, 142 `resource` blocks, 33 variables,
+41 outputs.
 
 Everything asserted below is either reproducible from a command in this README or
 explicitly listed as unverified in [Known limitations](#known-limitations--verified-vs-not).
@@ -44,8 +44,8 @@ explicitly listed as unverified in [Known limitations](#known-limitations--verif
 ### System context
 
 Who talks to what, and which trust boundaries the traffic crosses. Cognito, ACM,
-Route 53, ECR, Inspector2 and CloudWatch are AWS-managed and therefore live
-*outside* the VPC; only the ALB is internet-facing inside it.
+Route 53, ECR, Inspector2, KMS, Secrets Manager and CloudWatch are AWS-managed
+and therefore live *outside* the VPC; only the ALB is internet-facing inside it.
 
 ```mermaid
 flowchart TB
@@ -79,7 +79,8 @@ flowchart TB
     Client -->|"3. HTTPS + Authorization: Bearer <JWT>"| APIGW
     APIGW -->|"4. verify signature/issuer/audience"| Cognito
     APIGW -->|"5. VPC Link to the :443 listener"| ALB
-    ALB -->|"6. HTTP :3000"| AppTier
+    ALB -->|"6a. HTTP :3000 to apigw TG"| AppTier
+    ALB -->|"6b. HTTP :8080 to billing TG<br/>rule prio 1 /api/billing/orders"| AppTier
     AppTier -->|"7. resolve inventory-app.<ns>.local"| CloudMap
     AppTier -->|"8. SQL :5432 / AMQPS :5671"| DataTier
     AppTier -.->|"stdout/stderr awslogs"| CW
@@ -99,21 +100,28 @@ flowchart TB
         User["Client"]
     end
 
-    User -->|"443"| IGW["Internet Gateway"]
+    IGW["Internet Gateway"]
+
+    subgraph Managed["AWS-managed (outside the VPC)"]
+        APIGW2["API Gateway HTTP API<br/>VPC Link to ALB :443"]
+        R53["Route 53<br/>ACM DNS validation + ALB alias"]
+        KMS["KMS key (rotation on)"]
+        SM["Secrets Manager<br/>3 secrets"]
+    end
 
     subgraph VPC["VPC 10.0.0.0/16"]
         subgraph AZA["AZ a"]
-            PubA["public-subnet-1<br/>10.0.1.0/24"]
+            PubA["public-subnet-1<br/>10.0.1.0/24<br/>ALB + NAT GW 1"]
             PrivAppA["private app subnet-1<br/>10.0.10.0/24"]
             PrivDbA["private db subnet-1<br/>10.0.20.0/24"]
         end
         subgraph AZB["AZ b"]
-            PubB["public-subnet-2<br/>10.0.2.0/24"]
+            PubB["public-subnet-2<br/>10.0.2.0/24<br/>ALB + NAT GW 2"]
             PrivAppB["private app subnet-2<br/>10.0.11.0/24"]
             PrivDbB["private db subnet-2<br/>10.0.21.0/24"]
         end
 
-        ALB2["ALB (internet-facing)<br/>listener :443 TLS / :80 301"]
+        ALB2["ALB (internet-facing)<br/>:443 TLS deny-by-default / :80 301<br/>2 TGs + 2 rules (prio 1 billing, prio 10 vpc-hop)"]
         NATA["NAT GW 1"]
         NATB["NAT GW 2"]
 
@@ -123,12 +131,10 @@ flowchart TB
             BILL["billing-app<br/>desired 2 (2-6, on queue depth)"]
         end
 
-        RDS1[("RDS inventory<br/>db.t4g.micro Multi-AZ<br/>PostgreSQL 16.3, force_ssl=1")]
-        RDS2[("RDS billing<br/>db.t4g.micro Multi-AZ<br/>PostgreSQL 16.3, force_ssl=1")]
-        MQ["Amazon MQ RabbitMQ 3.13<br/>ACTIVE_STANDBY_MULTI_AZ<br/>AMQPS 5671 only"]
+        RDS1[("RDS inventory<br/>db.t4g.micro Multi-AZ<br/>PostgreSQL 16.9, force_ssl=1")]
+        RDS2[("RDS billing<br/>db.t4g.micro Multi-AZ<br/>PostgreSQL 16.9, force_ssl=1")]
+        MQ["Amazon MQ RabbitMQ 3.13<br/>mq.m7g.medium<br/>ACTIVE_STANDBY_MULTI_AZ<br/>AMQPS 5671 only"]
         CMAP["Cloud Map namespace<br/>cloud-design-prod.local"]
-        KMS["KMS key (rotation on)"]
-        SM["Secrets Manager<br/>3 secrets"]
 
         IGW --> ALB2
         ALB2 --- PubA
@@ -141,7 +147,8 @@ flowchart TB
         RDS1 --- PrivDbA
         RDS2 --- PrivDbB
         MQ --- PrivDbA
-        ALB2 -->|"3000"| GW
+        ALB2 -->|"3000 apigw TG"| GW
+        ALB2 -->|"8080 billing TG<br/>prio 1 /api/billing/orders"| BILL
         GW -->|"8080"| INV
         GW -.->|"publish 5671 AMQPS"| MQ
         INV -->|"5432"| RDS1
@@ -151,12 +158,8 @@ flowchart TB
         GW -.->|"register on health change"| CMAP
         INV -.->|"register on health change"| CMAP
         BILL -.->|"register on health change"| CMAP
-        GW -->|"443 egress via NAT"| NATA
-        INV -->|"443 egress via NAT"| NATA
-        BILL -->|"443 egress via NAT"| NATA
-        GW -->|"443 egress via NAT"| NATB
-        INV -->|"443 egress via NAT"| NATB
-        BILL -->|"443 egress via NAT"| NATB
+        PrivAppA -->|"0.0.0.0/0 to local NAT"| NATA
+        PrivAppB -->|"0.0.0.0/0 to local NAT"| NATB
         NATA --> IGW
         NATB --> IGW
         RDS1 -.-> KMS
@@ -173,7 +176,9 @@ flowchart TB
     GW -.->|"7. DNS query"| Res
     Res -.->|"healthy task IPs only"| INV
 
-    User -->|"VPC Link from API Gateway"| ALB2
+    User -->|"443 via IGW (Cognito deny without session)"| ALB2
+    APIGW2 -->|"VPC Link, source_ip in VPC CIDR bypass"| ALB2
+    R53 -.-> ALB2
 ```
 
 Routing truth, from `terraform/vpc.tf`: the private **data** route table has
@@ -298,8 +303,8 @@ Notes an auditor trips over:
 
 There are **two** PostgreSQL engines in this project and they are not the same
 version, which is worth knowing before an auditor diffs them: the **local images
-are PostgreSQL 17** (`postgres:17-alpine`), the **RDS instances are 16.3**
-(`engine_version = "16.3"`, parameter group family `postgres16`).
+are PostgreSQL 17** (`postgres:17-alpine`), the **RDS instances are 16.9**
+(`engine_version = "16.9"`, parameter group family `postgres16`).
 
 ---
 
@@ -375,7 +380,7 @@ verified by an API Gateway **JWT authorizer** attached to every `/api/*` route.
 - **PAYG everywhere, no node fleet.** Fargate bills per task-second; there is no
   EC2 Auto Scaling Group to keep warm. This is a direct consequence of dropping
   EKS.
-- **Right-sized defaults**: `db.t4g.micro` (Graviton, ARM) and `mq.t3.micro`,
+- **Right-sized defaults**: `db.t4g.micro` (Graviton, ARM) and `mq.m7g.medium`,
   256 CPU / 512 MB per task (0.25 vCPU / 0.5 GB).
 - **`single_nat_gateway = false` by default, on purpose.** One NAT saves roughly
   **$33/month** but removes AZ independence for *all* private egress (ECR pulls,
@@ -385,8 +390,8 @@ verified by an API Gateway **JWT authorizer** attached to every `/api/*` route.
 - **`ecs_use_fargate_spot = false` by default.** FARGATE_SPOT is up to ~70 %
   cheaper but tasks can be reclaimed with a two-minute warning, which would
   undermine the same pillar. Opt-in.
-- **A budget that can actually fire**: `monthly_budget_limit = 300` USD with an
-  itemised `~$260/month` steady-state estimate in `variables.tf`. The previous
+- **A budget that can actually fire**: `monthly_budget_limit = 450` USD with an
+  itemised `~$410/month` steady-state estimate in `variables.tf`. The previous
   `$15` default was ~20× below the real run-rate, so its alarm fired every month
   and taught an auditor nothing.
 - **Full detail in [Cost management](#cost-management).**
@@ -469,7 +474,7 @@ Every alarm publishes to SNS topic `cloud-design-prod-operational-alerts`. The
 topic also has an explicit **topic policy** (`cloudwatch.tf:48-98`) allowing
 `cloudwatch.amazonaws.com` and `budgets.amazonaws.com` to publish — without it
 SNS silently drops cross-service `Publish` calls and the console shows healthy
-alarms that notify nobody. `aws_budgets_budget.monthly` (default **300 USD**)
+alarms that notify nobody. `aws_budgets_budget.monthly` (default **450 USD**)
 notifies at **80 % actual** and **100 % forecasted**, to SNS and, if
 `alarm_email` is set, to email. Set `alarm_email = ""` for no email subscriber;
 placeholder domains are rejected at plan time by a `validation` block.
@@ -541,7 +546,12 @@ claim.
 - **Managed authentication**: `aws_apigatewayv2_api` (HTTP API) with an
   `aws_apigatewayv2_authorizer` of type `JWT`, identity source
   `$request.header.Authorization`, issuer = the user pool endpoint, audience =
-  the app client id. Authorizer and `authorization_type = "JWT"` are set on
+  `concat([aws_cognito_user_pool_client.main.id], aws_cognito_user_pool_client.demo[*].id)`
+  (`api_gateway.tf:41-44`). **Both** client ids are accepted deliberately: the
+  browser flow mints a token with `main`, the documented `initiate-auth` demo flow
+  mints one with `demo`. A single-client audience broke the demo walkthrough with a
+  401. The splat yields `[]` when `enable_demo_cognito_user = false`, so there is no
+  index to guard. Authorizer and `authorization_type = "JWT"` are set on
   `ANY /api/movies`, `ANY /api/movies/{proxy+}`, `ANY /api/billing` and
   `ANY /api/billing/{proxy+}`.
 - **`GET /health` is intentionally unauthenticated.** It carries no `authorizer_id`
@@ -561,19 +571,21 @@ claim.
   dropped because it returns tokens in the URL fragment. An optional demo user and
   a confidential demo app client sit behind `enable_demo_cognito_user`.
 - **Throttling** on the `$default` stage: 5000 burst / 2500 steady-state.
-- **ALB auth bypass (disclosed, docs-only).** The ALB (`alb.tf`, `internal = false`,
-  `:443` open to `0.0.0.0/0`) forwards `/api/*` to `api-gateway` with **no**
-  authorizer — the Cognito JWT authorizer lives on API Gateway only, and the
-  `:443` listener's default action forwards to the same target group. So
-  `terraform output app_base_url_via_alb` (`outputs.tf:66-69`, *"bypasses the
-  Cognito authorizer, so it is unauthenticated"*) is a direct unauthenticated
-  path to every route the gateway serves, writes included. Production fix, in
-  order of preference: make the ALB `internal = true` and keep the public path
-  on API Gateway; failing that, put WAF plus an auth-aware listener rule in
-  front of it; failing that, restrict ALB `:443` ingress to the VPC Link
-  security group. None of these is applied here so `terraform apply` keeps
-  working on a fresh account — see [Known
-  limitations](#known-limitations--verified-vs-not).
+- **ALB :443 denies unauthenticated writes (closed, not a bypass).** The
+  `:443` listener's default action is `authenticate-cognito` with
+  `on_unauthenticated_request = "deny"` against the same user pool, then
+  forward to the api-gateway target group — an internet client with no Cognito
+  session gets 401, so `POST /api/billing` straight at the ALB no longer
+  publishes an order. Two `source_ip = var.vpc_cidr` listener rules bypass that
+  second check for the in-VPC API Gateway hop only (the ALB reads the
+  `aws-cognito-identity-token` cookie, not the route-level bearer JWT, so it
+  cannot consume it): `billing_orders` prio 1 forwards
+  `/api/billing/orders[/...]` to the **billing-app** target group (`:8080`),
+  `vpc_link_hop` prio 10 forwards the rest (including unauthenticated
+  `GET /health`) to the **api-gateway** target group (`:3000`). Residual,
+  documented in `alb.tf:243-255`: any ENI inside the VPC can still reach `:443`
+  and be forwarded — closing that too means making the ALB `internal = true`
+  with API Gateway as the only public entry.
 
 ### Data tier
 
@@ -887,7 +899,7 @@ anyone:
 | **`alarm_email`** | `""` | `""` means the topic and alarms exist with **no** email subscriber. Placeholder domains (`example.com`, `test.*`, `invalid.*`) are rejected at plan time. Any address must be **confirmed** before it receives anything |
 | **`allowed_origins`** | `["https://app.example.com"]` | CORS allow-list. A placeholder blocks every browser request from the real frontend |
 
-Also worth reviewing, not mandatory: `monthly_budget_limit` (default **300**),
+Also worth reviewing, not mandatory: `monthly_budget_limit` (default **450**),
 `single_nat_gateway` (default `false` for AZ-independent egress), and
 `enable_demo_cognito_user` (default `true` so `initiate-auth` works immediately —
 set `false` outside a demo, since the demo password lives in Terraform state
@@ -1156,7 +1168,7 @@ persisted with exact decimal precision once the consumer returns.
   matched row 7.
 - **PostgreSQL versions differ by platform (already disclosed above).**
   Local images build `FROM postgres:17-alpine`; RDS declares
-  `engine_version = "16.3"` (`postgres16`). Intentional version floor for the
+  `engine_version = "16.9"` (`postgres16`). Intentional version floor for the
   managed service; see the component-mapping note.
 - **VARCHAR → INTEGER migration caveat.** `orders.user_id` is now `INTEGER`
   (`srcs/billing-app/app/orders.py`, `srcs/billing-database/init.sql`).
@@ -1226,12 +1238,38 @@ reports three verdicts, never two: `[PASS]`, `[FAIL]`, and `[INVALID]` — the
 last meaning "cannot be determined here", counted separately and **never** as a
 pass.
 
-Current real result on this machine: **PASS=181, FAIL=0, INVALID=1, NOTES=39**.
-Before this README was rewritten the same script reported **FAIL=2**, and both
-were documentation bugs found by the script itself: the README never mentioned
-`.env` even though `docker-compose.yml` reads eight credentials from it, and it
-instructed the broken `kubectl apply -f manifests/` form. Both are fixed above
-(and this section exists because a script caught them, not because someone
+Current real result on this machine: **PASS=203, FAIL=0, INVALID=1, NOTES=44**
+(run marker `audit-64485-1791054689`), with all eight compose containers healthy
+and the `cd-audit` k3d cluster live. The single INVALID is S10: the live API
+Gateway 401 proof, which cannot be produced without a deployed account and is
+deliberately not counted as a pass.
+
+**Do not skip the FAIL column.** An earlier run of this same suite reported
+`FAIL=2`, and both were real — the kind that a reader would have dismissed as
+"just the environment":
+
+- The S8 replica-count check required a `-N` suffix on every container name.
+  Compose only appends one to services that do not pin `container_name`, so the
+  two databases, the broker and `gateway-lb` reported `containers_present=0` and
+  the section failed **while all eight containers were running and healthy**. The
+  suffix is now optional. A false FAIL is worse than no check, because it trains
+  you to skim past failures.
+- The S12 PodDisruptionBudget check flagged all three PDBs as vacuous, and it was
+  right: with an HPA floor of one replica, `maxUnavailable: 1` permits evicting the
+  only pod. Fixed at the source rather than by loosening the check — `billing-app`
+  now declares the two replicas its HPA floor already required (so its PDB is
+  real). Fixed at the source rather than by loosening the check: all three
+  PDB-carrying workloads now declare `replicas: 2`, which is what makes
+  `maxUnavailable: 1` mean "one pod always survives". The alternative —
+  deleting the PDBs — would have been honest at one replica but would have
+  thrown away real protection during drains and cluster upgrades. The reasoning
+  is in `manifests/api-gateway.yaml`.
+
+Before this README was rewritten the same script reported **FAIL=2** again, and
+those were documentation bugs found by the script itself: the README never
+mentioned `.env` even though `docker-compose.yml` reads eight credentials from it,
+and it instructed the broken `kubectl apply -f manifests/` form. Both are fixed
+above (and this section exists because a script caught them, not because someone
 re-read the prose).
 
 ---
@@ -1251,24 +1289,24 @@ until it is deleted.
 
 | Item | Size | ~Monthly (us-east-1, on-demand) |
 |---|---|---|
-| Amazon MQ `ACTIVE_STANDBY_MULTI_AZ` | `mq.t3.micro` ×2 | ~$79 |
+| Amazon MQ `ACTIVE_STANDBY_MULTI_AZ` | `mq.m7g.medium` ×2 | ~$230 |
 | RDS PostgreSQL Multi-AZ | `db.t4g.micro` ×2 + 20 GB gp3 | ~$53 |
 | NAT Gateways | ×2 (one per AZ) | ~$66 |
 | Application Load Balancer | 1 | ~$16 |
 | ECS Fargate | 4 tasks (1 + 1 + 2) | ~$37 |
 | KMS, ECR storage, logs, alarms | — | ~$9 |
-| **Steady state** | | **~$260/mo** |
-| **Peak** (gateway + inventory at max 3) | | **~$300/mo** |
+| **Steady state** | | **~$410/mo** |
+| **Peak** (gateway + inventory at max 3) | | **~$450/mo** |
 
-This table is the justification for `monthly_budget_limit = 300`: the 80 % actual
-notification then fires at $240 as a genuine early warning. The previous `$15`
+This table is the justification for `monthly_budget_limit = 450`: the 80 % actual
+notification then fires at $360 as a genuine early warning. The previous `$15`
 default was ~20× below the real run-rate, so its alarm fired every month.
 
 ### 2. Monitoring usage and alerts
 
-- **AWS Budgets** (`cloud-design-prod-monthly-budget`, 300 USD): 80 % **actual**
+- **AWS Budgets** (`cloud-design-prod-monthly-budget`, 450 USD): 80 % **actual**
   and 100 % **forecasted** notifications to SNS and email.
-- **CloudWatch `EstimatedCharges` alarm** at the same 300 USD threshold, 6-hour
+- **CloudWatch `EstimatedCharges` alarm** at the same 450 USD threshold, 6-hour
   period.
 - **The SNS topic has a topic policy** so `budgets.amazonaws.com` and
   `cloudwatch.amazonaws.com` can publish. Without it every notification is
@@ -1410,9 +1448,12 @@ Optimizer, Savings Plans recommendations.
 
 ### What I would change next
 
-- **Close the ALB path.** The ALB is internet-facing and its `:443` listener
-  forwards `/api/*` with **no** authorizer, because the JWT authorizer lives on
-  API Gateway only. See [Known limitations](#known-limitations--verified-vs-not).
+- **Harden the ALB ENI-in-VPC residual.** The `:443` listener already denies
+  unauthenticated internet writes (`authenticate-cognito deny` + two
+  `source_ip` VPC-CIDR bypass rules to two target groups — see
+  [Security](#security)). The remaining step is making the ALB
+  `internal = true` with API Gateway as the only public entry, so even a
+  VPC-internal ENI cannot reach it directly.
 - **One Secret per workload.** Today the three apps load a single Secret through
   `envFrom`, so `inventory-app` holds the RabbitMQ and billing credentials and vice
   versa. Recorded as a known limitation in `manifests/secrets.yaml:93-102`.
@@ -1451,7 +1492,7 @@ Claimed against `docs/readme.md`'s bonus list. Each item says exactly what exist
 
 - [x] `README.md` — architecture diagrams, component descriptions, design rationale, prerequisites, setup, configuration, usage, verification
 - [x] `srcs/` — application source for all six components, with tests
-- [x] `terraform/` — 18 `.tf` files, 131 `resource` blocks (124 `aws_*`), 31 variables, 38 outputs, 6 `data` blocks, 0 modules
+- [x] `terraform/` — 19 `.tf` files, 142 `resource` blocks (135 `aws_*`), 33 variables, 41 outputs, 7 `data` blocks, 0 modules
 - [x] `docker-compose.yml`, `Makefile`, `.env.example`, `.dockerignore`, `.gitignore`
 - [x] `manifests/` — 29 Kubernetes objects including `kustomization.yaml`
 - [x] `ecs-tasks/` — 6 standalone task-definition documents with placeholder ARNs (the authoritative ones are in `terraform/ecs_services.tf`)
@@ -1493,8 +1534,8 @@ find a gap you did not mention.
 | DB images are the upstream base | `docker history` — the Dockerfile adds 152 kB (`apk add su-exec bash`) + 24.6 kB (`init-db.sh`) + 20.5 kB (`init.sql`) = **197.1 kB** on a 423.19 MB `postgres:17-alpine` base, i.e. 0.05 %. **No size-reduction percentage is claimed for these images** — they are the official image plus three files |
 | Warm rebuild | 2.95 s (api-gateway), 1.69 s (inventory), 1.92 s (billing) with the layer cache warm |
 | Manifests render and apply | `kubectl kustomize manifests/` → 29 objects; applied to a live k3d cluster |
-| Static suite | `bash scripts/test_cloud.sh` → **50 PASS / 0 FAIL / 3 WARN** |
-| Rubric suite | `bash scripts/run-audit-checks.sh` → **PASS=181, FAIL=0, INVALID=1, NOTES=39** |
+| Static suite | `bash scripts/test_cloud.sh` → **64 PASS / 0 FAIL / 1 WARN** |
+| Rubric suite | `bash scripts/run-audit-checks.sh` → **PASS=203, FAIL=0, INVALID=1, NOTES=44** (marker `audit-64485-1791054689`; zero FAILs, and the single INVALID is S10 — the live 401 against a deployed API Gateway) |
 | AMQPS behaviour | correct CA accepted; wrong CA rejected; wrong hostname rejected; plaintext client against a TLS listener refused |
 
 ### What is INVALID, not PASS
@@ -1526,18 +1567,17 @@ only because it now does.
 
 ### Real gaps in the solution
 
-- **The ALB path is unauthenticated.** `alb.tf` sets `internal = false` and the
-  ALB security group allows `0.0.0.0/0` on `:443`; the `:443` listener forwards
-  `/api/*` to `api-gateway`, and its default action forwards to the same target
-  group. The Cognito JWT authorizer is attached at **API Gateway only**, so a
-  request that skips API Gateway and addresses the ALB directly reaches the
-  application without a token — every route the gateway serves, writes
-  included. `terraform output app_base_url_via_alb` documents exactly this.
-  Fix, in order of preference: make the ALB `internal = true` and keep the
-  public path on API Gateway; failing that, put WAF plus an auth-aware
-  listener rule in front of it; failing that, restrict the ALB `:443`
-  ingress to the VPC Link security group. Left public here so `terraform
-  apply` succeeds on a fresh account with no certificate prerequisite.
+- **ALB :443 residual: ENI-in-VPC reachability.** The `:443` listener
+  defaults to `authenticate-cognito` (`deny`, so unauthenticated internet
+  `POST /api/billing` gets 401), with two `source_ip = var.vpc_cidr` listener
+  rules (`billing_orders` prio 1 to the billing-app TG `:8080`,
+  `vpc_link_hop` prio 10 to the api-gateway TG `:3000`) covering only the
+  in-VPC API Gateway hop, which authenticates with a route-level bearer JWT
+  the ALB cannot consume (cookie vs header — see `alb.tf:243-255`). An ENI
+  already inside the VPC can still reach `:443` and be forwarded. Further
+  hardening, in order of preference: make the ALB `internal = true` and keep
+  the public path on API Gateway; failing that, put WAF in front; failing
+  that, restrict ALB `:443` ingress to the VPC Link security group.
 - **One Secret for three apps** — `envFrom` gives every app every credential
   (recorded in `manifests/secrets.yaml:93-102`).
 - **`sslmode` is not set client-side**, so TLS to RDS relies on libpq's
@@ -1555,7 +1595,7 @@ only because it now does.
 - **No CI/CD.** Image push and deploy are manual.
 - **`ecs-tasks/*.json` are placeholders** (`123456789012`) and are not what
   Terraform applies.
-- **RDS is 16.3 while the local images are PostgreSQL 17.** Intentional and
+- **RDS is 16.9 while the local images are PostgreSQL 17.** Intentional and
   documented above, but it is a divergence a reviewer should know about.
 
 ---
@@ -1564,8 +1604,8 @@ only because it now does.
 
 | Tool | What it does | Live result |
 |---|---|---|
-| `scripts/run-audit-checks.sh` | Walks all 22 rubric items in `docs/audit.md`, runs the real command for each, prints real stdout/stderr, and grades PASS / FAIL / **INVALID** / NOTE. Never hides a command | PASS=181, FAIL=0, INVALID=1, NOTES=39 |
-| `scripts/test_cloud.sh` | Static-only suite: reads files, parses manifests, grades Dockerfiles / Terraform / manifests / scripts. Deliberately separate from the live suite so a reviewer can tell reading-based proof from running-based proof | 50 PASS / 0 FAIL / 3 WARN |
+| `scripts/run-audit-checks.sh` | Walks all 22 rubric items in `docs/audit.md`, runs the real command for each, prints real stdout/stderr, and grades PASS / FAIL / **INVALID** / NOTE. Never hides a command | PASS=203, FAIL=0, INVALID=1, NOTES=44 |
+| `scripts/test_cloud.sh` | Static-only suite: reads files, parses manifests, grades Dockerfiles / Terraform / manifests / scripts. Deliberately separate from the live suite so a reviewer can tell reading-based proof from running-based proof | 64 PASS / 0 FAIL / 1 WARN |
 | `scripts/step_by_step_audit.py` | Sends the literal rubric commands to a terminal pane one at a time, so the examiner watches each command typed and its real output. `--list`, `--dry-run`, `--only <section>`, `--section`, `--pane` | — |
 | `scripts/build_push.sh` | Builds all six images, verifies each one exists, optionally pushes to ECR with `PUSH=1`, prints the real size table | — |
 | `scripts/deploy.sh` | AWS path: `sts get-caller-identity` → build+push → `init`/`validate`/`plan`/`apply` → `kubectl apply -k manifests/` → rollout waits | — |

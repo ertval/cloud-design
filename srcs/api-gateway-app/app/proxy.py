@@ -181,10 +181,16 @@ def _validate_billing_payload(payload):
             raise ValueError(f"Missing required field: '{required}'")
         if payload[required] is None:
             raise ValueError(f"Field '{required}' cannot be null")
-    _billing_strict_int(
+    coerced_user_id = _billing_strict_int(
         payload["user_id"], "user_id",
         minimum=_BILLING_INT32_MIN, maximum=_BILLING_INT32_MAX,
     )
+    # Parity with the consumer (srcs/billing-app/app/validation.py
+    # coerce_order_payload rejects 0 via `if not user_id`): a gateway-accepted
+    # 0 would be published, then acked-and-discarded as a poison pill. Reject
+    # at the edge instead so the client gets a 400, not a silent drop.
+    if coerced_user_id == 0:
+        raise ValueError("Field 'user_id' cannot be zero")
     _billing_strict_int(
         payload["number_of_items"], "number_of_items",
         minimum=0, maximum=_BILLING_INT32_MAX,

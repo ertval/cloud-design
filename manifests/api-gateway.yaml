@@ -58,7 +58,12 @@ metadata:
     app.kubernetes.io/part-of: cloud-design
     app.kubernetes.io/component: edge
 spec:
-  replicas: 1
+  # replicas: 2 (was 1). At replicas: 1 the PDB below (`maxUnavailable: 1`)
+  # permitted evicting the only pod -- a vacuous control that still got counted
+  # as protection. At replicas: 2, `maxUnavailable: 1` always retains one pod,
+  # so the budget is real. A second stateless gateway replica is cheap and fits
+  # the HPA bounds below (min 1 / max 3); no data-consistency risk.
+  replicas: 2
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -210,17 +215,21 @@ spec:
 # -----------------------------------------------------------------------------
 # PodDisruptionBudget
 # -----------------------------------------------------------------------------
-# `maxUnavailable: 1`, not `minAvailable: 1`.
-#   The HPA floor is minReplicas: 1, so `minAvailable: 1` would mean "zero pods
-#   may ever be evicted" at the default replica count of 1 -- `kubectl drain`
-#   would block forever on the first node maintenance window, turning a
-#   protective object into an availability incident. `maxUnavailable: 1` does
-#   the useful half of the job (during a scale-out to 3 replicas, or during a
-#   rolling update, only one pod leaves service at a time) and never deadlocks
-#   a drain. Note that rolling updates are already governed by
-#   `maxUnavailable: 0` on the Deployment above; this PDB covers the voluntary
-#   disruption cases the Deployment cannot (drain, node autoscaler, cluster
-#   upgrade) that the default PDB of "nothing" would not.
+# `maxUnavailable: 1` against `replicas: 2` (see above): at most one pod is
+# ever voluntarily disrupted at a time, so one gateway always stays in service
+# during a node drain, cluster upgrade, or node-autoscaler scale-down. This is
+# meaningful ONLY because replicas > maxUnavailable (1 < 2). At the previous
+# size of replicas: 1 this same object permitted evicting the only pod -- a
+# vacuous control, which is why the replica count was raised instead of
+# weakening the budget to `maxUnavailable: 0` / `minAvailable: 1` (which at
+# replicas: 1 forbids every eviction and deadlocks `kubectl drain` on the first
+# maintenance window). Rolling updates are separately governed by
+# `maxUnavailable: 0` on the Deployment above; this PDB covers the voluntary
+# disruption cases the Deployment cannot. Single-replica StatefulSets in this
+# repo (both databases, RabbitMQ) deliberately carry NO PDB: at replicas: 1 no
+# honest budget exists, and scaling them needs replication machinery, not a
+# replica count edit. ECS Fargate is the deployment target; this k3d lineage
+# just needs to stay non-vacuous.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

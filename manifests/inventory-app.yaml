@@ -73,7 +73,10 @@ metadata:
     app.kubernetes.io/part-of: cloud-design
     app.kubernetes.io/component: crud
 spec:
-  replicas: 1
+  # replicas: 2 (was 1) -- same fix as api-gateway.yaml: at replicas: 1 the
+  # `maxUnavailable: 1` PDB below permitted evicting the only pod. Stateless,
+  # fits the HPA bounds (min 1 / max 3).
+  replicas: 2
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -184,9 +187,11 @@ spec:
   selector:
     app: inventory-app
 ---
-# `maxUnavailable: 1` rather than `minAvailable: 1`: the HPA floor is 1, so
-# `minAvailable: 1` would forbid evicting any replica at the default size and
-# `kubectl drain` would hang forever. Full rationale in api-gateway.yaml.
+# `maxUnavailable: 1` against `replicas: 2`: at most one pod is voluntarily
+# disrupted at a time, so one replica always stays in service. Meaningful only
+# because replicas (2) > maxUnavailable (1); at the previous replicas: 1 this
+# object was vacuous. Full rationale in api-gateway.yaml. Rolling updates are
+# separately covered by `maxUnavailable: 0` on the Deployment above.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

@@ -74,6 +74,12 @@ metadata:
 spec:
   serviceName: billing-database-service
   replicas: 1
+  # WHY NO PDB: at replicas: 1 no honest budget exists -- `maxUnavailable: 1`
+  # permits evicting the only pod (vacuous) while `maxUnavailable: 0` /
+  # `minAvailable: 1` deadlocks `kubectl drain`. Scaling a single-writer
+  # PostgreSQL needs replication machinery, not a replica-count edit, so the
+  # count stays 1 and the absence stays deliberate. HA on the deployment target
+  # is RDS Multi-AZ (terraform/rds.tf), not a pod budget here.
   podManagementPolicy: OrderedReady
   selector:
     matchLabels:

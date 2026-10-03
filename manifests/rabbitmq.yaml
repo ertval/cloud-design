@@ -36,7 +36,7 @@
 # -----------------------------------------------------------------------------
 # READINESS PROBE  --  the single most important line in this file
 # -----------------------------------------------------------------------------
-# The readinessProbe checks for the sentinel file /tmp/rabbitmq-queue-ready and
+# The readinessProbe checks for the sentinel file /tmp/rabbit-queue-ready and
 # NOT `rabbitmq-diagnostics -q ping`. This is not a stylistic choice:
 #
 #   `rabbitmq-diagnostics -q ping` answers "is the Erlang VM up?" and succeeds
@@ -52,7 +52,7 @@
 #   it explicitly says the sentinel is "consumed by ... the k8s readinessProbe
 #   in manifests/rabbitmq.yaml". The manifest was not honouring that contract.
 #
-#   /tmp/rabbitmq-queue-ready is written only after
+#   /tmp/rabbit-queue-ready is written only after
 #   `rabbitmqctl authenticate_user` succeeds (entrypoint.sh:78), and is
 #   deliberately `rm -f`'d at the top of every boot (entrypoint.sh:20-21) so it
 #   can never be a stale artefact from a previous container start.
@@ -81,6 +81,12 @@ metadata:
 spec:
   serviceName: rabbitmq-service
   replicas: 1
+  # WHY NO PDB: at replicas: 1 no honest budget exists -- `maxUnavailable: 1`
+  # permits evicting the only pod (vacuous) while `maxUnavailable: 0` /
+  # `minAvailable: 1` deadlocks `kubectl drain`. A second broker needs real
+  # clustering (shared-nothing Mnesia cannot share one RWO volume), not a
+  # replica-count edit, so the count stays 1 and the absence stays deliberate.
+  # HA on the deployment target is Amazon MQ Multi-AZ, not a pod budget here.
   podManagementPolicy: OrderedReady
   selector:
     matchLabels:
@@ -227,15 +233,26 @@ spec:
             # Restart-only. Deliberately the ping, NOT the sentinel: if the
             # sentinel check were also the liveness check, a credential
             # rotation that stops the entrypoint from writing the sentinel
-            # would restart the broker in a tight loop instead of surfacing
-            # the misconfiguration as a NotReady pod.
+            # would restart the broker in a tight loop instead of surfacing the
+            # misconfiguration as a NotReady pod.
+            #
+            # timeoutSeconds is 20, matching the startup probe, and the reason is
+            # the same: `rabbitmq-diagnostics -q ping` shells out to a node and
+            # can exceed 10s on a loaded machine (measured with the full compose
+            # stack AND the 3-node k3d cluster running on the same laptop). With
+            # the startup probe's 20s allowance, a broker that is slow *and*
+            # healthy passes startup and is then killed 20 seconds later by a
+            # 10s liveness timeout -- a restart loop caused by load, not by a
+            # dead broker. periodSeconds 15 x failureThreshold 5 still gives 75s
+            # of consecutive failure before anything is restarted, so this stays
+            # a restart-only probe.
             exec:
               command:
                 - rabbitmq-diagnostics
                 - -q
                 - ping
             periodSeconds: 15
-            timeoutSeconds: 10
+            timeoutSeconds: 20
             failureThreshold: 5
   volumeClaimTemplates:
     - metadata:
