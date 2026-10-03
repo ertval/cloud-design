@@ -236,7 +236,7 @@ spec:
               mountPath: /usr/src/logs
       # VERIFIED, AND LEFT DELIBERATELY IN PLACE:
       #   nothing in srcs/billing-app writes to /usr/src/logs. Unlike
-      #   srcs/api-gateway-app/app/__init__.py:29-40, billing-app uses only
+      #   srcs/api-gateway/app/__init__.py:29-40, billing-app uses only
       #   logging.basicConfig (app/__init__.py:9-13) and never constructs a
       #   FileHandler, so this 1Gi PVC is currently written by nothing. It is
       #   retained (not deleted) because it is the natural mount point if a

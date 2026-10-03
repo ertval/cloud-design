@@ -78,7 +78,7 @@ following components:
   code running and connected to the billing database and consuming the messages
   from the RabbitMQ queue, and it can be accessed via port `8080`.
 - `RabbitMQ container` is a RabbitMQ server that contains the queue.
-- `api-gateway-app container` is a server that contains your
+- `api-gateway container` is a server that contains your
   API Gateway code running and forwarding the requests to the other
   services, and it's accessible via port `3000`.
 

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # =============================================================================
-# api-gateway-app - single public entry point of the platform.
+# api-gateway - single public entry point of the platform.
 #
 # Build context is this directory only (see .dockerignore and the `context:`
 # key in docker-compose.yml), which keeps the transfer tiny and makes every

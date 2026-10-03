@@ -41,7 +41,7 @@ committed independently. Nothing is uncommitted.
 | §6 item | Status | Evidence |
 |---|---|---|
 | 6.1 vacuous PDBs + 3 missing StatefulSet PDBs | **CLOSED** | `test_cloud.sh` went 60 PASS / 1 FAIL -> **64 PASS / 0 FAIL / 1 WARN**. `api-gateway` and `inventory-app` moved to `replicas: 2` so `maxUnavailable: 1` actually retains a pod; `billing-app` is a StatefulSet at `replicas: 2`. The three single-replica StatefulSets (both DBs, RabbitMQ) carry **no** PDB on purpose — at `replicas: 1` every budget is vacuous or drain-deadlocking — and each says so next to its `replicas:` line |
-| 6.2 app fixes have no live evidence | **CLOSED**, one item stays unknown | All four fixes measured live (below). The 900 KB body **did not reproduce** as a 500 on any variant tried: 921 643 B legal body -> 200 via both the gateway and `:8081`; 1.1 MB -> 413 from nginx, but 1.1 MB direct to `:8081` -> 200 because inventory-app sets no `MAX_CONTENT_LENGTH`. Cause of the original 500 remains **unknown**; do not write a cause into any document |
+| 6.2 app fixes have no live evidence | **CLOSED**, one item stays unknown | All four fixes measured live (below). The 900 KB body **did not reproduce** as a 500 on any variant tried: 921 643 B legal body -> 200 via both the gateway and `:8081`; 1.1 MB -> 413 from nginx, but 1.1 MB direct to `:8081` -> 200 because inventory-app sets no `MAX_CONTENT_LENGTH`. Cause of the original 500 remains **unknown**; do not write a cause into any document. What the source *does* establish, and narrows the search: nginx's `proxy_next_upstream error timeout http_502 http_503 http_504` (`docker-compose.yml:389`) does **not** include `http_500`, so nginx cannot have manufactured the 500 by retrying — it must have been returned by `api-gateway-app` upstream, which also means the access-log line (`upstream=`/`upstream_time=` are already in the log format) will show the upstream status directly. Both size limits on the path sit above 900 KB (`client_max_body_size 1m`, gateway `MAX_CONTENT_LENGTH = 1 MiB`), and `proxy_request_buffering` is left at its default `on`. `inventory-app` sets **no** `MAX_CONTENT_LENGTH`, so the gateway is the only hop that can raise `RequestEntityTooLarge`. To settle it, capture the `gateway-lb` access-log line and `api-gateway`'s `gateway.log` for the same failing second, plus the client's exact body size and `Content-Type` |
 | 6.3 docs still contain the review's findings | **CLOSED** | Both documents rewritten. Every stale claim is gone: unauthenticated-POST contradiction, `set -euo` claim, PKCE claim, arch-diagram topology, `echo $?` command, JWT audience, cost table, versions, the hardcoded accusation line, `334+335=669`, the "ALB exposes only api-gateway" claim, and the "manifests PDBs are a working control" claim |
 | 6.4 audit numbers are stale | **CLOSED** | Re-run, pasted verbatim, never hand-edited. `test_cloud.sh` -> **64 PASS / 0 FAIL / 1 WARN**. `run-audit-checks.sh` -> **PASS=203 FAIL=0 INVALID=1 NOTES=44**, marker `audit-64485-1791054689` |
 | 6.5 Herdr `w6:p2` demonstration | **NOT DONE — still outstanding** | See §0.5 |
@@ -58,7 +58,7 @@ Fixed and **verified live** in this session:
    Measured before: `GET /orders` -> 500. Measured after, with `billing-database`
    stopped: **`GET /orders` -> 503** `{"error":"The billing database is currently
    unavailable"}`, `/health` -> 200, `/ready` -> 503.
-2. **`srcs/api-gateway-app/app/proxy.py`** — the edge check accepted `user_id: 0`
+2. **`srcs/api-gateway/app/proxy.py`** — the edge check accepted `user_id: 0`
    (its minimum is `INT32_MIN`) while the consumer rejects 0, so such an order was
    published and then acked-and-discarded as a poison pill: a gateway 200 with a
    silently dropped order. Measured after: `POST /api/billing {"user_id":0,...}` ->
@@ -95,7 +95,7 @@ INVALID instead of silently passing on empty output. Stack up, same script:
 README.md  docs/AUDIT_GUIDE.md  docs/HANDOFF.md
 manifests/{api-gateway,billing-app,billing-database,inventory-app,inventory-database,rabbitmq}.yaml
 scripts/run-audit-checks.sh
-srcs/api-gateway-app/app/proxy.py  srcs/billing-app/app/__init__.py
+srcs/api-gateway/app/proxy.py  srcs/billing-app/app/__init__.py
 ```
 
 ### 0.4 A second session is editing this repo right now
@@ -192,7 +192,7 @@ top-level `Dockerfiles/` directory was deleted.
 | Wave | Owner | Status | Verified? |
 |---|---|---|---|
 | Terraform | `terraform/**` | **Complete**, self-reported | Manual only — no `terraform` binary |
-| Application | `srcs/**` | **Code complete**, killed during verification | `make test-py` = **24 tests OK** (was 18). **No Docker/live evidence produced.** |
+| Application | `srcs/**` | **Code complete**, killed during verification | `make test-py` = **52 tests OK** (20 inventory-app + 32 billing-app). **No Docker/live evidence produced.** The earlier figures of 18 and 24 in this file were both wrong: `pytest srcs/` aborted at collection because two same-named `test_validation.py` files collided, so nobody could have measured either number. A `pytest.ini` now fixes the collection. |
 | Scripts | `scripts/**` | **Complete and functional** | `test_cloud.sh` = 60 PASS / **1 FAIL** / 3 WARN |
 
 Two of the three agents were **cancelled mid-run**, not timed out cleanly. Their code
@@ -202,7 +202,7 @@ landed; their verification and final reports did not. Verified directly after ca
   python / pytest / docker-compose process alive.
 - `bash -n` clean on all six shell scripts; both new `awk` libs parse.
 - `python3 -m py_compile` clean on every `srcs` module and test.
-- `make test-py` -> 24 tests, **OK**.
+- `make test-py` -> 52 tests, **OK** (20 inventory-app + 32 billing-app).
 
 **The single `[FAIL]` is a true positive, not a script defect** — see §6.1.
 

@@ -8,7 +8,7 @@ MAX_CONTENT_LENGTH = 1 * 1024 * 1024
 SWAGGER_UI_VERSION = "5.33.0"
 
 def setup_logging():
-    log_format = "%(asctime)s [%(levelname)s] [api-gateway-app] %(message)s"
+    log_format = "%(asctime)s [%(levelname)s] [api-gateway] %(message)s"
     formatter = logging.Formatter(log_format)
 
     root_logger = logging.getLogger()

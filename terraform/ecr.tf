@@ -10,14 +10,14 @@
 #   REG=$(terraform output -raw ecr_registry_url)
 #   aws ecr get-login-password --region us-east-1 \
 #     | docker login --username AWS --password-stdin "$REG"
-#   docker build -f srcs/api-gateway-app/Dockerfile srcs/api-gateway-app \
+#   docker build -f srcs/api-gateway/Dockerfile srcs/api-gateway \
 #     -t "$REG/cloud-design/api-gateway:latest"
 #   docker push "$REG/cloud-design/api-gateway:latest"
 # The Dockerfile is at srcs/<component>/Dockerfile and the build context is that
 # same directory (so srcs/<component>/.dockerignore applies) - the previous
 # revision of this comment pointed at Dockerfiles/Dockerfile.api-gateway, a path
 # that does not exist anywhere in the repo. Note also that the on-disk component
-# directory is `api-gateway-app` while the repository/image name is
+# directory is `api-gateway` while the repository/image name is
 # `cloud-design/api-gateway` (local.app_images below), so the -t tag and the
 # directory name are deliberately not the same string.
 # ------------------------------------------------------------------------------

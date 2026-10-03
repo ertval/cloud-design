@@ -14,7 +14,7 @@
 # THIS IS WHY `APP_PORT` IS NOT IN HERE.
 #   inventory-app/server.py:9  -> port = int(os.getenv("APP_PORT") or "8080")
 #   billing-app/server.py:11   -> port = int(os.getenv("APP_PORT", "8080") or "8080")
-#   api-gateway-app/server.py:9-> port = int(os.getenv("APP_PORT") or "3000")
+#   api-gateway/server.py:9-> port = int(os.getenv("APP_PORT") or "3000")
 # A single `APP_PORT: "3000"` here made inventory-app and billing-app bind 3000
 # while their `containerPort`, `targetPort` and both probes stayed on 8080. The
 # pods never became Ready, never joined their Service endpoints, so the gateway
@@ -40,7 +40,7 @@ metadata:
   labels:
     app.kubernetes.io/part-of: cloud-design
 data:
-  # --- consumed by api-gateway-app/app/proxy.py:12-13 -------------------
+  # --- consumed by api-gateway/app/proxy.py:12-13 -------------------
   INVENTORY_APP_HOST: "inventory-app-service"
   INVENTORY_APP_PORT: "8080"
   # --- consumed by inventory-app/app/__init__.py:34-36 -----------------
@@ -51,7 +51,7 @@ data:
   BILLING_DB_HOST: "billing-database-service"
   BILLING_DB_PORT: "5432"
   BILLING_DB_NAME: "billing_db"
-  # --- consumed by api-gateway-app/app/queue_sender.py:48-52 and by
+  # --- consumed by api-gateway/app/queue_sender.py:48-52 and by
   #     billing-app/app/consume_queue.py:64-68 ---------------------------
   RABBITMQ_HOST: "rabbitmq-service"
   RABBITMQ_PORT: "5672"

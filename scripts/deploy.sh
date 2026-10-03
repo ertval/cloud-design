@@ -154,7 +154,7 @@ fi
 # -----------------------------------------------------------------------------
 step "Build images via scripts/build_push.sh"
 BUILD_ARGS=()
-[ "${STATIC_ONLY}" -eq 1 ] && BUILD_ARGS+=(--component api-gateway-app)
+[ "${STATIC_ONLY}" -eq 1 ] && BUILD_ARGS+=(--component api-gateway)
 [ "${PUSH}" = "1" ] && BUILD_ARGS+=(--push)
 if bash "$ROOT_DIR/scripts/build_push.sh" "${BUILD_ARGS[@]}"; then
   if [ "${PUSH}" = "1" ]; then echo "  [ok]   images built and pushed to ECR"

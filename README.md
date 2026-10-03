@@ -256,7 +256,7 @@ is listed as both a StatefulSet and an RDS instance.
 | 3 | `inventory-app` | 8080 | `cloud-design/inventory-app:local` (FROM `python:3.11-alpine`) | 8081 (direct, bypasses the gateway) | **ECS task** `cloud-design-prod-inventory-app` (`ecs_services.tf`) | private app |
 | 4 | `billing-app` | 8080 | `cloud-design/billing-app:local` (FROM `python:3.11-alpine`) | 8082 (direct) | **ECS task** `cloud-design-prod-billing-app`, `desired_count = 2` (`ecs_services.tf`) | private app |
 | 5 | `RabbitMQ` queue | 5672 local / **5671 AWS** | `cloud-design/rabbit-queue:local` (FROM `rabbitmq:3.13-management-alpine`) | 5672 + 15672 (mgmt UI) | **Amazon MQ for RabbitMQ** `ACTIVE_STANDBY_MULTI_AZ`, `publicly_accessible = false`, **AMQPS 5671 only** (`amazon_mq.tf`) | private db |
-| 6 | `api-gateway-app` | 3000 | `cloud-design/api-gateway-app:local` (FROM `python:3.11-alpine`), **2 replicas** | none (behind the LB) | **ECS task** `cloud-design-prod-api-gateway` (`ecs_services.tf`) | private app |
+| 6 | `api-gateway` | 3000 | `cloud-design/api-gateway:local` (FROM `python:3.11-alpine`), **2 replicas** | none (behind the LB) | **ECS task** `cloud-design-prod-api-gateway` (`ecs_services.tf`) | private app |
 | — | local load balancer | 3000 (host) | `nginx:1.27-alpine`, `least_conn` — the local stand-in for the ALB | 3000 | **Application Load Balancer**, `internal = false` (`alb.tf`) | public |
 
 Supporting AWS resources with no local container counterpart: API Gateway HTTP
@@ -277,7 +277,7 @@ workload has a different name on each platform, which is deliberate:
 | `inventory-app` | service `inventory-app` / compose-generated `cloud-design-inventory-app-1` / `8081:8080` (direct, bypasses the gateway) | Deployment `inventory-app` / `inventory-app-service:8080` | service `cloud-design-prod-inventory-app` / container `inventory-app:8080` |
 | `billing-app` | service `billing-app` / compose-generated `cloud-design-billing-app-1` / `8082:8080` (direct) | StatefulSet `billing-app` / `billing-app-service:8080` (headless) | service `cloud-design-prod-billing-app` (`desired_count = 2`) / container `billing-app:8080` |
 | `rabbit-queue` / broker | service `rabbit-queue` / `cloud-design-rabbit-queue` / `5672` + `15672` (mgmt UI) | StatefulSet `rabbitmq` / `rabbitmq-service:5672` + `:15672` | Amazon MQ broker `cloud-design-prod-rabbitmq`, **AMQPS 5671 only** (no ECS container) |
-| `api-gateway-app` | service `api-gateway-app` (×2 replicas, no `container_name` so it can scale) / `cloud-design-api-gateway-app-1/2` / none (behind the LB) | Deployment `api-gateway` / `api-gateway-service:3000` | service `cloud-design-prod-api-gateway` / container `api-gateway:3000` |
+| `api-gateway` | service `api-gateway` (×2 replicas, no `container_name` so it can scale) / `cloud-design-api-gateway-1/2` / none (behind the LB) | Deployment `api-gateway` / `api-gateway-service:3000` | service `cloud-design-prod-api-gateway` / container `api-gateway:3000` |
 | load balancer | service `gateway-lb` / `cloud-design-gateway-lb` / `3000:8080` (`nginx:1.27-alpine`, `least_conn`) | `manifests/ingress.yaml` (commented out of `kustomization.yaml`; needs ALB controller + ACM cert) | ALB `cloud-design-prod-alb` (`internal = false`, `:443` TLS / `:80` → 301) |
 
 Notes an auditor trips over:
@@ -361,7 +361,7 @@ range — see [Usage](#usage) for the script and the full table.
   exits **0** (the SIGTERM handler at `srcs/billing-app/app/consume_queue.py:247-253`
   stops the consumer through pika's thread-safe callback), not 137. The measured
   drill, including a consumer outage and a drain, is in [Usage](#usage).
-- **Local HA substitute:** two `api-gateway-app` replicas behind nginx
+- **Local HA substitute:** two `api-gateway` replicas behind nginx
   `least_conn`, which is the same algorithm family as the ALB target group. The
   distribution is *measured*, not asserted: **561 / 539** across the two replica
   IPs over 1100 requests.
@@ -602,7 +602,7 @@ claim.
   Terraform injects `RABBITMQ_PORT = 5671`, and the security groups open
   **5671** egress *and* ingress (the previous revision opened the broker ingress
   rule but never the matching app egress rule, so AMQPS was unreachable).
-  `srcs/api-gateway-app/app/queue_sender.py:26-31` documents the detection rule:
+  `srcs/api-gateway/app/queue_sender.py:26-31` documents the detection rule:
   TLS is on when `RABBITMQ_TLS` is truthy, **or** when it is unset and the
   effective port is 5671 / the host carries `amqps://`. The identical rule is
   implemented in both the publisher and the consumer so they can never disagree.
@@ -739,8 +739,8 @@ The stack it produces:
 | Container | Image | Host port |
 |---|---|---|
 | `cloud-design-gateway-lb` | `nginx:1.27-alpine` | `3000 → 8080` |
-| `cloud-design-api-gateway-app-1` | `cloud-design/api-gateway-app:local` | none |
-| `cloud-design-api-gateway-app-2` | `cloud-design/api-gateway-app:local` | none |
+| `cloud-design-api-gateway-1` | `cloud-design/api-gateway:local` | none |
+| `cloud-design-api-gateway-2` | `cloud-design/api-gateway:local` | none |
 | `cloud-design-inventory-app-1` | `cloud-design/inventory-app:local` | `8081 → 8080` |
 | `cloud-design-billing-app-1` | `cloud-design/billing-app:local` | `8082 → 8080` |
 | `cloud-design-inventory-database` | `cloud-design/inventory-database:local` | `5432 → 5432` |
@@ -810,7 +810,7 @@ bash scripts/deploy-k3d.sh
 
 # build and preload so the kubelet needs no registry
 bash scripts/build_push.sh
-k3d image import cd-audit cloud-design/api-gateway-app:local
+k3d image import cd-audit cloud-design/api-gateway:local
 
 # apply -- USE -k, ALWAYS
 kubectl apply -k manifests/
@@ -868,7 +868,7 @@ compose with a named error:
 | `BILLING_DB_USER` | billing-database, billing-app | application role |
 | `BILLING_DB_PASSWORD` | same | |
 | `BILLING_DB_NAME` | same | `billing_db` |
-| `RABBITMQ_USER` | rabbit-queue, api-gateway-app, billing-app | **must not be `guest`** — the entrypoint deletes `guest` |
+| `RABBITMQ_USER` | rabbit-queue, api-gateway, billing-app | **must not be `guest`** — the entrypoint deletes `guest` |
 | `RABBITMQ_PASSWORD` | same | |
 
 Optional overrides (safe defaults live in the code):
@@ -1145,7 +1145,7 @@ persisted with exact decimal precision once the consumer returns.
   strings, no bool/float/blank/trailing garbage) and `total_amount` must be an
   exact `Decimal >= 0` (plain decimal string or int, never float/scientific).
   The gateway rejects violations with **400** before publishing
-  (`_validate_billing_payload` in `srcs/api-gateway-app/app/proxy.py`); a
+  (`_validate_billing_payload` in `srcs/api-gateway/app/proxy.py`); a
   malformed message that still reaches the queue is **poison-acked and
   discarded** by the consumer (`coerce_order_payload` → `InvalidOrderError`
   → `basic_ack` in `srcs/billing-app/app/validation.py` and
@@ -1422,7 +1422,7 @@ Optimizer, Savings Plans recommendations.
    group, so AMQPS was unreachable however the client was configured. Fix: both
    the egress and ingress rules, and one shared detection rule implemented
    identically in the publisher and the consumer
-   (`srcs/api-gateway-app/app/queue_sender.py:26-31`), so the two can never
+   (`srcs/api-gateway/app/queue_sender.py:26-31`), so the two can never
    disagree.
 
 8. **`aws_iam_openid_connect_provider` collided with the EKS one.** Declaring the
@@ -1480,7 +1480,7 @@ Claimed against `docs/readme.md`'s bonus list. Each item says exactly what exist
 | **ECR with scan-on-push** | **Done** | `terraform/ecr.tf`: 3 repos, `scan_on_push = true`, AES256, lifecycle policy keeping the last 5 images, and an explicit account-local repository policy |
 | **AWS Cloud Map service discovery** | **Done** | `terraform/service_discovery.tf`: private DNS namespace, `MULTIVALUE` routing, `health_check_custom_config`, registered by all three ECS services. One ALB, **no second load balancer** for east–west |
 | **Reusable audit automation** | **Done** | `scripts/run-audit-checks.sh` walks all 22 rubric items with real commands and reports PASS / FAIL / **INVALID** separately |
-| **A real load balancer in the demonstrable path** | **Done** | nginx `least_conn` in front of 2 `api-gateway-app` replicas, with `$upstream_addr` in the access log so the **561 / 539** distribution over 1100 requests is *measured* rather than asserted. Same algorithm family as the ALB target group |
+| **A real load balancer in the demonstrable path** | **Done** | nginx `least_conn` in front of 2 `api-gateway` replicas, with `$upstream_addr` in the access log so the **561 / 539** distribution over 1100 requests is *measured* rather than asserted. Same algorithm family as the ALB target group |
 | **Retained, k3d-verified Kubernetes manifests** | **Done** | `manifests/` — 29 objects rendered by `kubectl kustomize`, applied to a live k3d cluster: 8 NetworkPolicies, 3 HPAs, 3 PDBs, topology spread, `preStop` drains, 3-tier split probes |
 | **Function as a Service (FaaS)** | **NOT implemented** | No `aws_lambda_function`. Future work |
 | **Content Delivery Network (CDN)** | **NOT implemented** | No `aws_cloudfront_distribution`. Future work |
@@ -1525,7 +1525,7 @@ find a gap you did not mention.
 | Claim | How it was verified |
 |---|---|
 | 7 services / 8 containers, all healthy | `docker compose ps`, `docker ps` |
-| End-to-end HTTP + async billing path | `make test` — 18 unit tests (9 + 9) + 6-step smoke through the load balancer; the row it writes comes back with `total_amount` `49.99`, and the resilience drill below writes `123.45` |
+| End-to-end HTTP + async billing path | `make test` — 52 unit tests (20 inventory-app + 32 billing-app) + 6-step smoke through the load balancer; the row it writes comes back with `total_amount` `49.99`, and the resilience drill below writes `123.45` |
 | Graceful consumer shutdown | `docker compose stop billing-app` → **exit 0** (not 137) |
 | Order survives a consumer outage | `messages_ready = 1` while stopped, drained to 0 in **5 s** after restart |
 | Load balancing distribution | **561 / 539** over 1100 requests, read from the nginx access log |

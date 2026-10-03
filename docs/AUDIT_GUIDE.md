@@ -360,7 +360,7 @@ flowchart TD
 
 | Component | Port | Where declared |
 |---|---|---|
-| `api-gateway-app` | 3000 | `EXPOSE 3000`, ECS `portMappings`, ALB target group |
+| `api-gateway` | 3000 | `EXPOSE 3000`, ECS `portMappings`, ALB target group |
 | `inventory-app` | 8080 | `EXPOSE 8080`, ECS `portMappings`, Cloud Map service |
 | `billing-app` | 8080 | `EXPOSE 8080`, ECS `portMappings`, Cloud Map service |
 | `inventory-database` | 5432 | `EXPOSE 5432`, RDS `port` |
@@ -624,7 +624,7 @@ backlog itself rather than a load average.
 (`context: ./srcs/<component>`). There is **no top-level `Dockerfiles/` directory**
 any more — it was consolidated into `srcs/` and deleted.
 
-- **3 multi-stage app images** — `api-gateway-app`, `inventory-app`, `billing-app`.
+- **3 multi-stage app images** — `api-gateway`, `inventory-app`, `billing-app`.
   `FROM python:3.11-alpine AS builder` installs into `/install` with
   `pip install --no-cache-dir --only-binary=:all: --prefix=/install -r requirements.txt`,
   then `FROM python:3.11-alpine AS runtime` copies `/install` and the source and
@@ -642,7 +642,7 @@ any more — it was consolidated into `srcs/` and deleted.
 
 | Image | Size |
 |---|---|
-| `cloud-design/api-gateway-app:local` | **108 MB** |
+| `cloud-design/api-gateway:local` | **108 MB** |
 | `cloud-design/inventory-app:local` | **152 MB** |
 | `cloud-design/billing-app:local` | **154 MB** |
 | `cloud-design/rabbit-queue:local` | **275 MB** |
@@ -669,12 +669,12 @@ optimisation. Say that.
 
 **Build-time caching.** `requirements.txt` is copied on its own line before the
 source, so a code-only change does not invalidate the dependency layer. Measured in
-this session: a warm rebuild of `api-gateway-app` with the dependency layer already
+this session: a warm rebuild of `api-gateway` with the dependency layer already
 cached completed in **4.84 s**:
 
 ```
 $ /usr/bin/time -f "warm rebuild wall: %e s" docker build -q \
-    -f srcs/api-gateway-app/Dockerfile -t cloud-design/api-gateway-app:warmtest srcs/api-gateway-app
+    -f srcs/api-gateway/Dockerfile -t cloud-design/api-gateway:warmtest srcs/api-gateway
 warm rebuild wall: 4.84 s
 ```
 
@@ -694,7 +694,7 @@ session, so do not quote me a number for it.** Measure it yourself with
   carries `tests/`, `__pycache__/`, `*.md` or `.env`.
 - A **build-time smoke test** in the three app images, importing exactly what each
   service needs and running **as the unprivileged user**:
-  - `api-gateway-app` → `import flask, waitress, pika, requests`
+  - `api-gateway` → `import flask, waitress, pika, requests`
   - `billing-app` → `import flask, waitress, pika, sqlalchemy, psycopg2`
   - `inventory-app` → `import flask, waitress, flask_sqlalchemy, sqlalchemy, psycopg2`
 
@@ -1075,7 +1075,7 @@ ls -1 ecs-tasks/*.json | wc -l                            # 6
 
 ```
 18
-api-gateway-app  billing-app  billing-database  inventory-app  inventory-database  rabbit-queue
+api-gateway  billing-app  billing-database  inventory-app  inventory-database  rabbit-queue
 6
 2
 7
@@ -1167,14 +1167,14 @@ inventory-database  5432  5432        5432:5432      5432      5432   n/a
 billing-database    5432  5432        5433:5432      5432      5432   n/a
 inventory-app       8080  8080        8081:8080      8080      8080   n/a
 billing-app         8080  8080        8082:8080      8080      8080   n/a
-api-gateway-app     3000  3000        none           3000      3000   3000
+api-gateway     3000  3000        none           3000      3000   3000
 rabbit-queue        5672  5672        5672:5672      5672      5672   n/a
 ```
 
 **Say, and do not skip the two "n/a"/"none" cells:** "Two deliberate deviations,
 both explained. `billing-database` publishes host **5433**→container 5432 because
 two containers cannot bind the same host port — the *application* port is 5432 as
-required. And `api-gateway-app` is **not** published on the host at all: it is
+required. And `api-gateway` is **not** published on the host at all: it is
 reachable only through `gateway-lb`, which is the load balancer. Publishing it
 would bypass the thing `audit.md:66` asks me to demonstrate."
 
@@ -1292,8 +1292,8 @@ docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep cloud-desi
 **Real output (8 containers, all healthy):**
 
 ```
-cloud-design-api-gateway-app-1    Up 23 minutes (healthy)   3000/tcp
-cloud-design-api-gateway-app-2    Up 23 minutes (healthy)   3000/tcp
+cloud-design-api-gateway-1    Up 23 minutes (healthy)   3000/tcp
+cloud-design-api-gateway-2    Up 23 minutes (healthy)   3000/tcp
 cloud-design-billing-app-1        Up 7 minutes (healthy)    0.0.0.0:8082->8080/tcp, [::]:8082->8080/tcp
 cloud-design-inventory-app-1      Up 24 minutes (healthy)   0.0.0.0:8081->8080/tcp, [::]:8081->8080/tcp
 cloud-design-gateway-lb           Up 23 minutes (healthy)   0.0.0.0:3000->8080/tcp, [::]:3000->8080/tcp
@@ -1309,7 +1309,7 @@ curl -s http://localhost:3000/health
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/api/movies/
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8081/ready
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8082/ready
-docker exec cloud-design-api-gateway-app-1 id -u
+docker exec cloud-design-api-gateway-1 id -u
 ```
 
 **Real output:**
@@ -1365,7 +1365,7 @@ Two halves: a **live** proof on the local stack, and the **static** ALB
 configuration the local load balancer stands in for.
 
 ```bash
-docker compose ps -q api-gateway-app | wc -l
+docker compose ps -q api-gateway | wc -l
 for i in $(seq 20); do curl -s -o /dev/null "http://localhost:3000/health?m=demo-$i"; done
 docker compose logs gateway-lb | grep 'demo-' | grep -oE 'upstream=[0-9.]+:[0-9]+' | sort | uniq -c
 ```
@@ -1434,7 +1434,7 @@ container**, because `pika` is a container dependency and is not installed on th
 host:
 
 ```bash
-docker exec cloud-design-api-gateway-app-1 python3 -c "
+docker exec cloud-design-api-gateway-1 python3 -c "
 import sys; sys.path.insert(0,'/usr/src/app')
 from app.queue_sender import build_ssl_options, ssl_options_for
 o = build_ssl_options('b-1234.mq.us-east-1.amazonaws.com')
@@ -1611,7 +1611,7 @@ reasoning is written out in `manifests/api-gateway.yaml` and next to each
 | `inventory-app` on 8080 | `aws_ecs_task_definition.inventory_app` | `cloud-design-prod-inventory-app` |
 | `billing-app` on 8080, consumes the queue | `aws_ecs_task_definition.billing_app` + `aws_ecs_service.billing_app` (`desired_count = 2`) | `cloud-design-prod-billing-app` |
 | RabbitMQ queue | `aws_mq_broker.rabbitmq` | `cloud-design-prod-rabbitmq` |
-| `api-gateway-app` on 3000 | `aws_ecs_task_definition.api_gateway` + ALB target group | `cloud-design-prod-api-gateway` |
+| `api-gateway` on 3000 | `aws_ecs_task_definition.api_gateway` + ALB target group | `cloud-design-prod-api-gateway` |
 
 **And the correction that matters most here:** "The previous revision of this
 project had **no** ECS task definition for `billing-app` at all. Nothing consumed the
@@ -1631,7 +1631,7 @@ docker history cloud-design/inventory-database:local --format '{{.Size}}\t{{.Cre
 **Real output:**
 
 ```
-cloud-design/api-gateway-app:local   108MB
+cloud-design/api-gateway:local   108MB
 cloud-design/inventory-app:local     152MB
 cloud-design/billing-app:local       154MB
 cloud-design/rabbit-queue:local      275MB
@@ -1650,7 +1650,7 @@ Per-image analysis, read out of each `srcs/<component>/Dockerfile`:
 
 ```
 component           base image                        stages non-root  --chmod   .dockerignore
-api-gateway-app     python:3.11-alpine                2      yes       yes       yes
+api-gateway     python:3.11-alpine                2      yes       yes       yes
 billing-app         python:3.11-alpine                2      yes       yes       yes
 inventory-app       python:3.11-alpine                2      yes       yes       yes
 billing-database    postgres:17-alpine                0      no(root)  yes       yes
@@ -1682,7 +1682,7 @@ start as root to chown their data directories and then drop privileges via
 
 ```
 $ /usr/bin/time -f "warm rebuild wall: %e s" docker build -q \
-    -f srcs/api-gateway-app/Dockerfile -t cloud-design/api-gateway-app:warmtest srcs/api-gateway-app
+    -f srcs/api-gateway/Dockerfile -t cloud-design/api-gateway:warmtest srcs/api-gateway
 warm rebuild wall: 4.84 s
 ```
 
@@ -2215,7 +2215,7 @@ enumerate your own present-day mistakes will believe the rest of your answers.**
 | # | The defect | How it was falsified | What is true now |
 |---|---|---|---|
 | 12 | **`terraform validate` FAILED.** `password_history_size = 3` sat at the top level of `aws_cognito_user_pool`, where AWS provider 5.x rejects it: *"An argument named password_history_size is not expected here."* | Run `terraform validate`. The comment above the argument even claimed the argument was available on the pinned provider — it was not, just not in that position. | The argument lives inside the `password_policy` block, which is the only place `terraform providers schema -json` shows it on 5.x. `terraform validate` returns `Success!`. The hardening was kept, not deleted. |
-| 13 | **The Kubernetes path could never have worked from a clean checkout.** The build produces `cloud-design/api-gateway-app` and `cloud-design/rabbit-queue` (named after the `srcs/` directories), but `manifests/` asks for `cloud-design/api-gateway` and `cloud-design/rabbitmq` (named after the AWS services). | `deploy-k3d.sh` imported the directory-named images, and `api-gateway` + `rabbitmq` sat in `ImagePullBackOff` with `pull access denied, repository does not exist`. | `deploy-k3d.sh` maps the two divergent names explicitly, and then **verifies that every image referenced by `manifests/` exists locally** before importing — so a future rename fails loudly instead of as a pod that never starts. |
+| 13 | **The Kubernetes path could never have worked from a clean checkout.** The build produces `cloud-design/api-gateway` and `cloud-design/rabbit-queue` (named after the `srcs/` directories), but `manifests/` asks for `cloud-design/api-gateway` and `cloud-design/rabbitmq` (named after the AWS services). | `deploy-k3d.sh` imported the directory-named images, and `api-gateway` + `rabbitmq` sat in `ImagePullBackOff` with `pull access denied, repository does not exist`. | `deploy-k3d.sh` maps the two divergent names explicitly, and then **verifies that every image referenced by `manifests/` exists locally** before importing — so a future rename fails loudly instead of as a pod that never starts. |
 | 14 | **`k3d image import cd-audit img:tag` silently targeted the wrong cluster.** k3d v5.9 ignores the positional cluster argument and falls back to its built-in default. | Fails with `failed to get cluster k3s-default: No nodes found for given cluster` while `cd-audit` is running with 3/3 servers. | Uses the required flag form `k3d image import -c cd-audit img:tag`. Same class of bug for the cluster-create arg: k3d ≥ 5.7 rejects a bare `--k3s-arg` spanning multiple nodes, so the arg now carries the `@server:*` node filter. |
 | 15 | **The metrics-server URL in the README, in the manifests and in the deploy script returned 404.** `github.com/k3s-io/metrics-server/releases/latest/download/metrics-server.yaml` no longer exists. | `curl -I` → `404`. Without metrics-server every HPA reports `<unknown>`, `scalingActive=false` and **silently never scales**. | Pinned to `github.com/kubernetes-sigs/metrics-server/releases/download/v0.8.0/components.yaml` in both places where it is a live command (`README.md`, `scripts/deploy-k3d.sh`) plus the commented install note in `manifests/api-gateway.yaml`. Pinned rather than `latest` so the audit is reproducible. |
 | 16 | **The audit script's own replica-count check reported `containers_present=0` for four healthy services** and failed the run. | The name match required a `-N` suffix. Compose only appends one to services that do not pin `container_name`, so `inventory-database`, `billing-database`, `rabbit-queue` and `gateway-lb` never matched — the section failed while all eight containers were `running/healthy`. | The suffix is optional in the match. This one is worth dwelling on: a check that cries wolf is worse than no check, because it teaches you to skim past failures. |
@@ -2324,7 +2324,7 @@ curl -s http://localhost:3000/health
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/api/movies/
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8081/ready
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8082/ready
-docker exec cloud-design-api-gateway-app-1 id -u     # 10001
+docker exec cloud-design-api-gateway-1 id -u     # 10001
 docker compose logs --since=15m | grep -icE 'connection refused|Traceback|OperationalError'
 ```
 
@@ -2697,7 +2697,7 @@ see that.
 | No remote Terraform state | `main.tf` carries a commented-out `backend "s3"` block. State is local and gitignored. For a real project this is the first thing to fix — no locking, no history, no disaster recovery for state. |
 | `ecs-tasks/*.json` are a hand-maintained reference, not what Terraform applies | They now say `RABBITMQ_PORT = 5671` and carry placeholder ARNs (`123456789012`, placeholder MQ host/ARNs). `terraform/ecs_services.tf` is the real source (5671). The script validates both, so they are consistent in *shape* but not in Amazon-MQ-specific values. Same placeholder pattern: `manifests/ingress.yaml` ships `arn:aws:acm:us-east-1:123456789012:certificate/REPLACE_ME_VALIDATED_ACM_CERT_ARN` plus host `cloud-design.example.com`, and `terraform.tfvars.example`/`variables.tf` default `allowed_origins` to `["https://app.example.com"]` — replace all three before any real deployment. |
 | 3 `__pycache__/*.pyc` files are tracked in git | `.gitignore` cannot untrack them. `test_cloud.sh` warns with the exact `git rm -r --cached` command. Harmless, but it is untidy and it is reported. |
-| A stale path in a comment | `terraform/ecr.tf` documents its push workflow with `docker build -f Dockerfiles/Dockerfile.api-gateway srcs/api-gateway-app`. That path no longer exists after the `Dockerfiles/` consolidation; it should read `-f srcs/api-gateway-app/Dockerfile`. It is a comment, not a functional command, but an examiner who greps for `Dockerfiles/` will find it. |
+| A stale path in a comment | `terraform/ecr.tf` documents its push workflow with `docker build -f Dockerfiles/Dockerfile.api-gateway srcs/api-gateway`. That path no longer exists after the `Dockerfiles/` consolidation; it should read `-f srcs/api-gateway/Dockerfile`. It is a comment, not a functional command, but an examiner who greps for `Dockerfiles/` will find it. |
 | Local PostgreSQL is 17, AWS is declared as 16 | The container images build `FROM postgres:17-alpine` (upstream `PG_VERSION=17.11`); `terraform/rds.tf` declares `engine_version = "16.9"` with a `postgres16` parameter group. That is a deliberate version floor for the managed service, but it *is* a divergence between the demonstrated stack and the deployed one. Say so if asked; aligning `rds.tf` to 17 is a one-line change plus a parameter-group family change. |
 | A publish to a dead broker takes ~10 s, not the 3 s the socket timeout implies | Measured live: `POST /api/billing` with the broker stopped returns HTTP 500 after 9.99 s, because Docker's embedded DNS drops the hostname and burns ~5 s of resolver timeout per attempt. Bounded rather than hung, and the read path is unaffected — but see §8 challenge 5 before quoting a number. |
 | A fragile check in the audit script | `scripts/run-audit-checks.sh` (~line 793) looks for a Prerequisites heading with `^#+[[:space:]]*prerequisites`, which will not match a *numbered* heading such as `## 7. Prerequisites`. During this work it reported `README has no Prerequisites section` as a FAIL against a README that had exactly that section, under the heading `## 7. Prerequisites`. The heading has since been changed to `## Prerequisites` and the check now passes — but the fragility remains: renumber that heading and the check breaks again, for no real reason. |

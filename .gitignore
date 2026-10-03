@@ -3,20 +3,15 @@
 # ==============================================================================
 # Purpose: keep machine-local, regenerable and secret-bearing files out of git.
 #
-# IMPORTANT - KNOWN HYGIENE PROBLEM (NOT fixed by this file alone).
-# Adding an ignore rule only affects UNTRACKED files. Two directories are already
-# TRACKED, so these rules currently have no effect on them and a human must run
-# the remediation commands below ONCE:
-#
-#   # ~711 MB of downloaded provider binaries + 3 compiled bytecode files
-#   git rm -r --cached terraform/.terraform
-#   git rm -r --cached srcs/api-gateway-app/__pycache__ \
-#                      srcs/billing-app/__pycache__ \
-#                      srcs/inventory-app/__pycache__
-#   git commit -m "chore: untrack terraform provider cache and __pycache__"
+# RESOLVED. This banner used to warn that `terraform/.terraform` (~711 MB of
+# provider binaries) and three `__pycache__` directories were still TRACKED, and
+# to instruct a maintainer to run `git rm -r --cached` on them by hand. That
+# remediation was done in commit 8c7a65f, so the warning was stale: it told the
+# next person to untrack paths that were no longer tracked.
 #
 # Verify with:  git ls-files | grep -E '\.terraform/|__pycache__|\.pyc'
-# After the fix that command must print nothing.
+# That command must print nothing. If it prints something, the ignore rules below
+# are not the problem -- the file is tracked and needs `git rm --cached`.
 #
 # This is deliberately NOT run by scripts/ -- removing files from the index is a
 # git write, and this repository is being edited concurrently by other teams.

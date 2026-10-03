@@ -61,7 +61,7 @@ INT32_MAX = 2147483647
 _INTEGER_LITERAL = re.compile(r"-?(0|[1-9][0-9]*)")
 # Plain decimal for money: no exponent, no underscores, digits required on
 # both sides of a dot when present. Rejects `1e3`, `5.`, `1_2`, `NaN`.
-# Mirrors the gateway edge check in srcs/api-gateway-app/app/proxy.py.
+# Mirrors the gateway edge check in srcs/api-gateway/app/proxy.py.
 _DECIMAL_LITERAL = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)")
 
 

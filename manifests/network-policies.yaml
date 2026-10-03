@@ -186,7 +186,7 @@ spec:
 #   443  -> 0.0.0.0/0       REQUIRED, and easy to overlook: the Swagger UI is
 #                            served as HTML that loads swagger-ui-dist from
 #                            https://unpkg.com (pinned to 5.33.0) at
-#                            srcs/api-gateway-app/app/__init__.py:49,58. With
+#                            srcs/api-gateway/app/__init__.py:49,58. With
 #                            egress denied, /docs renders a permanently blank
 #                            page (the template's own <p> banner at line 53
 #                            says so). This is the only unrestricted egress in

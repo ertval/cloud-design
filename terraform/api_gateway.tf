@@ -157,7 +157,7 @@ resource "aws_apigatewayv2_route" "movies_proxy" {
 
 # 7. Protected Billing Routes (Cognito Authorization Required)
 # POST /api/billing lands on api-gateway, which publishes to RabbitMQ (srcs/
-# api-gateway-app/app/proxy.py). GET /api/billing/orders has to reach billing-app
+# api-gateway/app/proxy.py). GET /api/billing/orders has to reach billing-app
 # itself, and since srcs/ is owned by another team the routing is done here: the
 # ALB splits the two paths with aws_lb_listener_rule.billing_orders, so no
 # BILLING_APP_HOST/PORT env pair or extra proxy route is needed in the app.

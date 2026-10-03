@@ -98,10 +98,10 @@ shell-rabbit: ## rabbitmqctl inside the broker
 
 py-compile: ## Byte-compile every Python source file (no dependencies needed)
 	@python3 -m py_compile \
-		srcs/api-gateway-app/server.py \
-		srcs/api-gateway-app/app/__init__.py \
-		srcs/api-gateway-app/app/proxy.py \
-		srcs/api-gateway-app/app/queue_sender.py \
+		srcs/api-gateway/server.py \
+		srcs/api-gateway/app/__init__.py \
+		srcs/api-gateway/app/proxy.py \
+		srcs/api-gateway/app/queue_sender.py \
 		srcs/inventory-app/server.py \
 		srcs/inventory-app/app/__init__.py \
 		srcs/inventory-app/app/movies.py \

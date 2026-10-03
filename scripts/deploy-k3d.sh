@@ -168,17 +168,19 @@ if [ "${DRY_RUN}" -eq 1 ]; then
 else
   IMAGES=()
   # IMAGE NAME DRIFT, made explicit. The build produces one image per srcs/
-  # DIRECTORY (cloud-design/api-gateway-app, cloud-design/rabbit-queue), while
-  # the manifests reference the SERVICE names used on AWS
-  # (cloud-design/api-gateway, cloud-design/rabbitmq). Two of the six differ, so
-  # tagging by directory name silently produces an image the kubelet never asks
-  # for and the pod sits in ImagePullBackOff forever.
+  # DIRECTORY, while the manifests reference the SERVICE names used on AWS.
+  # They used to differ for the gateway as well (srcs/api-gateway-app vs
+  # cloud-design/api-gateway), which is why this mapping function existed at
+  # all; the gateway directory and service now share the name api-gateway, so
+  # only the broker still needs remapping (srcs/rabbit-queue ->
+  # cloud-design/rabbitmq). Tagging by directory name alone would silently
+  # produce an image the kubelet never asks for, and the pod sits in
+  # ImagePullBackOff forever.
   #   srcs directory        manifest image name
   alias_image_name() {
     case "$1" in
-      api-gateway-app) echo "api-gateway"   ;;
-      rabbit-queue)     echo "rabbitmq"      ;;
-      *)                echo "$1"            ;;
+      rabbit-queue) echo "rabbitmq" ;;
+      *)            echo "$1"       ;;
     esac
   }
   for d in "$ROOT_DIR"/srcs/*/; do

@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 # =============================================================================
 # AMQPS / TLS - ONE rule, implemented identically in
-#   srcs/api-gateway-app/app/queue_sender.py  (publisher)
+#   srcs/api-gateway/app/queue_sender.py  (publisher)
 #   srcs/billing-app/app/consume_queue.py    (consumer)
 # The publisher and the consumer MUST agree on the connection mode: a plaintext
 # publisher against a TLS-only broker drops orders, and a plaintext consumer

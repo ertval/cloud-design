@@ -588,9 +588,9 @@ fi
 if step "4" "Architecture aligns with requirements - PORT CONSISTENCY MATRIX" "audit.md:52 (ports from docs/readme.md:70-83)"; then
 note "Required component ports (docs/readme.md:70-83):"
 note "  inventory-database=5432  billing-database=5432  inventory-app=8080"
-note "  billing-app=8080  RabbitMQ=5672  api-gateway-app=3000"
+note "  billing-app=8080  RabbitMQ=5672  api-gateway=3000"
 note "compose-host is 'n/a' where the service is deliberately NOT published on the host."
-note "  (api-gateway-app is reachable only through gateway-lb; billing-database is 5433->5432"
+note "  (api-gateway is reachable only through gateway-lb; billing-database is 5433->5432"
 note "   because two containers cannot bind the same host port.)"
 
 printf "  %-19s %-5s %-11s %-14s %-9s %-6s %-6s\n" component req Dockerfile compose manifest ECS ALB
@@ -665,7 +665,7 @@ inventory-database|5432|inventory-database|inventory-database|inventory-database
 billing-database|5432|billing-database|billing-database|billing-database.yaml|billing-database-task.json|no
 inventory-app|8080|inventory-app|inventory-app|inventory-app.yaml|inventory-app-task.json|no
 billing-app|8080|billing-app|billing-app|billing-app.yaml|billing-app-task.json|no
-api-gateway-app|3000|api-gateway-app|api-gateway-app|api-gateway.yaml|api-gateway-task.json|yes
+api-gateway|3000|api-gateway|api-gateway|api-gateway.yaml|api-gateway-task.json|yes
 rabbit-queue|5672|rabbit-queue|rabbit-queue|rabbitmq.yaml|rabbitmq-task.json|no
 MATRIX
 
@@ -909,7 +909,7 @@ if [ "${COMPOSE_STACK_UP}" -eq 1 ]; then
     ' "${ROOT_DIR}/docker-compose.yml" 2>/dev/null | head -1
   }
   SVC_TABLE=""; NOT_HEALTHY=(); SCALE_BAD=()
-  for s in api-gateway-app inventory-app billing-app inventory-database billing-database rabbit-queue gateway-lb; do
+  for s in api-gateway inventory-app billing-app inventory-database billing-database rabbit-queue gateway-lb; do
     want="$(compose_expected "${s}")"; count_ok "${want}" || want=1
     rows="$(cd "${ROOT_DIR}" && docker compose ps -a --format '{{.Name}}|{{.State}}|{{if .Health}}{{.Health}}{{else}}no-healthcheck{{end}}' 2>/dev/null \
             | awk -F'|' -v s="$s" '$1 ~ ("(^|-)" s "(-[0-9]+)?$") {print}')"
@@ -1002,8 +1002,8 @@ fi
 # =============================================================================
 if step "9" "Load balancing distributes traffic (LIVE) + static ALB verification" "audit.md:66"; then
 if [ "${COMPOSE_STACK_UP}" -eq 1 ] && [ "${CURL_OK}" -eq 1 ]; then
-  LB_REPLICAS="$(cd "${ROOT_DIR}" && docker compose ps -q api-gateway-app 2>/dev/null | grep -c . | head -1)"
-  show "docker compose ps -q api-gateway-app | wc -l" "${LB_REPLICAS} gateway replica(s)"
+  LB_REPLICAS="$(cd "${ROOT_DIR}" && docker compose ps -q api-gateway 2>/dev/null | grep -c . | head -1)"
+  show "docker compose ps -q api-gateway | wc -l" "${LB_REPLICAS} gateway replica(s)"
   if count_ok "${LB_REPLICAS}" && [ "${LB_REPLICAS}" -ge 2 ]; then
     pass "the gateway runs ${LB_REPLICAS} replicas behind gateway-lb, so distribution is demonstrable"
   else
@@ -1430,7 +1430,7 @@ else
   fail "could not analyse the Dockerfiles (${DF_TOTAL:-0} found)"
 fi
 MULTI_OK=0
-for a in api-gateway-app inventory-app billing-app; do
+for a in api-gateway inventory-app billing-app; do
   grep -qE '^FROM .+ AS ' "${ROOT_DIR}/srcs/${a}/Dockerfile" 2>/dev/null && MULTI_OK=$((MULTI_OK + 1))
 done
 if [ "${MULTI_OK}" -eq 3 ]; then pass "all 3 Python app images are multi-stage (builder + runtime), so build tooling stays out of the shipped image"
@@ -1456,7 +1456,7 @@ if [ "${DOCKER_OK}" -eq 1 ] && docker info >/dev/null 2>&1; then
   IMG_TAGS="$(grep -oE '^[[:space:]]*image:[[:space:]]*cloud-design/[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+' "${ROOT_DIR}/docker-compose.yml" 2>/dev/null | grep -oE ':[A-Za-z0-9_.-]+$' | sort | uniq -c | tr '\n' ' ')"
   show "docker images --format '{{.Repository}}:{{.Tag}}  {{.Size}}' | grep ^cloud-design/ | sort   -- ALL ${IMG_N:-0} lines, nothing filtered or truncated" "${IMG_ALL:-<no cloud-design/* images>}"
   note "that listing is complete: ${IMG_N:-0} tags for ${#SRC_DIRS[@]} components, because every image carries both the compose tag (:local) and a :latest alias${IMG_TAGS:+ [tags actually referenced by docker-compose.yml: ${IMG_TAGS% }]}. The measurement below uses the compose tag only."
-  for a in api-gateway-app inventory-app billing-app inventory-database billing-database rabbit-queue; do
+  for a in api-gateway inventory-app billing-app inventory-database billing-database rabbit-queue; do
     want_tag="$(sed -nE "s/^[[:space:]]*image:[[:space:]]*cloud-design\/${a}:([A-Za-z0-9_.-]+).*/\1/p" "${ROOT_DIR}/docker-compose.yml" 2>/dev/null | head -1)"
     [ -n "${want_tag}" ] || want_tag="local"
     sz="$(docker images --format '{{.Size}}' "cloud-design/${a}:${want_tag}" 2>/dev/null | head -1)"

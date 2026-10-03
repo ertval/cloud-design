@@ -137,7 +137,7 @@ metadata:
     alb.ingress.kubernetes.io/ssl-redirect: '443'
     # Health check path: /health, and it must stay /health.
     #   (a) it must match the ALB's success codes, below; and
-    #   (b) api-gateway has NO /ready route (srcs/api-gateway-app/app/__init__.py
+    #   (b) api-gateway has NO /ready route (srcs/api-gateway/app/__init__.py
     #       defines only /health, /docs, /api/docs and /openapi.yaml), so
     #       pointing this at /ready would make every target permanently
     #       unhealthy and the ALB would return 503 for all callers -- an

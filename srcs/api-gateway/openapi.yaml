@@ -59,7 +59,7 @@ paths:
             because its database is unreachable. The dependency being unavailable
             is not a gateway bug, so this is 503 (retryable) rather than 5xx.
             The response body carries a generic message; the upstream detail is
-            written to the api-gateway-app log.
+            written to the api-gateway log.
           content:
             application/json:
               schema:
@@ -289,7 +289,7 @@ paths:
             503 (retryable) rather than 500. The publish is attempted a bounded
             number of times first. The response body is a fixed generic message:
             the broker hostname and the driver's error text go to the
-            api-gateway-app log, never to the client.
+            api-gateway log, never to the client.
           content:
             application/json:
               schema:

@@ -14,7 +14,7 @@
 # Build and preload before applying:
 #
 #   # 1. build (from the repo root; each srcs/<svc>/Dockerfile is self-contained)
-#   docker build -t cloud-design/api-gateway:latest        srcs/api-gateway-app
+#   docker build -t cloud-design/api-gateway:latest        srcs/api-gateway
 #   docker build -t cloud-design/inventory-app:latest      srcs/inventory-app
 #   docker build -t cloud-design/billing-app:latest        srcs/billing-app
 #   docker build -t cloud-design/inventory-database:latest srcs/inventory-database
@@ -153,7 +153,7 @@ spec:
           #
           # Deliberately still `/health` and NOT `/ready`, unlike inventory-app
           # and billing-app: the gateway has no database of its own and
-          # srcs/api-gateway-app/app/__init__.py:84 defines no `/ready`
+          # srcs/api-gateway/app/__init__.py:84 defines no `/ready`
           # route. Pointing this at `/ready` would return 404 forever and the
           # gateway would never join the Service endpoints -- i.e. every
           # request would 503 instead of ever reaching the app. The same
@@ -186,7 +186,7 @@ spec:
             failureThreshold: 2
           volumeMounts:
             # REQUIRED by `readOnlyRootFilesystem: true`.
-            # srcs/api-gateway-app/app/__init__.py:29-40 calls
+            # srcs/api-gateway/app/__init__.py:29-40 calls
             # `os.makedirs("/usr/src/logs")` and opens a RotatingFileHandler on
             # /usr/src/logs/gateway.log (5 MB x 3 backups). With a read-only
             # root filesystem and no mount here, the gateway still starts (the

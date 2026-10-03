@@ -6,14 +6,14 @@
 #   local docker compose          ->  AWS (terraform/)
 #   ------------------------         ----------------------------------------
 #   gateway-lb (nginx)          ->  ALB + api-gateway target group (alb.tf)
-#   api-gateway-app  x2         ->  ECS service behind the ALB (ecs-tasks/)
+#   api-gateway  x2         ->  ECS service behind the ALB (ecs-tasks/)
 #   inventory-app / billing-app ->  ECS services on Fargate
 #   inventory-database          ->  RDS PostgreSQL 16.3 (rds.tf)
 #   billing-database            ->  RDS PostgreSQL 16.3 (rds.tf)
 #   rabbit-queue                ->  Amazon MQ for RabbitMQ (amazon_mq.tf)
 #
 # Every variable name below matches EXACTLY what the application code reads:
-#   srcs/api-gateway-app/server.py, app/proxy.py, app/queue_sender.py
+#   srcs/api-gateway/server.py, app/proxy.py, app/queue_sender.py
 #   srcs/inventory-app/server.py, app/__init__.py
 #   srcs/billing-app/server.py, app/__init__.py, app/consume_queue.py
 #   srcs/{inventory,billing}-database/init-db.sh
@@ -247,13 +247,13 @@ services:
       start_period: 20s
 
   # ---------------------------------------------------------------------------
-  # 6. api-gateway-app - reverse proxy + RabbitMQ publisher (2 replicas)
+  # 6. api-gateway - reverse proxy + RabbitMQ publisher (2 replicas)
   # ---------------------------------------------------------------------------
-  api-gateway-app:
+  api-gateway:
     build:
-      context: ./srcs/api-gateway-app
+      context: ./srcs/api-gateway
       dockerfile: Dockerfile
-    image: cloud-design/api-gateway-app:local
+    image: cloud-design/api-gateway:local
     <<: *app-defaults
     # Two replicas behind the load balancer: this is what makes "the load
     # balancing distributes traffic across the services" demonstrable rather
@@ -313,7 +313,7 @@ services:
     <<: *runtime-defaults
     stop_grace_period: 10s
     depends_on:
-      api-gateway-app:
+      api-gateway:
         condition: service_healthy
     ports:
       # The single audited entry point: http://localhost:3000
@@ -361,7 +361,7 @@ services:
                 # `resolve` re-resolves the service name instead of pinning the
                 # replica IPs found at startup, so a replaced or scaled
                 # container is picked up without restarting nginx.
-                server api-gateway-app:3000 resolve max_fails=3 fail_timeout=10s;
+                server api-gateway:3000 resolve max_fails=3 fail_timeout=10s;
                 keepalive 32;
             }
 

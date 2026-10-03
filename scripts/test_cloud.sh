@@ -350,7 +350,7 @@ for d in "$ROOT_DIR"/srcs/*/; do
 done
 if [ "$DF_TOTAL" -gt 0 ]; then pass "analysed ${DF_TOTAL} Dockerfiles from srcs/*/Dockerfile"
 else fail "no Dockerfiles found under srcs/*/"; fi
-for a in api-gateway-app inventory-app billing-app; do
+for a in api-gateway inventory-app billing-app; do
     if grep -qE '^FROM .+ AS ' "$ROOT_DIR/srcs/$a/Dockerfile" 2>/dev/null; then DF_MULTI=$((DF_MULTI + 1)); fi
 done
 if [ "$DF_MULTI" -eq 3 ]; then pass "all 3 Python app images are multi-stage"
@@ -370,7 +370,7 @@ echo ">>> 5. Application source: compiles, is wired up, imports, and passes its 
 # startup, and neither suite noticed: this file only byte-compiled the three
 # server.py entry points, imported nothing, and never ran srcs/*/tests/.
 PY_N=0
-for app in api-gateway-app inventory-app billing-app; do
+for app in api-gateway inventory-app billing-app; do
     s="$ROOT_DIR/srcs/$app/server.py"
     [ -f "$s" ] || continue
     PY_N=$((PY_N + 1))
@@ -465,7 +465,7 @@ if (cd "$ROOT_DIR" && git rev-parse --is-inside-work-tree >/dev/null 2>&1); then
     if [ "${TRACKED_PYCACHE:-0}" -eq 0 ]; then
         pass "no __pycache__/*.pyc files are tracked in git"
     else
-        warn "${TRACKED_PYCACHE} __pycache__/*.pyc file(s) are still TRACKED in git. .gitignore cannot untrack them; run: git rm -r --cached srcs/api-gateway-app/__pycache__ srcs/billing-app/__pycache__ srcs/inventory-app/__pycache__"
+        warn "${TRACKED_PYCACHE} __pycache__/*.pyc file(s) are still TRACKED in git. .gitignore cannot untrack them; run: git rm -r --cached srcs/api-gateway/__pycache__ srcs/billing-app/__pycache__ srcs/inventory-app/__pycache__"
     fi
 else
     warn "this tree is not a git checkout, so 'no .pyc files are tracked' could NOT be verified (previously this silently counted 0 via '|| true' and passed)"
