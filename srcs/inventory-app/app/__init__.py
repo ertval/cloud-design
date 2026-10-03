@@ -163,6 +163,15 @@ def create_app(stop_event=None):
         retry_delay = 2.0
     with app.app_context():
         for attempt in range(1, max_retries + 1):
+            # Checked at the TOP of every iteration, not inside the except
+            # branch. Placed after a failure it is not observed before the first
+            # connection attempt, and it sits below `if attempt == max_retries:
+            # raise`, so the final failed attempt raises instead of honouring
+            # SIGTERM -- exactly the case where a `docker stop` during a cold
+            # start would then wait out the remaining budget and get SIGKILLed.
+            if stop_event is not None and stop_event.is_set():
+                logger.info("Shutdown requested while waiting for the inventory database; abandoning startup.")
+                return None
             try:
                 db.session.execute(text("SELECT 1"))
                 db.create_all()
@@ -173,13 +182,6 @@ def create_app(stop_event=None):
                 if attempt == max_retries:
                     logger.error("Could not connect to inventory database after max retries.")
                     raise
-                # `stop_event` is the SIGTERM event installed by server.py BEFORE
-                # this call. Honouring it between attempts is what stops a
-                # `docker stop` during a cold start from having to wait out the
-                # whole budget - 179 x 2s = 358s - and then be SIGKILLed.
-                if stop_event is not None and stop_event.is_set():
-                    logger.info("Shutdown requested while waiting for the inventory database; abandoning startup.")
-                    return None
                 time.sleep(retry_delay)
 
     return app
