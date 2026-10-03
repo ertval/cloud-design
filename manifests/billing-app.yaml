@@ -1,3 +1,124 @@
+# =============================================================================
+# billing-app.yaml  --  RabbitMQ consumer + read-only order list
+# =============================================================================
+# IMAGES: see the IMAGE / PRELOADING block at the top of api-gateway.yaml --
+#   image `cloud-design/billing-app:latest`,
+#   `imagePullPolicy: IfNotPresent` (correct for k3d image import / kind load).
+#
+# WHY A StatefulSet AT ALL
+#   The workload is an at-least-once queue consumer, not a session server, so a
+#   Deployment would technically work. What the StatefulSet buys is a stable
+#   network identity (`billing-app-0.billing-app-service.cloud-design.svc`)
+#   and stable per-ordinal storage, which is what you want for a consumer you
+#   may later need to address individually during an incident. The cost is that
+#   `serviceName` must point at a headless Service -- see the note on
+#   billing-app-service below.
+#
+# -----------------------------------------------------------------------------
+# PROBE DESIGN  (same three-way split as inventory-app.yaml; read the long
+# explanation there -- only the deltas are repeated here)
+# -----------------------------------------------------------------------------
+#   startupProbe   GET /health  60 x 3s = 180s. create_app() blocks in a retry
+#                 loop for up to 30 x 2s = 60s waiting for PostgreSQL
+#                 (srcs/billing-app/app/__init__.py:51-64) and binds no socket
+#                 until it returns, so without the startupProbe the t=20s
+#                 liveness probe SIGKILLs a pod that was about to succeed.
+#   readinessProbe GET /ready   database-aware; 503 when PostgreSQL is
+#                 unreachable, so the pod leaves the endpoints instead of
+#                 serving 500s. /ready is ported from
+#                 orchestrator/Dockerfiles/inventory-app/app/__init__.py.
+#                 Same landing-order caveat as inventory-app.yaml: the route
+#                 does not exist in srcs/billing-app/app/__init__.py yet, so
+#                 until it lands this probe returns 404 and the pod is
+#                 NotReady. Deliberate -- a loud 404 beats a /health readiness
+#                 probe that silently hides a broken database.
+#   livenessProbe  GET /health  restart-only; must stay DB-independent so that a
+#                 database outage does not trigger a restart storm that cannot
+#                 fix the outage.
+#
+# -----------------------------------------------------------------------------
+# GRACEFUL SHUTDOWN  --  why this workload needs more than the default 30s
+# -----------------------------------------------------------------------------
+# billing-app is the only workload with in-flight state: a RabbitMQ consumer
+# thread running alongside the HTTP server (srcs/billing-app/server.py:38-44).
+#
+# What actually happens on SIGTERM, in the source: the handler sets
+# `shutdown_event` (server.py:20-22), `consumer_stop` is set, the AMQP channel
+# is closed via `stop_consuming` (consume_queue.py:154-167), the current
+# message finishes or is nacked with requeue=True (consume_queue.py:113-117,
+# 140-146), and the process joins both threads with a 5s timeout each
+# (server.py:61-62). Worst case is therefore ~10s of real work after SIGTERM.
+#
+# The two controls used here:
+#   terminationGracePeriodSeconds: 60
+#       15s preStop + up to ~10s of in-process drain + 35s of headroom. NOTE
+#       that `preStop` execution time is subtracted from this budget, not added
+#       to it, so a small grace period would silently truncate the drain.
+#   preStop: sleep 15
+#       preStop runs BEFORE SIGTERM is delivered. Sleeping there keeps the pod
+#       alive (and still consuming) while the endpoint controller and kube-proxy
+#       propagate its removal, so no new HTTP request arrives at a pod that is
+#       about to close its socket.
+#
+# READ THE "MEASURED: WHAT THESE SETTINGS BUY" BLOCK BELOW BEFORE TRUSTING
+# EITHER NUMBER. Both were A/B tested on a live cluster: 16s and exit code 0
+# with an image that handles SIGTERM, 62s and exit code 137 with one that does
+# not. Neither setting can make an application that ignores SIGTERM exit.
+#
+# Why truncation is survivable anyway, and why that is not the reason to do this:
+#   the consumer uses manual acknowledgement with `prefetch_count=1`
+#   (consume_queue.py:90, 148), so at most one message is unacknowledged at any
+#   moment. An abrupt kill therefore loses no order -- RabbitMQ redelivers it.
+#
+# =============================================================================
+# MEASURED: WHAT THESE SETTINGS BUY, AND WHAT THEY CANNOT BUY
+# =============================================================================
+# Both settings above were measured on a live k3d cluster (k3s v1.35.5,
+# kubectl v1.36.1) by deleting billing-app-0 and timing it. Two different
+# images were tested, which is the point:
+#
+#   STALE IMAGE (prebuilt, does NOT contain the SIGTERM handler):
+#     $ kubectl -n cloud-design delete pod billing-app-0 --wait=true
+#     # 62s wall clock -- the FULL terminationGracePeriodSeconds budget
+#     EXITCODE=137  reason=Error            <-- 128+9 == SIGKILL
+#     # and `kill -TERM 1` inside the container produced no log output at all
+#     # and left the pod Running.
+#
+#   REBUILT FROM THIS WORKTREE (contains server.py:12-26 and
+#   consume_queue.py:154-167):
+#     $ docker build -t cloud-design/billing-app:verify srcs/billing-app
+#     $ kubectl -n cloud-design set image statefulset/billing-app \
+#           billing-app=cloud-design/billing-app:verify
+#     $ kubectl -n cloud-design delete pod billing-app-0 --wait=true
+#     # 16s wall clock == the 15s preStop + ~1s of actual drain
+#     EXITCODE=0  reason=Completed
+#     [INFO] Received signal 15; shutting down gracefully
+#     [INFO] Stopping queue consumer and closing HTTP server...
+#     [INFO] Billing queue consumer stopped cleanly.
+#     [INFO] billing-app stopped cleanly.
+#
+# THE LESSON, which is the real content of this block: a preStop hook and a
+# grace period give a process the OPPORTUNITY to drain. They cannot make a
+# process exit. waitress `serve()` blocks the main thread in its event loop
+# forever, so unless something breaks that loop the container is SIGKILLed at
+# the end of the grace period no matter how generous that period is -- a
+# 60-second budget and a 600-second budget fail identically. Raising the grace
+# period would have hidden nothing and fixed nothing.
+#
+# SO: if a pod deletion takes the full terminationGracePeriodSeconds, the
+# manifest is not your problem -- check the application. From the outside:
+#   kubectl -n cloud-design get pod billing-app-0 #     -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}'
+#     exitCode 0    -> drained cleanly; the numbers above are doing their job
+#     exitCode 137  -> SIGKILLed; the grace period expired, so nothing ever
+#                      acknowledged SIGTERM. Look for the handler in server.py.
+#   termination ~16s -> preStop ran, drain was prompt  (the healthy case)
+#   termination ~60s -> the grace period was consumed (the broken case)
+#
+# Blast radius, for the record: even a SIGKILLed consumer loses no committed
+# order. Acknowledgement is manual with `prefetch_count=1`, so at most one
+# delivery is ever unacknowledged and RabbitMQ redelivers it. A broken shutdown
+# costs a redelivery and a non-zero exit code in alerting -- not an order.
+# =============================================================================
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -6,9 +127,16 @@ metadata:
   labels:
     app: billing-app
     app.kubernetes.io/part-of: cloud-design
+    app.kubernetes.io/component: crud
 spec:
+  # MUST resolve to a headless Service -- see billing-app-service below.
   serviceName: billing-app-service
   replicas: 1
+  # Ordered, one at a time: a rolling update must never have two consumers
+  # briefly racing on the same queue during a normal deploy.
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
   selector:
     matchLabels:
       app: billing-app
@@ -16,12 +144,24 @@ spec:
     metadata:
       labels:
         app: billing-app
+        app.kubernetes.io/part-of: cloud-design
+        app.kubernetes.io/component: crud
     spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
         runAsGroup: 10001
         fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: billing-app
+      terminationGracePeriodSeconds: 60
       containers:
         - name: billing-app
           image: cloud-design/billing-app:latest
@@ -29,6 +169,12 @@ spec:
           ports:
             - containerPort: 8080
               name: http
+              protocol: TCP
+          # Explicit and per-workload; the shared ConfigMap must not carry
+          # APP_PORT (see configmap.yaml for the 3000-vs-8080 outage).
+          env:
+            - name: APP_PORT
+              value: "8080"
           envFrom:
             - configMapRef:
                 name: cloud-design-config
@@ -41,25 +187,58 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+          securityContext:
+            # `readOnlyRootFilesystem: true` is safe: PYTHONDONTWRITEBYTECODE=1
+            # in the image, and this service opens no log file of its own
+            # (only api-gateway installs a RotatingFileHandler). The
+            # /usr/src/logs mount below keeps that mount point available for a
+            # future file handler without changing this manifest.
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            timeoutSeconds: 3
+            failureThreshold: 60   # 60 x 3s = 180s to survive a cold initdb
           livenessProbe:
             httpGet:
               path: /health
-              port: 8080
-            initialDelaySeconds: 20
+              port: http
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /health
-              port: 8080
-            initialDelaySeconds: 10
+              path: /ready
+              port: http
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 2
+          lifecycle:
+            preStop:
+              exec:
+                # busybox `sleep`, present in the alpine base image. This is a
+                # dumb wait on purpose -- no custom binary is needed, so there
+                # is nothing extra to build or keep in sync.
+                command: ["/bin/sh", "-c", "sleep 15"]
           volumeMounts:
             - name: billing-app-data
               mountPath: /usr/src/logs
+      # VERIFIED, AND LEFT DELIBERATELY IN PLACE:
+      #   nothing in srcs/billing-app writes to /usr/src/logs. Unlike
+      #   srcs/api-gateway-app/app/__init__.py:29-40, billing-app uses only
+      #   logging.basicConfig (app/__init__.py:9-13) and never constructs a
+      #   FileHandler, so this 1Gi PVC is currently written by nothing. It is
+      #   retained (not deleted) because it is the natural mount point if a
+      #   rotating file handler is ever added, and because removing per-ordinal
+      #   storage from a StatefulSet is a data-durability decision, not a
+      #   manifest cleanup. Flagged as a follow-up, not silently changed.
   volumeClaimTemplates:
     - metadata:
         name: billing-app-data
@@ -69,6 +248,17 @@ spec:
           requests:
             storage: 1Gi
 ---
+# GOVERNING SERVICE FOR THE STATEFULSET -- HEADLESS BY DESIGN.
+# `clusterIP: None` is what makes the StatefulSet contract work: the pod's DNS
+# name is `<pod>.<service>.<ns>.svc.cluster.local` and it resolves directly to
+# the pod IP. A StatefulSet pointing `serviceName` at a normal ClusterIP Service
+# has no stable per-pod identity at all, which is the specific footgun of
+# running a StatefulSet with an ordinary Service: the service VIP load-balances
+# across every consumer, so "pod 0" is not addressable and per-ordinal
+# operations (exec into one consumer, cordon one) cannot be targeted.
+# Only CoreDNS resolution and in-namespace clients depend on this Service --
+# api-gateway reaches billing through RabbitMQ, not through this Service --
+# so nothing regresses.
 apiVersion: v1
 kind: Service
 metadata:
@@ -76,12 +266,86 @@ metadata:
   namespace: cloud-design
   labels:
     app: billing-app
+  annotations:
+    # Documents the intent so a future reviewer does not "fix" the missing
+    # clusterIP back in.
+    cloud-design.io/service-role: statefulset-governing-headless
 spec:
   type: ClusterIP
+  clusterIP: None
   ports:
     - port: 8080
-      targetPort: 8080
+      targetPort: http
       protocol: TCP
       name: http
   selector:
     app: billing-app
+---
+# `maxUnavailable: 1` rather than `minAvailable: 1` -- the HPA floor is 1, so a
+# `minAvailable: 1` PDB would deadlock `kubectl drain` at the default size.
+# Full rationale in api-gateway.yaml.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: billing-app-pdb
+  namespace: cloud-design
+  labels:
+    app: billing-app
+    app.kubernetes.io/part-of: cloud-design
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: billing-app
+---
+# -----------------------------------------------------------------------------
+# HorizontalPodAutoscaler  --  ADDED: this was the only workload without one
+# -----------------------------------------------------------------------------
+# billing-app is the burst-critical component and was the odd one out: the
+# gateway and inventory-app both had an HPA while the queue consumer that
+# silently backs up first under load had none. A backlog does not show up in
+# pod CPU, so this HPA is a floor/safety net rather than a backlog-driven
+# autoscaler -- real scale-out of a queue consumer is normally driven by queue
+# depth (KEDA / RabbitMQ queue-length metric), which is out of scope here.
+# Documented rather than overstated: at minReplicas 1 / maxReplicas 3 on a
+# 60% CPU target this bounds the blast radius of a CPU-bound consumer; it does
+# not drain a backlog.
+#
+# REQUIRES metrics-server. Without it the HPA reports
+#   <unknown>  scaling active=false  FailedGetResourceMetric
+# and silently never scales. Verify with `kubectl top pods -n cloud-design`.
+# Install notes in api-gateway.yaml.
+#
+# Targets a StatefulSet, which autoscaling/v2 supports: the controller patches
+# spec.replicas and the StatefulSet controller rolls new ordinals in. Two
+# consequences of that, stated so nobody is surprised:
+#   * scale-DOWN can leave pod N-1 terminated while pod N still exists; the
+#     matching volumeClaimTemplate PVC is intentionally NOT deleted (the
+#     StatefulSet PVC retention policy defaults to Retain), so no log volume is
+#     destroyed on scale-in.
+#   * `podManagementPolicy: OrderedReady` means a scale-out initialises pods
+#     one at a time and waits for each to be Ready -- at ~180s worst case for a
+#     cold database that is slow, which is the correct trade for a consumer
+#     that must not double-process.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: billing-app-hpa
+  namespace: cloud-design
+  labels:
+    app: billing-app
+    app.kubernetes.io/part-of: cloud-design
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: billing-app
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60

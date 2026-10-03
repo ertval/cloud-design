@@ -1,3 +1,37 @@
+# =============================================================================
+# configmap.yaml
+# =============================================================================
+# Consumed *wholesale* by all three apps via `envFrom.configMapRef`:
+#     api-gateway.yaml    -> envFrom.configMapRef: cloud-design-config
+#     inventory-app.yaml  -> envFrom.configMapRef: cloud-design-config
+#     billing-app.yaml    -> envFrom.configMapRef: cloud-design-config
+#
+# CRITICAL: `envFrom` imports EVERY key in this ConfigMap into EVERY container.
+# There is no per-key selection in `envFrom` (a `valueFrom.configMapKeyRef`
+# `env:` entry is the only per-key mechanism). Therefore anything put here is
+# forced onto all three apps.
+#
+# THIS IS WHY `APP_PORT` IS NOT IN HERE.
+#   inventory-app/server.py:9  -> port = int(os.getenv("APP_PORT") or "8080")
+#   billing-app/server.py:11   -> port = int(os.getenv("APP_PORT", "8080") or "8080")
+#   api-gateway-app/server.py:9-> port = int(os.getenv("APP_PORT") or "3000")
+# A single `APP_PORT: "3000"` here made inventory-app and billing-app bind 3000
+# while their `containerPort`, `targetPort` and both probes stayed on 8080. The
+# pods never became Ready, never joined their Service endpoints, so the gateway
+# returned 502 -- and the liveness probe SIGKILLed them at roughly t+50s.
+# Each workload now declares its own `env: [{name: APP_PORT, value: ...}]`
+# entry, which takes precedence over anything an `envFrom` import would supply.
+# Ports are declared as single source of truth in each workload file:
+#     api-gateway      3000   (docs/readme.md:84-86)
+#     inventory-app    8080   (docs/readme.md:75-77)
+#     billing-app      8080   (docs/readme.md:78-82)
+#     PostgreSQL x2    5432   (docs/readme.md:70-73)
+#     RabbitMQ AMQP    5672
+#
+# All keys below are cross-checked against the environment variables actually
+# read by the application source. Nothing in this file is unused, and nothing
+# the source reads as a non-secret is missing.
+# =============================================================================
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -6,16 +40,20 @@ metadata:
   labels:
     app.kubernetes.io/part-of: cloud-design
 data:
-  APP_PORT: "3000"
+  # --- consumed by api-gateway-app/app/proxy.py:12-13 -------------------
   INVENTORY_APP_HOST: "inventory-app-service"
   INVENTORY_APP_PORT: "8080"
-  BILLING_APP_PORT: "8080"
+  # --- consumed by inventory-app/app/__init__.py:34-36 -----------------
   INVENTORY_DB_HOST: "inventory-database-service"
   INVENTORY_DB_PORT: "5432"
   INVENTORY_DB_NAME: "inventory_db"
+  # --- consumed by billing-app/app/__init__.py:33-35 -------------------
   BILLING_DB_HOST: "billing-database-service"
   BILLING_DB_PORT: "5432"
   BILLING_DB_NAME: "billing_db"
+  # --- consumed by api-gateway-app/app/queue_sender.py:48-52 and by
+  #     billing-app/app/consume_queue.py:64-68 ---------------------------
   RABBITMQ_HOST: "rabbitmq-service"
   RABBITMQ_PORT: "5672"
   RABBITMQ_QUEUE: "billing_queue"
+  # NOTE: APP_PORT is intentionally absent -- see the header above.

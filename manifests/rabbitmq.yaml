@@ -1,3 +1,74 @@
+# =============================================================================
+# rabbitmq.yaml  --  the broker, StatefulSet, single node
+# =============================================================================
+# IMAGES: see the IMAGE / PRELOADING block at the top of api-gateway.yaml --
+#   image `cloud-design/rabbitmq:latest`,
+#   `imagePullPolicy: IfNotPresent` (correct for k3d image import / kind load).
+#
+#   NAMING TRAP, worth knowing before you go looking for the wrong directory:
+#   the image is called `rabbitmq` but it is BUILT from `srcs/rabbit-queue`
+#   (`docker build -t cloud-design/rabbitmq:latest srcs/rabbit-queue`). The
+#   `cloud-design/rabbitmq` name is not arbitrary -- it is the name used by
+#   ecs-tasks/rabbitmq-task.json, so the same artifact serves both the ECS and
+#   the Kubernetes lineage. `k3d image import cloud-design/rabbitmq:latest`
+#   therefore fails with "image not found" if you tag it from the wrong path.
+#
+# -----------------------------------------------------------------------------
+# STATEFULNESS, PVC AND SERVICE -- verified, not assumed
+# -----------------------------------------------------------------------------
+# * volumeClaimTemplates -> a 2Gi RWO PVC per ordinal, holding the broker's
+#   Mnesia store (/var/lib/rabbitmq/.erlang.cookie, mnesia/, and the durable
+#   queue definition). The claim name `rabbitmq-data` matches the
+#   `volumeMounts` name. RWO is correct: a broker data directory is
+#   single-writer, and the entrypoint's cookie synchronization
+#   (srcs/rabbit-queue/entrypoint.sh:28-33) assumes exactly one live node --
+#   two brokers sharing one Mnesia store would corrupt it.
+# * serviceName: rabbitmq-service -> the Service at the bottom of this file,
+#   now HEADLESS (clusterIP: None). A StatefulSet's governing Service must be
+#   headless so that `rabbitmq-0.rabbitmq-service.cloud-design.svc` resolves
+#   to the pod IP. Nothing regresses: api-gateway and billing-app both reach the
+#   broker by the plain service name (RABBITMQ_HOST=rabbitmq-service), which a
+#   headless Service still resolves.
+# * Ports 5672 (AMQP) and 15672 (management) are declared on the container and
+#   mirrored in the Service, with `targetPort` referencing the *named* ports
+#   `amqp` / `management` rather than repeating the numbers.
+#
+# -----------------------------------------------------------------------------
+# READINESS PROBE  --  the single most important line in this file
+# -----------------------------------------------------------------------------
+# The readinessProbe checks for the sentinel file /tmp/rabbitmq-queue-ready and
+# NOT `rabbitmq-diagnostics -q ping`. This is not a stylistic choice:
+#
+#   `rabbitmq-diagnostics -q ping` answers "is the Erlang VM up?" and succeeds
+#   within seconds of the broker starting -- BEFORE the entrypoint has created
+#   the configured user, set its permissions, or deleted `guest`
+#   (srcs/rabbit-queue/entrypoint.sh:52-73). A ping-based readinessProbe
+#   therefore reports Ready during a window in which the only account that can
+#   authenticate is one the clients are not configured to use. api-gateway
+#   would then accept POST /api/billing, fail to publish, and return HTTP 500
+#   "(530) NOT_ALLOWED - access to vhost '/' refused" while the pod is
+#   cheerfully reported Ready. That is the exact failure the entrypoint's own
+#   comment at srcs/rabbit-queue/entrypoint.sh:75-84 was written to prevent --
+#   it explicitly says the sentinel is "consumed by ... the k8s readinessProbe
+#   in manifests/rabbitmq.yaml". The manifest was not honouring that contract.
+#
+#   /tmp/rabbitmq-queue-ready is written only after
+#   `rabbitmqctl authenticate_user` succeeds (entrypoint.sh:78), and is
+#   deliberately `rm -f`'d at the top of every boot (entrypoint.sh:20-21) so it
+#   can never be a stale artefact from a previous container start.
+#
+# The liveness/startup probe keeps `rabbitmq-diagnostics -q ping`, which is the
+# correct question at that layer: "is the broker process alive?"
+#
+# -----------------------------------------------------------------------------
+# WHY NO topologySpreadConstraints HERE
+# -----------------------------------------------------------------------------
+# Same reason as the two PostgreSQL StatefulSets: a ReadWriteOnce volume cannot
+# be attached across Availability Zones, so a zone spread constraint on a
+# single-replica broker with a RWO PVC is a scheduling failure, not a
+# resilience win. Broker-level HA is an Active/Standby or cluster deployment
+# (terraform/amazon_mq.tf); a pod spread constraint cannot emulate it.
+# =============================================================================
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -6,9 +77,11 @@ metadata:
   labels:
     app: rabbitmq
     app.kubernetes.io/part-of: cloud-design
+    app.kubernetes.io/component: messaging
 spec:
   serviceName: rabbitmq-service
   replicas: 1
+  podManagementPolicy: OrderedReady
   selector:
     matchLabels:
       app: rabbitmq
@@ -16,7 +89,58 @@ spec:
     metadata:
       labels:
         app: rabbitmq
+        app.kubernetes.io/part-of: cloud-design
+        app.kubernetes.io/component: messaging
     spec:
+      # ---------------------------------------------------------------------
+      # DELIBERATE EXCEPTION TO THE `restricted` POD SECURITY PROFILE
+      # ---------------------------------------------------------------------
+      # runAsNonRoot is intentionally ABSENT and runAsUser: 0 is explicit. The
+      # entrypoint must start as root to (1) chown /etc/rabbitmq,
+      # /var/lib/rabbitmq and /var/log/rabbitmq to the rabbitmq account,
+      # (2) run `su-exec rabbitmq rabbitmq-server`, (3) copy the broker's
+      # Erlang cookie into /root so that `rabbitmqctl` run as root does not
+      # fail with CookieMismatch, and (4) `rabbitmqctl delete_user guest`.
+      # A non-root uid breaks step (1) and the broker never starts. This is the
+      # reason namespace.yaml enforces the `baseline` profile rather than
+      # `restricted`, and the pod carries a `restricted` audit warning so the
+      # exception is visible on admission rather than silently absent.
+      #
+      # Everything that is safe IS set:
+      #   allowPrivilegeEscalation: false -- no_new_privs; uid 0 keeps the
+      #       capabilities it was granted but cannot gain more from a setuid
+      #       binary.
+      #   capabilities.drop: ALL + add: <exactly what the entrypoint uses>
+      #       CHOWN (chown -R rabbitmq:rabbitmq), SETUID + SETGID
+      #       (su-exec rabbitmq ...), FOWNER (chmod 400 /root/.erlang.cookie),
+      #       DAC_OVERRIDE (write into directories owned by another uid).
+      #       Deliberately NOT added: NET_BIND_SERVICE -- both listeners are
+      #       5672 and 15672, far above the 1024 privileged-port boundary, and
+      #       the broker itself runs as the unprivileged rabbitmq user.
+      #       rabbitmq-server needs no capabilities of its own once su-exec'd.
+      #   seccompProfile: RuntimeDefault -- the standard syscall filter; the
+      #       broker is unmodified by it.
+      #   readOnlyRootFilesystem: false -- required: the entrypoint writes the
+      #       Erlang cookie to /root, the readiness sentinel to /tmp, and the
+      #       broker writes /etc/rabbitmq and /var/log/rabbitmq on every boot.
+      # Pod-level: only the fields that are legal here. `allowPrivilegeEscalation`,
+      # `capabilities` and `readOnlyRootFilesystem` are CONTAINER-level fields --
+      # setting them here is rejected by the API server with
+      #   strict decoding error: unknown field
+      #   "spec.template.spec.securityContext.allowPrivilegeEscalation"
+      # so they are set on the container below. `seccompProfile` is the one
+      # hardening field that is valid at pod level.
+      securityContext:
+        runAsUser: 0
+        seccompProfile:
+          type: RuntimeDefault
+      # The entrypoint traps SIGTERM and runs `rabbitmqctl stop` followed by
+      # `wait "$SERVER_PID"` (srcs/rabbit-queue/entrypoint.sh:39-51), so the
+      # pod needs real time to flush Mnesia and close connections. Without
+      # this the default 30s can expire mid-failover and the node is SIGKILLed
+      # with a dirty Mnesia store, which the broker then has to recover from on
+      # the next start.
+      terminationGracePeriodSeconds: 60
       containers:
         - name: rabbitmq
           image: cloud-design/rabbitmq:latest
@@ -24,8 +148,14 @@ spec:
           ports:
             - containerPort: 5672
               name: amqp
+              protocol: TCP
             - containerPort: 15672
               name: management
+              protocol: TCP
+          # Names are dictated by the image: entrypoint.sh hard-requires
+          # RABBITMQ_USER / RABBITMQ_PASSWORD with a `:?` guard, and rejects the
+          # literal value `guest` (entrypoint.sh:8-11) because the entrypoint
+          # deletes the built-in guest account. See secrets.yaml.
           env:
             - name: RABBITMQ_USER
               valueFrom:
@@ -44,38 +174,81 @@ spec:
             limits:
               cpu: 500m
               memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - CHOWN
+                - DAC_OVERRIDE
+                - FOWNER
+                - SETGID
+                - SETUID
           volumeMounts:
             - name: rabbitmq-data
               mountPath: /var/lib/rabbitmq
-          readinessProbe:
+          startupProbe:
+            # "Is the broker process alive?" -- ping is the right question here.
+            # 30 x 5s = 150s: Erlang VM boot plus `await_startup` polling.
             exec:
               command:
                 - rabbitmq-diagnostics
                 - -q
                 - ping
-            initialDelaySeconds: 20
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            # timeoutSeconds must exceed the duration of a `ping` against a
+            # broker that is still booting. Measured on this image: while the
+            # entrypoint sits in `rabbitmqctl await_startup`, a single
+            # `rabbitmq-diagnostics -q ping` exceeded 10s and was reported as
+            #   Startup probe failed: command timed out:
+            #   "rabbitmq-diagnostics -q ping" timed out after 10s
+            # 20s covers that case so a slow-but-healthy boot is not logged as a
+            # failure. A *running* broker answers in well under a second, so the
+            # liveness probe below keeps a tight 10s.
+            timeoutSeconds: 20
+            failureThreshold: 30
+          readinessProbe:
+            # "Are the credentials the clients use actually usable?"
+            # Sentinel file, per srcs/rabbit-queue/entrypoint.sh:20-21, 78.
+            # `test -f` is a busybox builtin in the alpine base image, so no
+            # extra binary and no exec wrapper is required.
+            exec:
+              command:
+                - test
+                - -f
+                - /tmp/rabbit-queue-ready
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
           livenessProbe:
+            # Restart-only. Deliberately the ping, NOT the sentinel: if the
+            # sentinel check were also the liveness check, a credential
+            # rotation that stops the entrypoint from writing the sentinel
+            # would restart the broker in a tight loop instead of surfacing
+            # the misconfiguration as a NotReady pod.
             exec:
               command:
                 - rabbitmq-diagnostics
                 - -q
                 - ping
-            initialDelaySeconds: 40
             periodSeconds: 15
-            timeoutSeconds: 5
+            timeoutSeconds: 10
             failureThreshold: 5
   volumeClaimTemplates:
     - metadata:
         name: rabbitmq-data
+        labels:
+          app: rabbitmq
       spec:
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
             storage: 2Gi
 ---
+# GOVERNING SERVICE FOR THE STATEFULSET -- HEADLESS BY DESIGN. See the header.
 apiVersion: v1
 kind: Service
 metadata:
@@ -83,15 +256,18 @@ metadata:
   namespace: cloud-design
   labels:
     app: rabbitmq
+  annotations:
+    cloud-design.io/service-role: statefulset-governing-headless
 spec:
   type: ClusterIP
+  clusterIP: None
   ports:
     - port: 5672
-      targetPort: 5672
+      targetPort: amqp
       protocol: TCP
       name: amqp
     - port: 15672
-      targetPort: 15672
+      targetPort: management
       protocol: TCP
       name: management
   selector:

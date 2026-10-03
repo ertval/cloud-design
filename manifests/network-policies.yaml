@@ -1,47 +1,259 @@
-# ------------------------------------------------------------------------------
-# Kubernetes NetworkPolicies: Zero-Trust Microservice Network Segmentation
-# ------------------------------------------------------------------------------
+# =============================================================================
+# network-policies.yaml  --  Zero-Trust Microservice Network Segmentation
+# =============================================================================
+# WHAT THIS FILE ACTUALLY ENFORCES
+#   A default-deny on BOTH directions, then an explicit allow-list that mirrors
+#   the call graph exactly:
+#
+#     api-gateway   -> inventory-app:8080          (HTTP proxy)
+#     api-gateway   -> rabbitmq:5672               (AMQP publish, POST /api/billing)
+#     api-gateway   -> internet:443                (Swagger UI assets, see below)
+#     inventory-app -> inventory-database:5432
+#     billing-app   -> billing-database:5432
+#     billing-app   -> rabbitmq:5672               (AMQP consume)
+#     everyone      -> kube-system CoreDNS:53      (UDP + TCP)
+#
+#   Nothing else is reachable, in either direction, from any pod in this
+#   namespace.
+#
+# -----------------------------------------------------------------------------
+# WHAT WAS WRONG BEFORE, AND WHY IT MATTERED
+# -----------------------------------------------------------------------------
+# The previous default-deny declared `policyTypes: [Ingress]` only.
+# `policyTypes` is the declaration of which directions a policy constrains, not
+# a list of things that happen to be allowed: a policy that does not list
+# `Egress` leaves egress completely unfiltered. So the file's own header claim
+# of "Zero-Trust ... Segmentation" was false in one direction -- while the file
+# header announced Zero-Trust, a compromised `inventory-database` pod had a
+# unrestricted route out to the internet AND sideways into `billing-database`
+# and RabbitMQ, i.e. straight past every allow-rule in sections 5-7. An
+# RCE in the database was therefore a namespace-wide compromise.
+# Adding `Egress` is what makes the ingress rules meaningful: a rule that only
+# constrains ingress is a rule an attacker routes around.
+#
+# -----------------------------------------------------------------------------
+# CNI PREREQUISITE -- READ THIS, IT IS NOT OPTIONAL
+# -----------------------------------------------------------------------------
+# NetworkPolicy objects are inert without an enforcing CNI. A cluster that
+# accepts and stores these objects but does not implement them gives a
+# completely false impression of isolation.
+#
+#   k3s / k3d  : enforcing by default (kube-router runs the netpol controller
+#                alongside flannel). Nothing to install.
+#   kind       : NOT enforcing by default. Enable it:
+#                  kind create cluster --config - <<'EOF'
+#                  kind: Cluster
+#                  networking:
+#                    disableDefaultCNI: true
+#                  nodes: ...
+#                  EOF
+#                # ...or simply run Calico/Cilium instead of kindnet.
+#   minikube   : not enforcing with the default CNI.
+#   EKS        : the VPC CNI has never enforced NetworkPolicy. Use Calico
+#                (aws eks addons) or Cilium, or accept that these objects are
+#                documentation only.
+#                Note: the Terraform team removed the EKS path from this
+#                project, so `manifests/` is retained as the k3s/orchestrator
+#                lineage artifact (docs/readme.md:197) -- k3s enforces.
+#
+# Verify enforcement rather than assuming it. After applying this file:
+#   kubectl -n cloud-design run probe --rm -it --restart=Never \
+#     --image=alpine:3.23 -- sh -c 'wget -qO- -T5 http://inventory-app-service:8080/health'
+#   # from a pod in a DIFFERENT namespace: must time out, not return healthy.
+#
+# -----------------------------------------------------------------------------
+# KUBELET PROBES ARE NOT SUBJECT TO THESE POLICIES -- and why that is safe here
+# -----------------------------------------------------------------------------
+# `httpGet` probes are issued by the kubelet from the NODE's network namespace,
+# not from a pod. Node-network traffic is not selected by any `podSelector`,
+# and both major enforcing dataplanes (kube-router in k3s, Calico's host
+# endpoints) exempt the node's own namespace from pod policy evaluation, so a
+# probe reaches the container regardless of the ingress rules below.
+# Consequence worth internalising: adding a `podSelector` to an ingress rule can
+# never block a probe, and removing an ingress rule cannot cause a probe-driven
+# CrashLoopBackOff. The flip side is that a probe is also a way to reach a
+# container that policy otherwise forbids -- so the rules below keep each
+# container's ingress list as narrow as the application needs, rather than
+# opening anything "for the probes".
+#
+# `exec` probes (the databases and the broker) are even less affected: they run
+# inside the container's own namespace and touch no network at all.
+#
+# If you deploy onto a CNI that DOES filter node->pod traffic, add a narrow
+# `ipBlock` carve-out to the three HTTP workloads' ingress lists, scoped to the
+# node range rather than 0.0.0.0/0:
+#     - from:
+#         - ipBlock:
+#             cidr: 10.0.1.0/24      # <-- your NODE CIDR, not the pod CIDR
+#       ports:
+#         - protocol: TCP
+#           port: http
+# =============================================================================
 
-# 1. Default Deny All Ingress Traffic
+# -----------------------------------------------------------------------------
+# 1. DEFAULT DENY -- INGRESS *AND* EGRESS
+# -----------------------------------------------------------------------------
+# `podSelector: {}` selects every pod in the namespace, including pods created
+# later by a HPA scale-out or by any other manifest, so this is the baseline
+# that makes sections 2-N additive exceptions rather than a snapshot.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: default-deny-ingress
+  name: default-deny-all
   namespace: cloud-design
+  labels:
+    app.kubernetes.io/part-of: cloud-design
 spec:
   podSelector: {}
   policyTypes:
     - Ingress
+    - Egress
+  # No `ingress:` and no `egress:` stanza at all -- that is what denies
+  # everything. Note the rename from `default-deny-ingress`: the object now
+  # denies both directions, so the old name would have been misleading.
 ---
-# 2. Allow Ingress Traffic to API Gateway (from Ingress Controller / ALB)
+# -----------------------------------------------------------------------------
+# 2. DNS EGRESS  --  MANDATORY, APPLIES TO EVERY POD IN THE NAMESPACE
+# -----------------------------------------------------------------------------
+# THIS RULE COMES FIRST IN THE FILE ON PURPOSE. Ordering does not affect
+# evaluation (all policies are unioned), but it does affect the reader, and the
+# single most damaging omission in a default-deny-egress rollout is DNS: it
+# produces a cluster where every pod is Ready-by-probe (probes use IPs, and the
+# kubelet is exempt) and every application call fails with
+#   Temporary failure in name resolution
+# or, on apps that swallow the exception, an empty 200. That failure mode looks
+# like an application bug and is diagnosed as one, for hours.
+#
+# Two destinations are allowed because two DNS datapaths exist in practice:
+#   kube-system CoreDNS      -- every standard cluster
+#   169.254.20.10            -- the EKS VPC-DNS / NodeLocal DNSCache stub
+#                              listener, which is on by DEFAULT on EKS. If this
+#                              is missing on EKS, DNS fails the moment
+#                              default-deny-egress is applied, even though
+#                              everything else about the policy is correct.
+# Both UDP and TCP 53 are required: DNS responses that exceed 512 bytes are
+# truncated and must be retried over TCP, so a UDP-only rule produces
+# intermittent, size-dependent resolution failures that look like flakiness.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-api-gateway-ingress
+  name: allow-dns-egress
   namespace: cloud-design
+  labels:
+    app.kubernetes.io/part-of: cloud-design
+spec:
+  podSelector: {}          # every pod in the namespace
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # EKS NodeLocal DNSCache stub resolver.
+    - to:
+        - ipBlock:
+            cidr: 169.254.20.10/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# -----------------------------------------------------------------------------
+# 3. API GATEWAY  --  ingress from the internet, egress to exactly two things
+# -----------------------------------------------------------------------------
+# INGRESS: `ports:` with no `from:` means "from any source, this port". That is
+# correct and intentional here, and only here: the api-gateway is the single
+# workload meant to be reachable from outside the cluster (from the ALB, or
+# from a `kubectl port-forward` during an audit), so restricting its ingress by
+# source IP would require pinning the ALB's node IPs, which change with every
+# scale event. Narrow it with `from: - ipBlock: cidr:` if you front it with
+# something that has a stable address range.
+#
+# EGRESS, in full:
+#   8080 -> inventory-app   the HTTP proxy (proxy.py:94 builds this URL)
+#   5672 -> rabbitmq        POST /api/billing publishes an AMQP message
+#                            (queue_sender.py:107-115)
+#   443  -> 0.0.0.0/0       REQUIRED, and easy to overlook: the Swagger UI is
+#                            served as HTML that loads swagger-ui-dist from
+#                            https://unpkg.com (pinned to 5.33.0) at
+#                            srcs/api-gateway-app/app/__init__.py:49,58. With
+#                            egress denied, /docs renders a permanently blank
+#                            page (the template's own <p> banner at line 53
+#                            says so). This is the only unrestricted egress in
+#                            the namespace, and it is scoped to 443 TCP rather
+#                            than "allow all egress", which is the whole point.
+#                            On an air-gapped cluster, replace 0.0.0.0/0 with an
+#                            ipBlock for your internal mirror and serve
+#                            swagger-ui from an image instead.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-gateway
+  namespace: cloud-design
+  labels:
+    app.kubernetes.io/part-of: cloud-design
 spec:
   podSelector:
     matchLabels:
       app: api-gateway
   policyTypes:
     - Ingress
+    - Egress
   ingress:
     - ports:
         - protocol: TCP
           port: 3000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: inventory-app
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - podSelector:
+            matchLabels:
+              app: rabbitmq
+      ports:
+        - protocol: TCP
+          port: 5672
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
 ---
-# 3. Allow Ingress to Inventory App ONLY from API Gateway
+# -----------------------------------------------------------------------------
+# 4. INVENTORY APP  --  ingress from the gateway only, egress to its DB only
+# -----------------------------------------------------------------------------
+# No HTTPS egress: inventory-app talks to no external service, and giving it
+# one would be an unmotivated widening of the attack surface.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-inventory-app-ingress
+  name: allow-inventory-app
   namespace: cloud-design
+  labels:
+    app.kubernetes.io/part-of: cloud-design
 spec:
   podSelector:
     matchLabels:
       app: inventory-app
   policyTypes:
     - Ingress
+    - Egress
   ingress:
     - from:
         - podSelector:
@@ -50,19 +262,38 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: inventory-database
+      ports:
+        - protocol: TCP
+          port: 5432
 ---
-# 4. Allow Ingress to Billing App ONLY from Ingress / API Gateway for GET routes
+# -----------------------------------------------------------------------------
+# 5. BILLING APP  --  ingress from the gateway, egress to its DB and the broker
+# -----------------------------------------------------------------------------
+# TWO egress destinations, and both are load-bearing:
+#   5432 -> billing-database  the order store (app/orders.py)
+#   5672 -> rabbitmq          the consumer (consume_queue.py:64-68, 81-167).
+#                             Without this the app passes /health, reports
+#                             Ready, and silently consumes nothing -- a queue
+#                             outage that looks like an empty backlog.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-billing-app-ingress
+  name: allow-billing-app
   namespace: cloud-design
+  labels:
+    app.kubernetes.io/part-of: cloud-design
 spec:
   podSelector:
     matchLabels:
       app: billing-app
   policyTypes:
     - Ingress
+    - Egress
   ingress:
     - from:
         - podSelector:
@@ -71,13 +302,38 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: billing-database
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app: rabbitmq
+      ports:
+        - protocol: TCP
+          port: 5672
 ---
-# 5. Allow Ingress to Inventory Database ONLY from Inventory App
+# -----------------------------------------------------------------------------
+# 6. INVENTORY DATABASE  --  ingress from inventory-app, no egress at all
+# -----------------------------------------------------------------------------
+# A PostgreSQL server has no legitimate reason to initiate a connection: every
+# egress rule in this file, for all three data workloads, is therefore simply
+# absent. `default-deny-all` already denies egress, so omitting the stanza is
+# the restrictive choice -- and it is the strongest statement available here,
+# because a SQL injection or a rogue `psql` session cannot become an exfiltration
+# or a lateral-movement channel.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-inventory-db-ingress
+  name: allow-inventory-database
   namespace: cloud-design
+  labels:
+    app.kubernetes.io/part-of: cloud-design
 spec:
   podSelector:
     matchLabels:
@@ -93,12 +349,20 @@ spec:
         - protocol: TCP
           port: 5432
 ---
-# 6. Allow Ingress to Billing Database ONLY from Billing App
+# -----------------------------------------------------------------------------
+# 7. BILLING DATABASE  --  ingress from billing-app, no egress at all
+# -----------------------------------------------------------------------------
+# Note what this rule is for: it is what stops the compromised-inventory-database
+# scenario described in the file header. Cross-database reachability is denied
+# from both directions, so compromising one database yields one database, not
+# the pair.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-billing-db-ingress
+  name: allow-billing-database
   namespace: cloud-design
+  labels:
+    app.kubernetes.io/part-of: cloud-design
 spec:
   podSelector:
     matchLabels:
@@ -114,12 +378,34 @@ spec:
         - protocol: TCP
           port: 5432
 ---
-# 7. Allow Ingress to RabbitMQ ONLY from API Gateway and Billing App
+# -----------------------------------------------------------------------------
+# 8. RABBITMQ  --  ingress from the gateway and billing-app, no egress
+# -----------------------------------------------------------------------------
+# TIGHTENED FROM THE PREVIOUS VERSION, which allowed port 15672 (the management
+# UI/API) from BOTH api-gateway and billing-app. Neither application speaks to
+# the management port: api-gateway publishes over 5672
+# (queue_sender.py:107-115) and billing-app consumes over 5672
+# (consume_queue.py:81-167), and a search of both source trees finds no
+# reference to 15672 or to any HTTP call to the broker. The old rule therefore
+# opened RabbitMQ's entire administrative API -- user creation, vhost and
+# permission editing, queue purge -- to both of the most internet-facing
+# processes in the namespace.
+#
+# The management port is now reachable only from the node, via the
+# `kubectl port-forward` below, which is the access pattern an operator
+# actually uses and which is not routed through pod-to-pod policy:
+#   kubectl -n cloud-design port-forward svc/rabbitmq-service 15672:15672
+#   # then browse http://localhost:15672 (log in as RABBITMQ_USER)
+# The broker also has NO egress, which is deliberate: a broker that can be
+# induced to fetch a federation or shovel plugin from the internet, or to dial
+# an arbitrary TCP peer, becomes an SSRF pivot out of the namespace.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-rabbitmq-ingress
+  name: allow-rabbitmq
   namespace: cloud-design
+  labels:
+    app.kubernetes.io/part-of: cloud-design
 spec:
   podSelector:
     matchLabels:
@@ -137,5 +423,3 @@ spec:
       ports:
         - protocol: TCP
           port: 5672
-        - protocol: TCP
-          port: 15672

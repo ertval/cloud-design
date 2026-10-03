@@ -1,3 +1,65 @@
+# =============================================================================
+# namespace.yaml  --  APPLY THIS FILE FIRST
+# =============================================================================
+# WHY FIRST
+#   Every other object in this directory carries `namespace: cloud-design`, so
+#   the Namespace must exist before anything else is admitted.
+#
+#   `kubectl apply -f manifests/` walks the directory in ALPHABETICAL order:
+#       api-gateway.yaml, billing-app.yaml, billing-database.yaml, configmap.yaml,
+#       ingress.yaml, inventory-app.yaml, inventory-database.yaml, kustomization.yaml,
+#       namespace.yaml, network-policies.yaml, rabbitmq.yaml, secrets.yaml
+#   Namespace is therefore applied *eighth*, long after the Deployments that
+#   reference it, and a directory-wide apply fails with:
+#       Error from server (NotFound): namespaces "cloud-design" not found
+#   There is a second, quieter failure: the Pod Security Admission labels below
+#   are not in place when the workloads are admitted, so an operator who relies
+#   on admission control to reject an unhardened pod silently gets no rejection.
+#
+# CORRECT ORDER (this is exactly what scripts/deploy.sh already does)
+#   kubectl apply -f manifests/namespace.yaml
+#   kubectl apply -f manifests/secrets.yaml
+#   kubectl apply -f manifests/configmap.yaml
+#   kubectl apply -f manifests/network-policies.yaml
+#   kubectl apply -f manifests/rabbitmq.yaml
+#   kubectl apply -f manifests/inventory-database.yaml
+#   kubectl apply -f manifests/billing-database.yaml
+#   kubectl apply -f manifests/inventory-app.yaml
+#   kubectl apply -f manifests/billing-app.yaml
+#   kubectl apply -f manifests/api-gateway.yaml
+#   kubectl apply -f manifests/ingress.yaml     # AWS only; see ingress.yaml header
+#
+# or, preferably, let kustomization.yaml own the order for you:
+#   kubectl apply -k manifests/
+#
+# =============================================================================
+# POD SECURITY ADMISSION (PSA)
+# =============================================================================
+# ENFORCED = `baseline`. This is a deliberate, documented choice, not a default:
+#
+#   The three data workloads (inventory-database, billing-database, rabbitmq)
+#   MUST start as uid 0. Their entrypoints (srcs/inventory-database/init-db.sh,
+#   srcs/billing-database/init-db.sh, srcs/rabbit-queue/entrypoint.sh) chown the
+#   data directory and then drop privileges with `su-exec`. A `restricted`
+#   namespace forbids `runAsNonRoot`, so enforcing `restricted` here would put
+#   all three StatefulSets into CrashLoopBackOff at `chown`.
+#
+#   `baseline` still rejects the genuinely dangerous shapes -- privileged,
+#   hostPath/hostNetwork/hostPID, added capabilities such as SYS_ADMIN, and
+#   hostPort -- while permitting the root-init pattern above.
+#
+#   The `audit`/`warn` columns are pinned to `restricted` so that every one of
+#   the three data workloads is reported on every admission against the stricter
+#   profile. `kubectl get events -n cloud-design` and the PSA warning banner
+#   therefore always show the exact list of containers that could not be moved to
+#   `restricted` without a vendor image change. That is the audit trail: the gap
+#   is visible and attributable rather than silently absent.
+#
+#   No `*-version` labels are set on purpose. Pinning e.g. enforce-version to
+#   v1.36 makes the API server reject the namespace on any older cluster with
+#   "invalid version", which would break apply on k3s/kind parity clusters. The
+#   cluster's own default version is used instead; upgrade deliberately.
+# =============================================================================
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -5,3 +67,8 @@ metadata:
   labels:
     app.kubernetes.io/name: cloud-design
     app.kubernetes.io/part-of: cloud-design
+    # Enforced level: `baseline` (see rationale above).
+    pod-security.kubernetes.io/enforce: baseline
+    # Reported-only levels: flag every pod that does not meet `restricted`.
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

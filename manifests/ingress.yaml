@@ -1,29 +1,185 @@
+# =============================================================================
+# ingress.yaml  --  AWS ALB in front of api-gateway
+# =============================================================================
+# =============================================================================
+# PREREQUISITES -- NEITHER IS CREATED BY TERRAFORM IN THIS REPOSITORY, AND
+# NEITHER CAN BE CREATED BY THIS FILE
+# =============================================================================
+# Applying this file on a cluster that lacks them does not fail at apply time.
+# That is the trap: `kubectl apply` succeeds, `kubectl get ingress` shows a
+# healthy-looking object with an ADDRESS, and no load balancer is ever created,
+# because the controller that acts on these annotations is simply not there.
+#
+#   1. THE AWS LOAD BALANCER CONTROLLER MUST BE INSTALLED, and it must own an
+#      IngressClass called exactly `alb`:
+#        apiVersion: networking.k8s.io/v1
+#          kind: IngressClass
+#          metadata:
+#            name: alb
+#            annotations:
+#              alb.ingress.kubernetes.io/scheme: internet-facing
+#          spec:
+#            controller: eks.amazonaws.com/alb
+#      That IngressClass is NOT in this repository.
+#
+#      WHAT WAS ACTUALLY OBSERVED on a local k3d cluster (k3s v1.35.5,
+#      kubectl v1.36.1), which is the part worth knowing: the failure is
+#      SILENT, not loud. `kubectl apply` succeeded, and the object looked
+#      healthy:
+#        $ kubectl apply -f manifests/ingress.yaml
+#        ingress.networking.k8s.io/cloud-design-ingress created
+#        $ kubectl -n cloud-design get ingress
+#        NAME                   CLASS   HOSTS                       ADDRESS   PORTS
+#        cloud-design-ingress  alb     cloud-design.example.com    <none>    80, 443
+#      The k3s-bundled Traefik controller was the only controller present. It
+#      filters on IngressClass, so it ignored an object claiming `alb` without
+#      complaint:
+#        $ kubectl -n cloud-design describe ingress cloud-design-ingress
+#        Events:                     <none>
+#        $ kubectl -n cloud-design get ingress cloud-design-ingress \
+#            -o jsonpath='{.status.loadBalancer.ingress}'
+#        <empty>
+#      No warning, no event, no ADDRESS, and it stays that way forever. That is
+#      the failure mode to watch for: not an error at apply time, just a
+#      permanently ADDRESS-less Ingress. Do not conclude "the manifests are
+#      wrong" from that state -- check for the controller first.
+#      Install with Helm:
+#        helm repo add aws-load-balancer-controller \
+#             https://aws-load-balancer-controller.sigs.k8s.io
+#        helm install aws-load-balancer-controller \
+#             aws-load-balancer-controller/aws-load-balancer-controller \
+#             --namespace kube-system --set clusterName=<EKS-CLUSTER-NAME>
+#      The `clusterName` value must match the EKS cluster name exactly; a
+#      mismatch is the single most common cause of "the Ingress exists but no
+#      ALB appears".
+#
+#   2. AN ACM CERTIFICATE MUST EXIST, AND MUST BE IN THE SAME REGION AS THE ALB.
+#      The HTTPS listener below is only created if a certificate annotation is
+#      present. Without one, the controller refuses the HTTPS half of
+#      `listen-ports` rather than silently downgrading, and you get a listener
+#      on 80 only -- so the API is reachable in cleartext even though the
+#      manifest asks for TLS.
+#      The certificate must be ISSUED and VALIDATED (DNS or DNS wildcard
+#      challenge). An ACM certificate still in ISSUED status makes the ALB
+#      creation fail with a TLS listener error, not with a certificate error.
+#
+# -----------------------------------------------------------------------------
+# THE VALUES BELOW THAT AN OPERATOR MUST SET
+# -----------------------------------------------------------------------------
+#   alb.ingress.kubernetes.io/certificate-arn
+#     ARN of an ACM certificate valid for the `host` below. Substitute the real
+#     ARN; the placeholder is deliberately not a syntactically valid ARN so
+#     that a forgotten substitution fails loudly (InvalidParameterValue on the
+#     ALB create) instead of silently producing a cleartext listener.
+#     Create one with:
+#       aws acm request-certificate \
+#         --domain-name <host> \
+#         --validation-method DNS \
+#         --region <region>            # must equal the ALB's region
+#   spec.rules[0].host
+#     The DNS name the ALB answers on. This was previously ABSENT, which meant
+#     the rule matched ANY Host header -- a catch-all that answers for domains
+#     the ALB has no certificate for and no business serving, and that makes
+#     Host-header routing impossible once more than one rule exists.
+#     Point a CNAME/alias at the ALB's `kubectl get ingress -o
+#     jsonpath='{.status.loadBalancer.ingress[0].hostname}'` output, or let
+#     ExternalDNS create that record automatically.
+# =============================================================================
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: cloud-design-ingress
   namespace: cloud-design
+  labels:
+    app.kubernetes.io/part-of: cloud-design
+    app.kubernetes.io/component: edge
   annotations:
-    kubernetes.io/ingress.class: alb
+    # NOTE ON `kubernetes.io/ingress.class`
+    # The deprecated `kubernetes.io/ingress.class: alb` annotation is
+    # deliberately REMOVED. It duplicates `ingressClassName: alb` below and the
+    # two can disagree: with both present and different values, admission
+    # behaviour differs between controller versions, and older ALB controller
+    # versions honour the annotation over `ingressClassName`. One source of
+    # truth only.
+    #
+    # scheme: internet-facing -> a public ALB. This is the public entry point
+    # for the whole system, so it is also the only component exposed to the
+    # internet. The alternative, `internal`, keeps the ALB off the internet and
+    # fronts it with CloudFront or an internal DNS name.
     alb.ingress.kubernetes.io/scheme: internet-facing
+    # target-type: ip -> pod IPs are registered directly with the target group.
+    # `instance` mode instead routes through the nodes and then DNATs, so
+    # NodePort/nodeport-range changes silently break it and node-level NAT
+    # limits apply. `ip` mode is the correct default for a cluster that has
+    # working client-side health checking -- which these manifests now do,
+    # with a startupProbe gating the readinessProbe so the target group never
+    # registers a pod that is still waiting on PostgreSQL.
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    # THE MISSING PIECE: without this annotation the controller will not create
+    # the HTTPS listener at all, even though listen-ports asks for 443.
+    # REPLACE THIS PLACEHOLDER with a real, VALIDATED ACM certificate ARN in
+    # the same region as the ALB.
+    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:123456789012:certificate/REPLACE_ME_VALIDATED_ACM_CERT_ARN"
+    # TLS policy, not just a TLS port: TLS 1.2/1.3 with AEAD suites only,
+    # forward secrecy, and no compression. The ALB default at the time of
+    # writing still permits older, weaker ciphers, so this is set explicitly
+    # rather than relied upon.
+    alb.ingress.kubernetes.io/ssl-policy: "ELBSecurityPolicy-TLS13-1-2-2021-06"
+    # ssl-redirect: 443 -- KEEP, and it is consistent with the certificate
+    # annotation above. There is no conflict to resolve: with a real
+    # certificate on the HTTPS listener, redirecting the plain-HTTP listener to
+    # it is the correct behaviour (no cleartext traffic, no HSTS needed on
+    # the client). The value to avoid is `'false'`, which would leave port 80
+    # serving the API unencrypted. If you remove the certificate annotation,
+    # you MUST also remove this redirect, or clients get a 301 loop into a
+    # listener that does not exist.
     alb.ingress.kubernetes.io/ssl-redirect: '443'
+    # Health check path: /health, and it must stay /health.
+    #   (a) it must match the ALB's success codes, below; and
+    #   (b) api-gateway has NO /ready route (srcs/api-gateway-app/app/__init__.py
+    #       defines only /health, /docs, /api/docs and /openapi.yaml), so
+    #       pointing this at /ready would make every target permanently
+    #       unhealthy and the ALB would return 503 for all callers -- an
+    #       outbound-only failure that looks like a backend crash.
+    # The gateway is stateless with no database dependency, so its /health is a
+    # complete readiness signal; /ready belongs on inventory-app and
+    # billing-app, which do have one.
     alb.ingress.kubernetes.io/healthcheck-path: /health
     alb.ingress.kubernetes.io/healthcheck-interval-seconds: '15'
     alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '5'
     alb.ingress.kubernetes.io/healthy-threshold-count: '2'
     alb.ingress.kubernetes.io/unhealthy-threshold-count: '3'
+    # The gateway returns `{"status":"healthy"}` with HTTP 200 -- a 2xx, so this
+    # is the default and is stated explicitly to document that a body check is
+    # NOT being used (an ALB body matcher would have to match the exact JSON).
     alb.ingress.kubernetes.io/success-codes: '200'
+    # OPTIONAL, commented out because each needs an AWS resource that this
+    # repository does not create. Uncomment once the resource exists.
+    # Attach a WAFv2 web ACL (managed rules) to the ALB:
+    # alb.ingress.kubernetes.io/wafv2-acl-arn: "arn:aws:wafv2:us-east-1:123456789012:global/webacl/<name>/<id>"
+    # Restrict who may reach the ALB at all:
+    # alb.ingress.kubernetes.io/load-balancer-security-groups: "sg-...,sg-..."
+    # Enable access logs for the audit trail:
+    # alb.ingress.kubernetes.io/load-balancer-logs-enabled: 'true'
 spec:
   ingressClassName: alb
   rules:
-    - http:
+    - # REPLACE with the DNS name the certificate is issued for. An omitted
+      # `host:` makes this rule a catch-all that answers for any Host header.
+      host: cloud-design.example.com
+      http:
         paths:
           - path: /
             pathType: Prefix
             backend:
               service:
+                # Matches api-gateway-service in api-gateway.yaml. Port 3000 is
+                # the gateway's APP_PORT, consistent with
+                # docs/readme.md:84-86.
                 name: api-gateway-service
                 port:
                   number: 3000
+  # No defaultBackend. With no defaultBackend and no matching rule, the ALB
+  # returns 404 for a request whose Host matches nothing -- which is the
+  # correct, non-leaky behaviour for an API with exactly one hostname.

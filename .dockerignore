@@ -1,0 +1,88 @@
+# ==============================================================================
+# cloud-design .dockerignore  (ROOT level)
+# ==============================================================================
+# SCOPE - read this before assuming it does anything.
+#
+# The real build contexts are PER-COMPONENT: docker-compose.yml and
+# Makefile build each service with
+#
+#     context: ./srcs/<component>
+#
+# so what actually reaches the Docker daemon is
+# `srcs/<component>/.dockerignore` (one already exists for all six components).
+# Docker resolves .dockerignore from the ROOT OF THE CONTEXT, i.e. from
+# `srcs/<component>/` -- it does NOT walk up to the repository root. This file
+# therefore has NO effect on the six documented builds.
+#
+# It is DEFENCE IN DEPTH and matters only for the cases where the context IS the
+# repository root:
+#   * `docker build -f srcs/<c>/Dockerfile .`   (context = repo root)
+#   * a root-level Dockerfile added later
+#   * a CI job that builds from the repo root for convenience
+# In those cases this file stops a ~711 MB terraform/.terraform plus the
+# manifests, docs and git history from being uploaded to the daemon. Without it
+# the daemon stores the whole context in /var/lib/docker and the build is slow.
+# ==============================================================================
+
+# --- Version control --------------------------------------------------------
+.git
+.gitignore
+.gitattributes
+.github
+.hg
+.svn
+
+# --- Terraform: never ship provider binaries or state into an image ---------
+terraform/
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+
+# --- Orchestration definitions (not needed to build an app image) ----------
+manifests/
+ecs-tasks/
+
+# --- Documentation and local state ------------------------------------------
+docs/
+*.md
+LICENSE
+
+# --- Secrets: .env holds real local credentials, never bake it into an image -
+.env
+.env.*
+!.env.example
+
+# --- Python build cruft -----------------------------------------------------
+__pycache__
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+*.egg-info
+.venv
+venv
+
+# --- CI / scripts / tests ---------------------------------------------------
+scripts/
+tests/
+**/tests/
+.gitlab-ci.yml
+Jenkinsfile
+
+# --- Editor / OS cruft ------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+*.log
+
+# --- Kustomize output -------------------------------------------------------
+kustomization.yaml
+!manifests/kustomization.yaml

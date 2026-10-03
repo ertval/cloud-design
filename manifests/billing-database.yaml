@@ -1,3 +1,67 @@
+# =============================================================================
+# billing-database.yaml  --  PostgreSQL 17, StatefulSet, single writer
+# =============================================================================
+# IMAGES: see the IMAGE / PRELOADING block at the top of api-gateway.yaml --
+#   image `cloud-design/billing-database:latest`,
+#   `imagePullPolicy: IfNotPresent` (correct for k3d image import / kind load).
+#   Built from srcs/billing-database (Dockerfile + init-db.sh).
+#
+# -----------------------------------------------------------------------------
+# STATEFULNESS, PVC AND SERVICE -- verified, not assumed
+# -----------------------------------------------------------------------------
+# * volumeClaimTemplates -> a 5Gi RWO PVC per ordinal. RWO (not RWX) is
+#   correct: PostgreSQL is a single-writer engine and two pods must never mount
+#   the same data directory. The claim is named `billing-data`, matching the
+#   `volumeMounts` name on the container -- a mismatch here is a pod that stays
+#   Pending with `MountVolume.SetUp failed`.
+# * PGDATA=/var/lib/postgresql/data matches the mount path and the image's own
+#   default (srcs/billing-database/Dockerfile:13). initdb refuses to
+#   initialise a directory whose parent has lost its expected ownership, so a
+#   PGDATA/mountPath divergence surfaces only as a broken first boot.
+# * serviceName: billing-database-service -> the Service at the bottom of
+#   this file, which is now HEADLESS (clusterIP: None). A StatefulSet's
+#   governing Service must be headless: it is what gives each pod the stable
+#   name `<pod>.<service>.<ns>.svc` and a stable, directly-resolvable address.
+#   Pointing `serviceName` at an ordinary ClusterIP Service gives a StatefulSet
+#   no per-pod identity at all -- the VIP load-balances across replicas, so
+#   "pod 0" is not addressable -- which is the classic StatefulSet footgun.
+#   Nothing regresses here: billing-app reaches the database by DNS name
+#   (BILLING_DB_HOST=billing-database-service) and a headless Service still
+#   resolves, to the pod IP.
+# * port 5432 end to end: containerPort 5432 -> Service port 5432 -> named
+#   targetPort `postgresql`. No numeric port appears in a Service
+#   targetPort anywhere in this file, so changing containerPort cannot
+#   desynchronise the Service from the container.
+#
+# -----------------------------------------------------------------------------
+# WHY NO topologySpreadConstraints HERE (unlike the three stateless apps)
+# -----------------------------------------------------------------------------
+# A `ReadWriteOnce` volume cannot be attached from two Availability Zones, and
+# local/zonal storage follows the node. Spreading a `replicas: 1` PostgreSQL
+# across zones is therefore not a resilience win, it is a scheduling failure:
+# with `whenUnsatisfiable: DoNotSchedule` the pod would never leave Pending on
+# any real multi-AZ cluster. Zone-level resilience for this database is an RDS
+# Multi-AZ deployment (terraform/rds.tf), not a pod spread constraint. The
+# application tier is what spreads; the single-writer database stays put.
+#
+# -----------------------------------------------------------------------------
+# PROBES
+# -----------------------------------------------------------------------------
+# startupProbe: `pg_isready` exec, 30 x 5s = 150s.
+#   initdb on a cold PVC, plus the credential reconciliation step in init-db.sh
+#   (start, CREATE ROLE / ALTER ROLE / CREATE DATABASE, stop), routinely takes
+#   longer than the previous initialDelaySeconds: 30 + 5 x 15s = 105s budget
+#   that the liveness probe shared with it. Without a startupProbe the two
+#   probes race on the same clock and a slow-but-healthy initdb gets restarted
+#   mid-initialisation, which leaves a half-written PG_VERSION and a database
+#   that then refuses to start again.
+#   An exec probe is used rather than tcpSocket because `pg_isready` actually
+#   answers the postmaster in its postmaster-startup state; a TCP connect
+#   succeeds against a postmaster that is still refusing connections.
+# livenessProbe: generous (5 x 15s = 75s) because a restarting PostgreSQL is a
+#   far more expensive event than a briefly unhealthy one, and a rolling
+#   restart under load will otherwise cascade.
+# =============================================================================
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -6,9 +70,11 @@ metadata:
   labels:
     app: billing-database
     app.kubernetes.io/part-of: cloud-design
+    app.kubernetes.io/component: data
 spec:
   serviceName: billing-database-service
   replicas: 1
+  podManagementPolicy: OrderedReady
   selector:
     matchLabels:
       app: billing-database
@@ -16,7 +82,67 @@ spec:
     metadata:
       labels:
         app: billing-database
+        app.kubernetes.io/part-of: cloud-design
+        app.kubernetes.io/component: data
     spec:
+      # ---------------------------------------------------------------------
+      # DELIBERATE EXCEPTION TO THE `restricted` POD SECURITY PROFILE
+      # ---------------------------------------------------------------------
+      # `runAsNonRoot` is intentionally ABSENT and `runAsUser: 0` is stated
+      # explicitly, because the image genuinely requires it:
+      #   srcs/billing-database/init-db.sh runs as the container entrypoint
+      #   and must (1) `chown -R postgres:postgres "$PGDATA"` and
+      #   `/run/postgresql`, (2) `chmod 700 "$PGDATA"`, (3) create a 0600
+      #   temp SQL file and chown it, then (4) drop privileges with
+      #   `su-exec postgres` before exec'ing the server.
+      #   Forcing a non-root uid breaks step (1): the container fails at chown
+      #   and CrashLoopBackOffs forever, with the database never initialising.
+      # This is the reason namespace.yaml enforces the `baseline` profile
+      # rather than `restricted`, and the pod carries a `restricted` audit
+      # warning on admission so the exception stays visible instead of being
+      # silently absent. See the namespace.yaml header for the full rationale.
+      #
+      # Everything that is safe IS set:
+      #   allowPrivilegeEscalation: false
+      #       sets no_new_privs. The process is already uid 0 with its
+      #       capabilities granted, so it keeps what it needs and cannot gain
+      #       more by executing a setuid binary.
+      #   capabilities.drop: ALL + add: <the five that su-exec/initdb need>
+      #       `ALL` removes ~35 capabilities including CAP_NET_RAW,
+      #       CAP_SYS_ADMIN, CAP_SYS_PTRACE and CAP_MKNOD. The five added back
+      #       are exactly what init-db.sh exercises and nothing more:
+      #         CHOWN        chown -R postgres:postgres ...
+      #         SETUID       su-exec postgres ...  (root -> postgres)
+      #         SETGID       su-exec postgres ...
+      #         FOWNER       chmod 700 "$PGDATA", chmod 600 temp SQL file
+      #         DAC_OVERRIDE write into directories owned by another uid
+      #       Notably absent: NET_BIND_SERVICE (PostgreSQL binds 5432, an
+      #       unprivileged port, and the server runs as postgres anyway) and
+      #       anything that would let a compromised process escape.
+      #   seccompProfile: RuntimeDefault
+      #       the same syscall filter Docker/k3s/containerd apply by default.
+      #       PostgreSQL 17 runs unmodified under it; it is the filter that
+      #       blocks the ptrace/kexec-style syscalls a container breakout uses.
+      #   readOnlyRootFilesystem: false -- also required, and not an oversight:
+      #       initdb writes $PGDATA, a unix socket in /run/postgresql, and a
+      #       temp SQL file under /tmp. There is no mount layout that makes the
+      #       root filesystem read-only for this image.
+      # Pod-level: only the fields that are legal here. `allowPrivilegeEscalation`,
+      # `capabilities` and `readOnlyRootFilesystem` are CONTAINER-level fields --
+      # setting them here is rejected by the API server with
+      #   strict decoding error: unknown field
+      #   "spec.template.spec.securityContext.allowPrivilegeEscalation"
+      # so they are set on the container below. `seccompProfile` is the one
+      # hardening field that is valid at pod level.
+      securityContext:
+        runAsUser: 0
+        seccompProfile:
+          type: RuntimeDefault
+      # initdb writes to the PVC, then the server performs a smart-shutdown
+      # checkpoint on SIGINT. 60s covers a checkpoint of a small dataset with
+      # margin; the Dockerfile sets STOPSIGNAL SIGINT (fast shutdown) for
+      # exactly this reason.
+      terminationGracePeriodSeconds: 60
       containers:
         - name: postgres
           image: cloud-design/billing-database:latest
@@ -24,7 +150,12 @@ spec:
           ports:
             - containerPort: 5432
               name: postgresql
+              protocol: TCP
           env:
+            # Key names are dictated by the image: init-db.sh hard-requires
+            # DB_USER / DB_PASSWORD / DB_NAME with a `:?` guard, so renaming
+            # them here is an immediate CrashLoopBackOff. They are re-projected
+            # from the shared Secret/ConfigMap -- see secrets.yaml.
             - name: DB_USER
               valueFrom:
                 secretKeyRef:
@@ -37,7 +168,19 @@ spec:
                   key: BILLING_DB_PASSWORD
             - name: DB_NAME
               valueFrom:
-                configMapRef:
+                # `configMapKeyRef`, NOT `configMapRef`. `env[].valueFrom`
+                # accepts exactly two shapes -- `secretKeyRef` and
+                # `configMapKeyRef` -- and the API server rejects anything else
+                # with
+                #   strict decoding error: unknown field
+                #   "spec.template.spec.containers[0].env[2].valueFrom.configMapRef"
+                # The previous spelling was a hard schema violation, so this
+                # StatefulSet was rejected outright and the database could never
+                # start: no pod, no volume, no application able to connect.
+                # (`configMapRef` is only valid as `envFrom[].configMapRef`,
+                # which is the other half of why the shared ConfigMap has to be
+                # imported wholesale.)
+                configMapKeyRef:
                   name: cloud-design-config
                   key: BILLING_DB_NAME
             - name: PGDATA
@@ -49,9 +192,33 @@ spec:
             limits:
               cpu: 500m
               memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - CHOWN
+                - DAC_OVERRIDE
+                - FOWNER
+                - SETGID
+                - SETUID
           volumeMounts:
             - name: billing-data
               mountPath: /var/lib/postgresql/data
+          startupProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - postgres
+                - -h
+                - 127.0.0.1
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 30   # 30 x 5s = 150s for a cold initdb
           readinessProbe:
             exec:
               command:
@@ -60,7 +227,6 @@ spec:
                 - postgres
                 - -h
                 - 127.0.0.1
-            initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
@@ -72,19 +238,21 @@ spec:
                 - postgres
                 - -h
                 - 127.0.0.1
-            initialDelaySeconds: 30
             periodSeconds: 15
             timeoutSeconds: 5
             failureThreshold: 5
   volumeClaimTemplates:
     - metadata:
         name: billing-data
+        labels:
+          app: billing-database
       spec:
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
             storage: 5Gi
 ---
+# GOVERNING SERVICE FOR THE STATEFULSET -- HEADLESS BY DESIGN. See the header.
 apiVersion: v1
 kind: Service
 metadata:
@@ -92,11 +260,14 @@ metadata:
   namespace: cloud-design
   labels:
     app: billing-database
+  annotations:
+    cloud-design.io/service-role: statefulset-governing-headless
 spec:
   type: ClusterIP
+  clusterIP: None
   ports:
     - port: 5432
-      targetPort: 5432
+      targetPort: postgresql
       protocol: TCP
       name: postgresql
   selector:

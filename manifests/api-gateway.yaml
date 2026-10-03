@@ -1,3 +1,53 @@
+# =============================================================================
+# IMAGES  --  why `cloud-design/<name>:latest` + `imagePullPolicy: IfNotPresent`
+# =============================================================================
+# These are *local-only* image names: no registry in this repository serves
+# `cloud-design/api-gateway:latest`. Against any cluster where the image is not
+# already on the node, the kubelet tries to pull it from docker.io/library/
+# cloud-design and the pod sits in `ErrImagePull` -> `ImagePullBackOff` forever.
+#
+# `imagePullPolicy: IfNotPresent` IS the correct policy for the preload flow: it
+# tells the kubelet to use the node-local image when present and pull only when
+# absent. Flipping it to `Always` to "fix" a pull error defeats preloading
+# entirely -- do not.
+#
+# Build and preload before applying:
+#
+#   # 1. build (from the repo root; each srcs/<svc>/Dockerfile is self-contained)
+#   docker build -t cloud-design/api-gateway:latest        srcs/api-gateway-app
+#   docker build -t cloud-design/inventory-app:latest      srcs/inventory-app
+#   docker build -t cloud-design/billing-app:latest        srcs/billing-app
+#   docker build -t cloud-design/inventory-database:latest srcs/inventory-database
+#   docker build -t cloud-design/billing-database:latest   srcs/billing-database
+#   # the broker's source directory is rabbit-queue, but every other artefact in
+#   # this repo (ecs-tasks/rabbitmq-task.json) names the image "rabbitmq":
+#   docker build -t cloud-design/rabbitmq:latest           srcs/rabbit-queue
+#
+#   # 2. preload into the cluster
+#   k3d image import cloud-design/api-gateway:latest \
+#                          cloud-design/inventory-app:latest \
+#                          cloud-design/billing-app:latest \
+#                          cloud-design/inventory-database:latest \
+#                          cloud-design/billing-database:latest \
+#                          cloud-design/rabbitmq:latest \
+#                          -c <cluster-name>
+#   #    kind:     for i in ...; do kind load docker-image "$i" --name <cluster>; done
+#   #    minikube: minikube image load <image>
+#
+#   # 3. OR push to a real registry and rewrite the name once, centrally, via
+#   #    the `images:` transformer in manifests/kustomization.yaml:
+#   docker tag cloud-design/api-gateway:latest #            123456789012.dkr.ecr.<region>.amazonaws.com/cloud-design/api-gateway:latest
+#   docker push 123456789012.dkr.ecr.<region>.amazonaws.com/cloud-design/api-gateway:latest
+#   kubectl apply -k manifests/
+#
+# No `imagePullSecrets` is declared, and that is deliberate: this repository
+# configures no private registry, and an `imagePullSecrets` entry naming a Secret
+# that does not exist makes the kubelet log
+#   Unable to retrieve some image pull secrets; attempting to pull image may not
+#   succeed
+# on every single pod start. If you switch to ECR, create the pull secret on the
+# cluster nodes AND add `imagePullSecrets:` to each pod spec.
+# =============================================================================
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -6,6 +56,7 @@ metadata:
   labels:
     app: api-gateway
     app.kubernetes.io/part-of: cloud-design
+    app.kubernetes.io/component: edge
 spec:
   replicas: 1
   strategy:
@@ -20,12 +71,34 @@ spec:
     metadata:
       labels:
         app: api-gateway
+        app.kubernetes.io/part-of: cloud-design
+        app.kubernetes.io/component: edge
     spec:
+      # Pod-level: who the container runs as.
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
         runAsGroup: 10001
         fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # Spread replicas across availability zones. `ScheduleAnyway` is the right
+      # choice for a soft preference: on a multi-AZ cluster this keeps replicas
+      # off a single AZ, and on a single-node k3d/kind demo cluster (which has
+      # no `topology.kubernetes.io/zone` label at all) the constraint is
+      # unsatisfiable and the pod is still scheduled instead of Pending forever.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: api-gateway
+      # 30s is enough for a stateless proxy: on SIGTERM waitress closes the
+      # listening socket and the in-flight HTTP response completes in
+      # milliseconds. billing-app, which holds a queue consumer, needs longer
+      # and overrides this.
+      terminationGracePeriodSeconds: 30
       containers:
         - name: api-gateway
           image: cloud-design/api-gateway:latest
@@ -33,6 +106,14 @@ spec:
           ports:
             - containerPort: 3000
               name: http
+              protocol: TCP
+          # APP_PORT is declared HERE, explicitly, and not inherited from the
+          # shared ConfigMap: `envFrom` would otherwise force the gateway's
+          # value (3000) onto inventory-app and billing-app, which must bind
+          # 8080. See configmap.yaml for the full explanation.
+          env:
+            - name: APP_PORT
+              value: "3000"
           envFrom:
             - configMapRef:
                 name: cloud-design-config
@@ -45,22 +126,69 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+          securityContext:
+            # Container-level hardening.
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          # PROBE SPLIT
+          #   startupProbe   -> /health  "is the process up?"
+          #   readinessProbe -> /health  "should it receive traffic?"
+          #   livenessProbe  -> /health  "is it wedged and in need of a restart?"
+          #
+          # Deliberately still `/health` and NOT `/ready`, unlike inventory-app
+          # and billing-app: the gateway has no database of its own and
+          # srcs/api-gateway-app/app/__init__.py:84 defines no `/ready`
+          # route. Pointing this at `/ready` would return 404 forever and the
+          # gateway would never join the Service endpoints -- i.e. every
+          # request would 503 instead of ever reaching the app. The same
+          # reasoning is why ingress.yaml uses
+          # alb.ingress.kubernetes.io/healthcheck-path: /health.
+          #
+          # The startupProbe gates the other two: until it succeeds, the
+          # liveness and readiness probes are not run at all. That is what
+          # stops the t+20s liveness SIGKILL race described in inventory-app.yaml.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http          # named port, see header note on probes below
+            periodSeconds: 3
+            timeoutSeconds: 3
+            failureThreshold: 20  # 20 x 3s = 60s budget before a restart
           livenessProbe:
             httpGet:
               path: /health
-              port: 3000
-            initialDelaySeconds: 15
+              port: http
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /health
-              port: 3000
-            initialDelaySeconds: 5
+              port: http
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 2
+          volumeMounts:
+            # REQUIRED by `readOnlyRootFilesystem: true`.
+            # srcs/api-gateway-app/app/__init__.py:29-40 calls
+            # `os.makedirs("/usr/src/logs")` and opens a RotatingFileHandler on
+            # /usr/src/logs/gateway.log (5 MB x 3 backups). With a read-only
+            # root filesystem and no mount here, the gateway still starts (the
+            # handler failure is caught and downgraded to a log warning at
+            # __init__.py:41-42) but silently loses its entire persistent log
+            # volume -- a failure that is invisible until someone needs the logs.
+            # emptyDir (not a PVC) is correct for a Deployment: the logs are
+            # diagnostics, they must not outlive the pod, and a PVC per replica
+            # would pin each replica to one node and defeat the HPA below.
+            - name: logs
+              mountPath: /usr/src/logs
+      volumes:
+        - name: logs
+          emptyDir:
+            sizeLimit: 256Mi
 ---
 apiVersion: v1
 kind: Service
@@ -73,17 +201,62 @@ spec:
   type: ClusterIP
   ports:
     - port: 3000
-      targetPort: 3000
+      targetPort: http      # named -> follows containerPort if it ever changes
       protocol: TCP
       name: http
   selector:
     app: api-gateway
 ---
+# -----------------------------------------------------------------------------
+# PodDisruptionBudget
+# -----------------------------------------------------------------------------
+# `maxUnavailable: 1`, not `minAvailable: 1`.
+#   The HPA floor is minReplicas: 1, so `minAvailable: 1` would mean "zero pods
+#   may ever be evicted" at the default replica count of 1 -- `kubectl drain`
+#   would block forever on the first node maintenance window, turning a
+#   protective object into an availability incident. `maxUnavailable: 1` does
+#   the useful half of the job (during a scale-out to 3 replicas, or during a
+#   rolling update, only one pod leaves service at a time) and never deadlocks
+#   a drain. Note that rolling updates are already governed by
+#   `maxUnavailable: 0` on the Deployment above; this PDB covers the voluntary
+#   disruption cases the Deployment cannot (drain, node autoscaler, cluster
+#   upgrade) that the default PDB of "nothing" would not.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-gateway-pdb
+  namespace: cloud-design
+  labels:
+    app: api-gateway
+    app.kubernetes.io/part-of: cloud-design
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: api-gateway
+---
+# -----------------------------------------------------------------------------
+# HorizontalPodAutoscaler
+# -----------------------------------------------------------------------------
+# REQUIRES metrics-server. Without it the HPA reports
+#   <unknown>   scaling active=false  FailedGetResourceMetric
+# and silently never scales anything -- it does not error, it just does nothing,
+# which is the worst possible failure mode for a "we auto-scale" claim.
+#   k3d:   k3d cluster create <name> --servers 3
+#          kubectl apply -f https://github.com/k3s-io/metrics-server/releases/latest/download/metrics-server.yaml
+#   EKS:   already installed by default in most EKS clusters
+#          (if not: aws eks create-addon --cluster-name <c> --addon-name metrics-server)
+# Verify with:  kubectl top pods -n cloud-design
+# Scaling on CPU utilization is meaningless until `resources.requests.cpu` is
+# set, which is why the request is declared above rather than omitted.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: api-gateway-hpa
   namespace: cloud-design
+  labels:
+    app: api-gateway
+    app.kubernetes.io/part-of: cloud-design
 spec:
   scaleTargetRef:
     apiVersion: apps/v1

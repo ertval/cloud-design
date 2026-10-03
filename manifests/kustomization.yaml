@@ -1,0 +1,132 @@
+# =============================================================================
+# kustomization.yaml  --  the single entry point for applying manifests/
+# =============================================================================
+# USE THIS, NOT `kubectl apply -f manifests/`
+#
+#   kubectl apply -k manifests/
+#
+# Two reasons, both verified with kubectl v1.36.1:
+#
+#   1. ORDER. `kubectl apply -f <dir>` walks the directory in ALPHABETICAL
+#      order, so it applies api-gateway.yaml (eighth) before namespace.yaml
+#      and fails with
+#        namespaces "cloud-design" not found
+#      `resources:` below is an explicit, dependency-ordered list; kustomize
+#      emits objects in list order and kubectl applies them one API call at a
+#      time, so the Namespace is created first.
+#
+#   2. THIS FILE ITSELF. `kubectl apply -f <dir>` also parses
+#      kustomization.yaml as if it were a manifest and fails with
+#        error validating "kustomization.yaml": error validating data:
+#        [apiVersion not set, kind not set]
+#      That is unavoidable and is why `kubectl apply -f manifests/` cannot be
+#      made to work while this file exists. (Adding apiVersion/kind to this
+#      file silences that specific error but breaks `kubectl apply -k`
+#      instead, because kustomize then tries to accumulate kustomization.yaml
+#      as one of its own resources: "missing metadata.name in object". Both
+#      variants were tested; neither works. Use `-k`.)
+#
+# `kubectl apply -f <individual file>` also still works and is what
+# scripts/deploy.sh does, in the same order.
+#
+# MINIMUM TOOLING: `sortOptions` below needs kustomize v5, i.e. kubectl >= 1.28
+# (kubectl 1.36 embeds kustomize v5.8.1). On an older kubectl this file is
+# rejected with `unknown field "sortOptions"` and you must apply the files
+# individually in the order listed below.
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Without this, kustomize REORDERS `resources` by a built-in kind precedence
+# (Namespace, ConfigMap, Secret, Service, Deployment, ... NetworkPolicy) and
+# ignores the order below -- which would silently apply the NetworkPolicies
+# AFTER the workloads, giving the pods a window at startup in which egress is
+# unfiltered. `fifo` makes the declared order the emitted order. Verified:
+# with the default ordering this directory emitted the 8 NetworkPolicies last,
+# after all 6 workload objects; with `fifo` they come out in position 4.
+sortOptions:
+  order: fifo
+# -----------------------------------------------------------------------------
+# LOCAL / DEMO CLUSTER
+# -----------------------------------------------------------------------------
+# These image names have no registry behind them (see the IMAGE / PRELOADING
+# block at the top of api-gateway.yaml). They resolve only because the image is
+# already present on the node after `k3d image import` / `kind load`, and
+# `imagePullPolicy: IfNotPresent` tells the kubelet not to try to pull them.
+# This is the configuration an auditor can actually run, so it is the default.
+resources:
+  # --- 1. the namespace MUST come first; see the ORDER note above ---------
+  - namespace.yaml
+  # --- 2. configuration the workloads reference --------------------------
+  - secrets.yaml
+  - configmap.yaml
+  # --- 3. admission-time network restrictions ---------------------------
+  #     Applied before the pods exist so that a pod cannot reach the internet
+  #     even during its own startup window.
+  - network-policies.yaml
+  # --- 4. stateful data tier, before anything that connects to it --------
+  - rabbitmq.yaml
+  - inventory-database.yaml
+  - billing-database.yaml
+  # --- 5. application tier ----------------------------------------------
+  - inventory-app.yaml
+  - billing-app.yaml
+  - api-gateway.yaml
+  # --- 6. AWS edge. OMIT THIS ONE for a local k3d/kind cluster: it needs the
+  #        AWS Load Balancer Controller and a validated ACM certificate, and
+  #        neither can exist locally. Applying it locally is harmless (the
+  #        object is stored and simply never acted upon), but it will leave a
+  #        permanently ADDRESS-less Ingress in `kubectl get ingress`, which is
+  #        confusing during a demo.
+#      - ingress.yaml
+# -----------------------------------------------------------------------------
+# PRODUCTION / AWS  --  uncomment and rewrite the image references
+# -----------------------------------------------------------------------------
+# The single documented value the operator overrides is the image location.
+# Two ways to do it:
+#
+#   (a) edit this block, then `kubectl apply -k manifests/`:
+#       images:
+#         - name: cloud-design/api-gateway
+#           newName: 123456789012.dkr.ecr.us-east-1.amazonaws.com/cloud-design/api-gateway
+#           newTag: v1.0.0
+#         ... one entry per workload, all six of them ...
+#
+#   (b) keep this file untouched and let kustomize edit itself -- the
+#       conventional, diff-friendly route:
+#       cd manifests
+#       for s in api-gateway inventory-app billing-app \
+#                inventory-database billing-database rabbitmq; do
+#         kustomize edit set image \
+#           "cloud-design/$s=123456789012.dkr.ecr.us-east-1.amazonaws.com/cloud-design/$s:v1.0.0"
+#       done
+#       # inspect the result before applying:
+#       kubectl kustomize manifests/ | less
+#
+# Either way, PIN THE TAG. `:latest` is only correct for the preloaded-local-
+# image flow above; a registry deployment on a mutable tag means a rollout can
+# pick up an unbuilt, unvetted image with no way to tell which digest a running
+# pod is running. `kubectl rollout undo` cannot undo that.
+#
+# Pinning the digest is stronger still:
+#       kubectl set image deployment/api-gateway api-gateway=<repo>@sha256:<digest>
+# -----------------------------------------------------------------------------
+# NOTES ON WHAT IS DELIBERATELY *NOT* IN THIS FILE
+# -----------------------------------------------------------------------------
+# * No `namespace:` transformer: every object in `resources` already sets
+#   `metadata.namespace: cloud-design` explicitly. A namespace transformer would
+#   additionally stamp `metadata.namespace` onto the Namespace object itself,
+#   which is meaningless at best, and it hides the real per-file ordering
+#   dependency instead of documenting it.
+# * No `commonLabels`/`labels` transformer: it can inject into
+#   `spec.selector.matchLabels` of the Deployments/StatefulSets, and a
+#   selector is IMMUTABLE after creation. Adding such a label to a cluster
+#   that already has these workloads deployed would make the next apply fail
+#   with `field is immutable`. Every manifest already carries
+#   `app.kubernetes.io/part-of: cloud-design` on its own metadata.
+# * No `images:` block active by default -- see the rationale above; the local
+#   names are already correct for the k3d/kind flow, so an identity mapping
+#   would be noise.
+# * No `secretsGenerator`: the Secret is committed as a documented template on
+#   purpose (see secrets.yaml). In production it should come from AWS Secrets
+#   Manager via the External Secrets Operator, which needs its own
+#   ClusterSecretStore -- also not created by this repository.

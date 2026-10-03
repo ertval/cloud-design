@@ -1,3 +1,68 @@
+# =============================================================================
+# inventory-app.yaml  --  CRUD tier for /api/movies, backed by inventory-database
+# =============================================================================
+# IMAGES: see the IMAGE / PRELOADING block at the top of api-gateway.yaml --
+#   image `cloud-design/inventory-app:latest`,
+#   `imagePullPolicy: IfNotPresent` (correct for k3d image import / kind load).
+#
+# -----------------------------------------------------------------------------
+# PROBE DESIGN -- three distinct questions, three distinct endpoints
+# -----------------------------------------------------------------------------
+#   startupProbe   GET /health  "is the process serving yet?"
+#   readinessProbe GET /ready   "can it actually serve a request right now?"
+#   livenessProbe  GET /health  "is it wedged and in need of a kill?"
+#
+# (a) WHY /ready FOR READINESS.
+#     /health (srcs/inventory-app/app/__init__.py:54-56) returns a constant
+#     200 and never touches the database. Using it as the readiness probe means
+#     a pod whose PostgreSQL connection is broken stays in the Service
+#     endpoints and the gateway returns 502 to the caller instead of the pod
+#     being pulled out of rotation. /ready performs a real `SELECT 1` and
+#     returns 503 when the database is unreachable, which is exactly the signal
+#     the Service endpoint controller needs. /ready is ported from
+#     orchestrator/Dockerfiles/inventory-app/app/__init__.py.
+#     See the DEPENDENCY note below -- this manifests change is landing ahead
+#     of the source change.
+#
+# (b) WHY THE STARTUPPROBE IS NOT OPTIONAL HERE.
+#     create_app() blocks in a retry loop (app/__init__.py:59-72) for up to
+#     30 attempts x 2s = 60s waiting for PostgreSQL, and it raises on the last
+#     attempt. It does NOT bind a socket until that loop returns, so during a
+#     cold cluster the app has no port at all for the first tens of seconds.
+#     Without a startupProbe the liveness probe begins at t=20s, fails 3x at
+#     t=20/30/40s, and SIGKILLs a container that was about to succeed: a
+#     CrashLoopBackOff with a ~50s period that never converges while initdb is
+#     still working.
+#     A startupProbe suspends liveness AND readiness until it succeeds.
+#     failureThreshold 60 x periodSeconds 3 = a 180s budget, which covers a
+#     cold `initdb` on a loaded node; initialDelaySeconds 5 keeps the fast path
+#     (DB already up) starting in ~8s.
+#     The trade-off is honest and worth stating: 180s is longer than the app's
+#     own 60s connect budget, so if PostgreSQL never comes up the app raises
+#     first and CrashLoopBackOffs on its own -- the startupProbe is a backstop
+#     for the slow-but-succeeding case, not a replacement for the app's retries.
+#
+# (c) WHY PROBES USE `port: http`, NOT A NUMBER.
+#     Every probe below references the named container port. A numeric probe
+#     (`port: 8080`) is a duplicated copy of the same fact that is already in
+#     `containerPort` and `targetPort`: change the port in one place and the
+#     probes silently keep hitting the old port, which presents as a healthy
+#     cluster with a permanently unready service. A named port makes the
+#     reference a link, not a copy.
+#
+# (d) DEPENDENCY ON THE SOURCE TEAM -- READ BEFORE APPLYING.
+#     /ready does not exist in srcs/inventory-app/app/__init__.py yet. Until
+#     that route lands, this readinessProbe returns 404 and the pod is
+#     permanently NotReady with the event
+#       Readiness probe failed: HTTP probe failed with statuscode: 404
+#     (and `kubectl describe` shows `Readiness probe failed` rather than
+#     anything database-related, which is the signature of this exact state).
+#     This is intentional and is the reason the manifests were fixed first:
+#     a wrong-but-passing `/health` readiness probe is strictly worse than a
+#     loud 404, because it hides the database failure it is supposed to
+#     surface. Apply the source change (or verify the /ready route is present)
+#     in the same change set as this manifest.
+# =============================================================================
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -6,6 +71,7 @@ metadata:
   labels:
     app: inventory-app
     app.kubernetes.io/part-of: cloud-design
+    app.kubernetes.io/component: crud
 spec:
   replicas: 1
   strategy:
@@ -20,12 +86,26 @@ spec:
     metadata:
       labels:
         app: inventory-app
+        app.kubernetes.io/part-of: cloud-design
+        app.kubernetes.io/component: crud
     spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
         runAsGroup: 10001
         fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: inventory-app
+      # Stateless HTTP: nothing to drain, waitress closes the socket on SIGTERM
+      # and the in-flight request finishes in milliseconds.
+      terminationGracePeriodSeconds: 30
       containers:
         - name: inventory-app
           image: cloud-design/inventory-app:latest
@@ -33,6 +113,15 @@ spec:
           ports:
             - containerPort: 8080
               name: http
+              protocol: TCP
+          # Explicit and per-workload. The shared ConfigMap must not carry
+          # APP_PORT: `envFrom` imports every key into every container, so a
+          # single APP_PORT: "3000" for the gateway forced this process to bind
+          # 3000 while containerPort/targetPort/probes stayed on 8080.
+          # See configmap.yaml.
+          env:
+            - name: APP_PORT
+              value: "8080"
           envFrom:
             - configMapRef:
                 name: cloud-design-config
@@ -45,19 +134,35 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+          securityContext:
+            # `readOnlyRootFilesystem: true` is safe here: the image sets
+            # PYTHONDONTWRITEBYTECODE=1 (no __pycache__ writes), this service
+            # opens no log file (only api-gateway does, see its emptyDir), and
+            # psycopg2/SQLAlchemy write nothing to disk.
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            timeoutSeconds: 3
+            failureThreshold: 60   # 60 x 3s = 180s to survive a cold initdb
           livenessProbe:
             httpGet:
               path: /health
-              port: 8080
-            initialDelaySeconds: 20
+              port: http
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /health
-              port: 8080
-            initialDelaySeconds: 10
+              path: /ready
+              port: http
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 2
@@ -73,17 +178,41 @@ spec:
   type: ClusterIP
   ports:
     - port: 8080
-      targetPort: 8080
+      targetPort: http
       protocol: TCP
       name: http
   selector:
     app: inventory-app
 ---
+# `maxUnavailable: 1` rather than `minAvailable: 1`: the HPA floor is 1, so
+# `minAvailable: 1` would forbid evicting any replica at the default size and
+# `kubectl drain` would hang forever. Full rationale in api-gateway.yaml.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: inventory-app-pdb
+  namespace: cloud-design
+  labels:
+    app: inventory-app
+    app.kubernetes.io/part-of: cloud-design
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: inventory-app
+---
+# REQUIRES metrics-server in the cluster, otherwise the HPA reports
+# `<unknown>  scaling active=false  FailedGetResourceMetric` and silently never
+# scales. Verify with `kubectl top pods -n cloud-design`.
+# Full install notes in api-gateway.yaml.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: inventory-app-hpa
   namespace: cloud-design
+  labels:
+    app: inventory-app
+    app.kubernetes.io/part-of: cloud-design
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
