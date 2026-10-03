@@ -1,39 +1,102 @@
-# AWS Deployment Region
-aws_region  = "us-east-1"
-environment = "prod"
+# Copy to terraform.tfvars and edit before running `terraform plan`.
+# Every value below is the variable default unless noted, so an empty copy still
+# produces a working plan - but three settings MUST be reviewed before anyone
+# demonstrates this stack (marked !! below).
+
+aws_region   = "us-east-1"
+environment  = "prod"
 project_name = "cloud-design"
 
+# ------------------------------------------------------------------------------
 # Multi-AZ VPC Networking Configuration
-vpc_cidr                 = "10.0.0.0/16"
-availability_zones       = ["us-east-1a", "us-east-1b"]
+# ------------------------------------------------------------------------------
+vpc_cidr = "10.0.0.0/16"
+
+# Leave this EMPTY to auto-discover the first two AZs of aws_region. Only pin it
+# if you deliberately want fixed zones (e.g. to match an existing NAT/Transit
+# Gateway layout) - hard-coding us-east-1a/b was why the stack failed to apply
+# in any other region.
+availability_zones = []
+
 public_subnet_cidrs      = ["10.0.1.0/24", "10.0.2.0/24"]
 private_app_subnet_cidrs = ["10.0.10.0/24", "10.0.11.0/24"]
 private_db_subnet_cidrs  = ["10.0.20.0/24", "10.0.21.0/24"]
-single_nat_gateway       = false # Set true in dev to cut costs by using 1 NAT Gateway
 
-# Managed RDS PostgreSQL
+# false = one NAT Gateway per AZ (~$66/mo, AZ-independent egress).
+# true  = a single shared NAT Gateway (~$33/mo) - cheaper, but every private task
+#         loses its second NAT when an AZ fails. Only for a disposable sandbox.
+single_nat_gateway = false
+
+# ------------------------------------------------------------------------------
+# !! TLS AT THE PUBLIC ALB - read this before demonstrating the stack
+# ------------------------------------------------------------------------------
+# With the default false, the ALB gets a SELF-SIGNED certificate. Browsers warn,
+# and the API Gateway VPC Link integration validates the certificate chain, so
+# the private ALB integration is the most likely thing to need a real domain.
+# To get an AWS-issued certificate you must already own the domain in Route 53:
+enable_acm_certificate = false
+alb_domain_name         = "" # e.g. "api.example.com"  (required if enable_acm_certificate)
+alb_hosted_zone_id      = "" # e.g. "Z0123456789ABC"    (required if enable_acm_certificate)
+
+# ------------------------------------------------------------------------------
+# Managed RDS PostgreSQL (Multi-AZ, encrypted at rest and in transit)
+# ------------------------------------------------------------------------------
 db_instance_class        = "db.t4g.micro"
 db_allocated_storage     = 20
 db_max_allocated_storage = 100
 db_username              = "dbadmin"
 
-# Amazon MQ RabbitMQ
-mq_engine_version        = "3.13"
-mq_host_instance_type    = "mq.t3.micro"
-mq_user                  = "rabbit_admin"
+# ------------------------------------------------------------------------------
+# Amazon MQ RabbitMQ (ACTIVE_STANDBY_MULTI_AZ)
+# ------------------------------------------------------------------------------
+mq_engine_version     = "3.13"
+mq_host_instance_type = "mq.t3.micro"
+mq_user               = "rabbit_admin"
 
-# EKS Cluster & Node Group
-eks_cluster_version      = "1.30"
-eks_node_instance_types  = ["t3.medium"]
-eks_min_size             = 2
-eks_max_size             = 5
-eks_desired_size         = 2
+# ------------------------------------------------------------------------------
+# ECS on Fargate
+# ------------------------------------------------------------------------------
+# true  = FARGATE_SPOT (~70% cheaper) but tasks can be reclaimed with 2 minutes'
+#         warning, which undermines the availability story. false = on-demand.
+ecs_use_fargate_spot = false
 
+# ------------------------------------------------------------------------------
 # Autoscaling & CloudWatch
-autoscaling_target_cpu   = 60
-log_retention_days       = 30
-alarm_email              = "cloud-ops@example.com"
-monthly_budget_limit     = 15
+# ------------------------------------------------------------------------------
+autoscaling_target_cpu = 60
+log_retention_days     = 30
 
-# CORS: replace with the real frontend domain(s) serving the app
+# !! Set this to an address you actually read, or leave "" to create the alarms
+# !! with no email subscriber. Placeholder domains (example.com/org/net,
+# !! invalid.*, test.*) are REJECTED at plan time by a variable validation, so
+# !! the empty string is the only value in this example that will validate.
+# !! NOTE: every alert goes through the SNS topic, so the address must be
+# !! confirmed (AWS sends a "Confirm subscription" mail) before it receives
+# !! anything.
+alarm_email = ""
+
+# ~$260/month steady state; see the itemised estimate on var.monthly_budget_limit.
+monthly_budget_limit = 300
+
+# ------------------------------------------------------------------------------
+# !! CORS - MUST be changed
+# ------------------------------------------------------------------------------
+# The default below is a placeholder and browser requests from your real
+# frontend will be blocked until you replace it with the domain that actually
+# serves the app.
 allowed_origins = ["https://app.example.com"]
+
+# ------------------------------------------------------------------------------
+# Cognito demo identity (audit walkthrough)
+# ------------------------------------------------------------------------------
+# Creates a ready-to-use demo user plus a confidential app client so that
+# `aws cognito-idp initiate-auth` returns a JWT straight after `terraform apply`.
+# Set to false outside a demo: the account has a permanent password and the
+# password lives in Terraform state either way.
+enable_demo_cognito_user = true
+demo_user_email          = "auditor@cloud-design.local"
+
+# Leave null to have Terraform generate a compliant password and read it from
+# `terraform output -json cognito_demo_user_password`. Set a value to choose it
+# yourself (must satisfy the pool policy: 8+ chars, upper, lower, digit, symbol).
+demo_user_password = null

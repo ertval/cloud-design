@@ -8,6 +8,18 @@ resource "random_password" "mq_admin" {
   override_special = "!#$%&*()-_=+[]{}<>:?"
 }
 
+locals {
+  # Amazon MQ reports the broker as a full URL, e.g.
+  #   "amqps://b-c8352341.mq.us-east-1.amazonaws.com:5671"
+  # but pika's ConnectionParameters takes host and port as SEPARATE fields and
+  # will not resolve a value that still carries a scheme. Split it here instead
+  # of doing string surgery inside the container.
+  # try() guards the plan-time window where the broker has not been created yet
+  # and `instances` is still unknown/empty (same guard as the secret below).
+  mq_amqps_endpoint = try(aws_mq_broker.rabbitmq.instances[0].endpoints[0], "")
+  mq_amqps_host     = try(split(":", split("://", local.mq_amqps_endpoint)[1])[0], "")
+}
+
 resource "aws_secretsmanager_secret" "mq_credentials" {
   name                    = "${local.name_prefix}-amazon-mq-credentials"
   recovery_window_in_days = 0

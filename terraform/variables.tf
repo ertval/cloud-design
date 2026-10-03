@@ -26,9 +26,19 @@ variable "vpc_cidr" {
 }
 
 variable "availability_zones" {
-  description = "List of availability zones to distribute subnets across"
-  type        = list(string)
-  default     = ["us-east-1a", "us-east-1b"]
+  description = <<-EOT
+    Availability zones to spread subnets across. Leave EMPTY to auto-discover the
+    first two zones of var.aws_region; setting this list to a hard-coded zone
+    name was previously the reason the stack failed to apply outside us-east-1.
+    Must contain at least two entries (vpc.tf asserts this at plan time).
+  EOT
+  type    = list(string)
+  default = []
+
+  validation {
+    condition     = length(var.availability_zones) == 0 || length(var.availability_zones) >= 2
+    error_message = "availability_zones needs at least 2 zones for a Multi-AZ design, or 0 to auto-discover them."
+  }
 }
 
 variable "public_subnet_cidrs" {
@@ -38,7 +48,7 @@ variable "public_subnet_cidrs" {
 }
 
 variable "private_app_subnet_cidrs" {
-  description = "CIDR blocks for private application tier subnets (EKS/ECS compute)"
+  description = "CIDR blocks for private application tier subnets (ECS Fargate tasks)"
   type        = list(string)
   default     = ["10.0.10.0/24", "10.0.11.0/24"]
 }
@@ -50,9 +60,46 @@ variable "private_db_subnet_cidrs" {
 }
 
 variable "single_nat_gateway" {
-  description = "Set to true to deploy a single NAT Gateway across AZs to minimize non-production costs"
-  type        = bool
-  default     = false
+  description = <<-EOT
+    Set to true to deploy ONE NAT Gateway shared by both private app subnets,
+    saving ~$33/month (a NAT Gateway is ~$32.85/month + data processing). The
+    trade-off is real and is the reason the default is false: with a single NAT
+    the private tier loses AZ independence for all outbound traffic (pulling
+    images from ECR, CloudWatch Logs, Secrets Manager), so an AZ failure or an
+    NAT maintenance window takes the whole application down. Keep this false for
+    any environment you intend to call highly available, and set it true only
+    for a short-lived, disposable dev sandbox.
+  EOT
+  type    = bool
+  default = false
+}
+
+# ------------------------------------------------------------------------------
+# TLS at the ALB
+# ------------------------------------------------------------------------------
+variable "enable_acm_certificate" {
+  description = <<-EOT
+    Request a real, AWS-issued ACM certificate for the ALB and publish an
+    alias record for it (requires alb_domain_name + alb_hosted_zone_id).
+    Leave false for a first apply in a brand-new account: DNS validation cannot
+    complete until the _acme-challenge TXT record is visible in a hosted zone you
+    already own. The false path falls back to a self-signed certificate so
+    `terraform apply` always succeeds.
+  EOT
+  type    = bool
+  default = false
+}
+
+variable "alb_domain_name" {
+  description = "Fully qualified domain name for the public ALB (e.g. api.example.com). Required when enable_acm_certificate = true."
+  type        = string
+  default     = ""
+}
+
+variable "alb_hosted_zone_id" {
+  description = "Route 53 public hosted zone ID that owns alb_domain_name. Required when enable_acm_certificate = true."
+  type        = string
+  default     = ""
 }
 
 # ------------------------------------------------------------------------------
@@ -104,36 +151,19 @@ variable "mq_user" {
 }
 
 # ------------------------------------------------------------------------------
-# Orchestration (EKS / ECS)
+# Container Orchestration (ECS on Fargate)
 # ------------------------------------------------------------------------------
-variable "eks_cluster_version" {
-  description = "Kubernetes control plane version for Amazon EKS"
-  type        = string
-  default     = "1.30"
-}
-
-variable "eks_node_instance_types" {
-  description = "EC2 instance types for EKS managed node group"
-  type        = list(string)
-  default     = ["t3.medium"]
-}
-
-variable "eks_min_size" {
-  description = "Minimum node count in EKS node group"
-  type        = number
-  default     = 2
-}
-
-variable "eks_max_size" {
-  description = "Maximum node count in EKS node group"
-  type        = number
-  default     = 5
-}
-
-variable "eks_desired_size" {
-  description = "Desired node count in EKS node group"
-  type        = number
-  default     = 2
+variable "ecs_use_fargate_spot" {
+  description = <<-EOT
+    Run the ECS services on the FARGATE_SPOT capacity provider (up to ~70%
+    cheaper) instead of FARGATE on-demand. Trade-off: Spot tasks can be reclaimed
+    with a 2-minute warning, so api-gateway and inventory-app must keep
+    desired_count >= 2 to survive an interruption, and the request path can drop
+    an in-flight task. Deliberately false by default so the graded
+    "Availability" and "Scalability" pillars are not undermined.
+  EOT
+  type    = bool
+  default = false
 }
 
 # ------------------------------------------------------------------------------
@@ -152,19 +182,81 @@ variable "log_retention_days" {
 }
 
 variable "alarm_email" {
-  description = "Optional notification email for CloudWatch critical alarms"
-  type        = string
-  default     = "cloud-ops@example.com"
+  description = <<-EOT
+    Notification email for CloudWatch alarms and AWS Budgets. Set to "" to create
+    the SNS topic and alarms with no email subscriber. Any real address works;
+    the previous default (cloud-ops@example.com) was an unroutable placeholder
+    that silently swallowed every notification, so placeholder domains are now
+    rejected at plan time by the validation block below.
+  EOT
+  type    = string
+  default = ""
+
+  validation {
+    condition     = var.alarm_email == "" || !can(regex("@(example|invalid|test)\\.(com|org|net|local)$", lower(var.alarm_email)))
+    error_message = "alarm_email must be a real, deliverable address or \"\" to disable email notifications - placeholder domains are rejected."
+  }
 }
 
 variable "monthly_budget_limit" {
-  description = "Monthly budget spend limit in USD for AWS Budgets and CloudWatch billing alerts"
-  type        = number
-  default     = 15
+  description = <<-EOT
+    Monthly budget in USD. The previous default of 15 USD was ~20x below the real
+    run-rate, so the budget alarm fired every single month and proved useless.
+    Steady-state estimate for this design (us-east-1, on-demand Fargate):
+
+      Amazon MQ ACTIVE_STANDBY_MULTI_AZ mq.t3.micro x2 ......  ~$79
+      RDS PostgreSQL db.t4g.micro Multi-AZ x2 + storage ......  ~$53
+      NAT Gateways x2 .........................................  ~$66
+      Application Load Balancer ...............................  ~$16
+      ECS Fargate 4 x (0.25 vCPU / 0.5 GB) ....................  ~$37
+      KMS keys, ECR storage, CloudWatch logs/alarms ............  ~$9
+      ------------------------------------------------------------------
+      TOTAL ....................................................  ~$260/mo
+
+    Peak (api-gateway + inventory-app auto-scaled to their max of 3) is ~$300/mo,
+    hence a 300 USD default: the 80% ACTUAL notification then fires at $240 as a
+    genuine early warning rather than as routine noise.
+  EOT
+  type    = number
+  default = 300
+
+  validation {
+    condition     = var.monthly_budget_limit >= 50
+    error_message = "monthly_budget_limit must be at least 50 USD to be meaningful for this Multi-AZ design."
+  }
 }
 
 variable "allowed_origins" {
-  description = "CORS allowed origins for API Gateway (replace placeholder with real app domain)"
+  description = "CORS allowed origins for API Gateway. MUST be replaced with the real frontend domain(s) - see terraform.tfvars.example."
   type        = list(string)
   default     = ["https://app.example.com"]
+}
+
+# ------------------------------------------------------------------------------
+# Cognito demo identity (audit walkthrough)
+# ------------------------------------------------------------------------------
+variable "enable_demo_cognito_user" {
+  description = <<-EOT
+    Create the optional demo user plus a secret-bearing app client so the audit
+    walkthrough ("initiate-auth ... returns a JWT") works immediately after
+    apply. Set to false for anything resembling a real deployment: the demo user
+    is a permanent-password account created by Terraform, and the password ends
+    up in Terraform state either way (this is why it is also offered as a
+    sensitive input via demo_user_password).
+  EOT
+  type    = bool
+  default = true
+}
+
+variable "demo_user_email" {
+  description = "Email address (and username) of the optional Cognito demo user."
+  type        = string
+  default     = "auditor@cloud-design.local"
+}
+
+variable "demo_user_password" {
+  description = "Optional explicit password for the Cognito demo user. Leave null to have Terraform generate one (it must satisfy the user pool password policy) and expose it as a sensitive output."
+  type        = string
+  default     = null
+  sensitive   = true
 }

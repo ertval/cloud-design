@@ -26,6 +26,36 @@ resource "aws_kms_key" "rds" {
   })
 }
 
+# ------------------------------------------------------------------------------
+# Parameter group: encryption in transit
+# ------------------------------------------------------------------------------
+# The project requires data encrypted "at rest AND in transit"
+# (docs/readme.md:98). Storage encryption covers "at rest"; this group covers
+# "in transit" by refusing any non-TLS PostgreSQL session.
+#
+# rds.force_ssl = 1 makes the server reject plaintext connections outright, so a
+# misconfigured client fails closed rather than silently downgrading.
+#
+# Client side: the apps build their DSN as
+#   postgresql+psycopg2://user:pass@host:5432/db
+# with no sslmode parameter. psycopg2 is a libpq wrapper and libpq DEFAULTS to
+# `sslmode=prefer`, so the client will still negotiate TLS against a
+# force_ssl=1 server. The recommended hardening (owned by the application team,
+# not by this Terraform) is to append `?sslmode=require` to that DSN so the
+# requirement is explicit at the client rather than implied by a default.
+resource "aws_db_parameter_group" "postgres" {
+  name        = "${local.name_prefix}-postgres16-ssl"
+  family      = "postgres16"
+  description = "Enforces TLS for all PostgreSQL connections (rds.force_ssl)"
+
+  parameter {
+    name  = "rds.force_ssl"
+    value = "1"
+  }
+
+  tags = local.common_tags
+}
+
 # 1. AWS Secrets Manager: Inventory Database Credentials
 resource "aws_secretsmanager_secret" "inventory_db" {
   name                    = "${local.name_prefix}-inventory-db-credentials"
@@ -88,6 +118,7 @@ resource "aws_db_instance" "inventory" {
   port     = 5432
 
   db_subnet_group_name   = aws_db_subnet_group.main.name
+  parameter_group_name   = aws_db_parameter_group.postgres.name
   vpc_security_group_ids = [aws_security_group.db.id]
   publicly_accessible    = false
 
@@ -128,6 +159,7 @@ resource "aws_db_instance" "billing" {
   port     = 5432
 
   db_subnet_group_name   = aws_db_subnet_group.main.name
+  parameter_group_name   = aws_db_parameter_group.postgres.name
   vpc_security_group_ids = [aws_security_group.db.id]
   publicly_accessible    = false
 

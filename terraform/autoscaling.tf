@@ -1,6 +1,10 @@
 # ------------------------------------------------------------------------------
 # Auto Scaling Policies: Target Tracking at 60% CPU Utilization
 # ------------------------------------------------------------------------------
+# billing-app is intentionally NOT registered here: it is the sole RabbitMQ
+# consumer, and a queue consumer that scales to zero stops draining the queue.
+# Its desired_count is pinned at 2 in ecs_services.tf.
+# ------------------------------------------------------------------------------
 
 # 1. API Gateway Service Auto Scaling Target (Min: 1, Max: 3)
 resource "aws_appautoscaling_target" "api_gateway" {
@@ -59,20 +63,5 @@ resource "aws_appautoscaling_policy" "inventory_app_cpu" {
     target_value       = var.autoscaling_target_cpu # 60.0%
     scale_in_cooldown  = 300
     scale_out_cooldown = 60
-  }
-}
-
-# 3. EKS Managed Node Group Auto Scaling Policy
-resource "aws_autoscaling_policy" "eks_nodes_cpu" {
-  name                   = "${local.name_prefix}-eks-nodes-target-tracking-60"
-  autoscaling_group_name = aws_eks_node_group.main.resources[0].autoscaling_groups[0].name
-  policy_type            = "TargetTrackingScaling"
-
-  target_tracking_configuration {
-    predefined_metric_specification {
-      predefined_metric_type = "ASGAverageCPUUtilization"
-    }
-
-    target_value = var.autoscaling_target_cpu # 60%
   }
 }
