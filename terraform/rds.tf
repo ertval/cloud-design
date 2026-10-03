@@ -117,8 +117,8 @@ resource "aws_secretsmanager_secret_version" "billing_db" {
 # RDS PostgreSQL Instance: Inventory Database (movies)
 # ------------------------------------------------------------------------------
 resource "aws_db_instance" "inventory" {
-  identifier            = "${local.name_prefix}-inventory-db"
-  engine                = "postgres"
+  identifier = "${local.name_prefix}-inventory-db"
+  engine     = "postgres"
   # FIX: was 16.3, a minor version RDS has since moved off - supported
   # PostgreSQL 16 minors now run from 16.9 up, and CreateDBInstance rejects the
   # retired ones. 16.9 is the oldest of the currently supported minors, which
@@ -155,9 +155,9 @@ resource "aws_db_instance" "inventory" {
   # `terraform destroy` keeps behaving exactly as scripts/destroy.sh documents it.
   # With it true, a snapshot named after this instance survives the destroy
   # instead of the data going with it - remember it is then billed until deleted.
-  skip_final_snapshot         = !var.db_final_snapshot
-  final_snapshot_identifier   = var.db_final_snapshot ? "${local.name_prefix}-inventory-final" : null
-  deletion_protection         = false
+  skip_final_snapshot       = !var.db_final_snapshot
+  final_snapshot_identifier = var.db_final_snapshot ? "${local.name_prefix}-inventory-final" : null
+  deletion_protection       = false
 
   tags = merge(local.common_tags, {
     Name = "${local.name_prefix}-inventory-db"
@@ -169,8 +169,8 @@ resource "aws_db_instance" "inventory" {
 # RDS PostgreSQL Instance: Billing Database (orders)
 # ------------------------------------------------------------------------------
 resource "aws_db_instance" "billing" {
-  identifier            = "${local.name_prefix}-billing-db"
-  engine                = "postgres"
+  identifier = "${local.name_prefix}-billing-db"
+  engine     = "postgres"
   # FIX: was 16.3, a minor version RDS has since moved off - supported
   # PostgreSQL 16 minors now run from 16.9 up, and CreateDBInstance rejects the
   # retired ones. 16.9 is the oldest of the currently supported minors, which
@@ -204,9 +204,9 @@ resource "aws_db_instance" "billing" {
   backup_window               = "04:00-05:00"
   maintenance_window          = "Tue:05:30-Tue:06:30"
   # See the inventory instance above: the same var.db_final_snapshot gate.
-  skip_final_snapshot         = !var.db_final_snapshot
-  final_snapshot_identifier   = var.db_final_snapshot ? "${local.name_prefix}-billing-final" : null
-  deletion_protection         = false
+  skip_final_snapshot       = !var.db_final_snapshot
+  final_snapshot_identifier = var.db_final_snapshot ? "${local.name_prefix}-billing-final" : null
+  deletion_protection       = false
 
   tags = merge(local.common_tags, {
     Name = "${local.name_prefix}-billing-db"

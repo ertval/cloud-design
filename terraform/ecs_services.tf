@@ -50,9 +50,9 @@ resource "aws_ecs_task_definition" "api_gateway" {
 
   container_definitions = jsonencode([
     {
-      name         = "api-gateway"
-      image        = local.ecr_image_urls["api-gateway"]
-      essential    = true
+      name      = "api-gateway"
+      image     = local.ecr_image_urls["api-gateway"]
+      essential = true
       portMappings = [
         { containerPort = 3000, hostPort = 3000, protocol = "tcp" }
       ]
@@ -111,9 +111,9 @@ resource "aws_ecs_task_definition" "inventory_app" {
 
   container_definitions = jsonencode([
     {
-      name         = "inventory-app"
-      image        = local.ecr_image_urls["inventory-app"]
-      essential    = true
+      name      = "inventory-app"
+      image     = local.ecr_image_urls["inventory-app"]
+      essential = true
       portMappings = [
         { containerPort = 8080, hostPort = 8080, protocol = "tcp" }
       ]
@@ -168,9 +168,9 @@ resource "aws_ecs_task_definition" "billing_app" {
 
   container_definitions = jsonencode([
     {
-      name         = "billing-app"
-      image        = local.ecr_image_urls["billing-app"]
-      essential    = true
+      name      = "billing-app"
+      image     = local.ecr_image_urls["billing-app"]
+      essential = true
       portMappings = [
         { containerPort = 8080, hostPort = 8080, protocol = "tcp" }
       ]
@@ -338,8 +338,10 @@ resource "aws_ecs_service" "inventory_app" {
 # the sole writer to the billing database. With RDS Multi-AZ the database
 # survives an AZ failure, but a single consumer task does not - and each task
 # holds a prefetch window of one unacked message, so two tasks also give the
-# queue parallel drain capacity. Left out of autoscaling.tf on purpose: it must
-# not scale to zero while messages are queued.
+# queue parallel drain capacity. 2 matches billing_app_min_capacity in
+# autoscaling.tf, where this service DOES have a policy - it scales on
+# MessageCount backlog rather than CPU, because a consumer blocked on an AMQP
+# socket is idle while the backlog grows.
 resource "aws_ecs_service" "billing_app" {
   name            = "${local.name_prefix}-billing-app"
   cluster         = aws_ecs_cluster.main.id

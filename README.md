@@ -9,7 +9,7 @@ applications sit on **Amazon ECS on Fargate** behind one internet-facing
 entrypoint; **Amazon RDS PostgreSQL Multi-AZ** and **Amazon MQ for RabbitMQ**
 (`ACTIVE_STANDBY_MULTI_AZ`, AMQPS only) form a data tier with no route to the
 internet. East–west traffic is resolved privately by **AWS Cloud Map**. Everything
-is described in Terraform: 18 `.tf` files, 129 `resource` blocks, 28 variables,
+is described in Terraform: 18 `.tf` files, 131 `resource` blocks, 31 variables,
 38 outputs.
 
 Everything asserted below is either reproducible from a command in this README or
@@ -120,7 +120,7 @@ flowchart TB
         subgraph ECS["ECS cluster - Fargate, assign_public_ip=false"]
             GW["api-gateway<br/>desired 1 (1-3)"]
             INV["inventory-app<br/>desired 1 (1-3)"]
-            BILL["billing-app<br/>desired 2 (fixed)"]
+            BILL["billing-app<br/>desired 2 (2-6, on queue depth)"]
         end
 
         RDS1[("RDS inventory<br/>db.t4g.micro Multi-AZ<br/>PostgreSQL 16.3, force_ssl=1")]
@@ -260,6 +260,42 @@ API, Cognito user pool + app clients, ACM certificate, Cloud Map namespace, ECR
 groups/alarms/dashboard, SNS topic, AWS Budget, VPC/subnets/NAT/security groups
 and their rules, IAM roles and policies for ECS.
 
+### Per-platform naming (no renames — this table documents intent)
+
+Functional resource names are **not** renamed by this cleanup. The same
+workload has a different name on each platform, which is deliberate:
+
+| Workload | Compose service / `container_name` / host port | Manifests workload / Service | ECS service / container (authoritative: `terraform/ecs_services.tf`) |
+|---|---|---|---|
+| `inventory-database` | service `inventory-database` / `cloud-design-inventory-database` / `5432:5432` | StatefulSet `inventory-database` / `inventory-database-service:5432` | RDS `cloud-design-prod-inventory-db` (no ECS container; managed service) |
+| `billing-database` | service `billing-database` / `cloud-design-billing-database` / `5433:5432` (5432 is taken) | StatefulSet `billing-database` / `billing-database-service:5432` | RDS `cloud-design-prod-billing-db` (managed service) |
+| `inventory-app` | service `inventory-app` / compose-generated `cloud-design-inventory-app-1` / `8081:8080` (direct, bypasses the gateway) | Deployment `inventory-app` / `inventory-app-service:8080` | service `cloud-design-prod-inventory-app` / container `inventory-app:8080` |
+| `billing-app` | service `billing-app` / compose-generated `cloud-design-billing-app-1` / `8082:8080` (direct) | StatefulSet `billing-app` / `billing-app-service:8080` (headless) | service `cloud-design-prod-billing-app` (`desired_count = 2`) / container `billing-app:8080` |
+| `rabbit-queue` / broker | service `rabbit-queue` / `cloud-design-rabbit-queue` / `5672` + `15672` (mgmt UI) | StatefulSet `rabbitmq` / `rabbitmq-service:5672` + `:15672` | Amazon MQ broker `cloud-design-prod-rabbitmq`, **AMQPS 5671 only** (no ECS container) |
+| `api-gateway-app` | service `api-gateway-app` (×2 replicas, no `container_name` so it can scale) / `cloud-design-api-gateway-app-1/2` / none (behind the LB) | Deployment `api-gateway` / `api-gateway-service:3000` | service `cloud-design-prod-api-gateway` / container `api-gateway:3000` |
+| load balancer | service `gateway-lb` / `cloud-design-gateway-lb` / `3000:8080` (`nginx:1.27-alpine`, `least_conn`) | `manifests/ingress.yaml` (commented out of `kustomization.yaml`; needs ALB controller + ACM cert) | ALB `cloud-design-prod-alb` (`internal = false`, `:443` TLS / `:80` → 301) |
+
+Notes an auditor trips over:
+
+- **Image-name trap:** the compose image is `cloud-design/rabbit-queue:local`
+  but the manifests/ECS image is `cloud-design/rabbitmq:latest`, both built
+  from `srcs/rabbit-queue` (see `manifests/rabbitmq.yaml:8-14` and
+  `manifests/api-gateway.yaml:22-24`). `ecs-tasks/rabbitmq-task.json` uses the
+  `rabbitmq` name, so the same artifact serves both lineages.
+- **`ecs-tasks/*.json` families drop the `-prod` infix**
+  (`cloud-design-api-gateway` vs Terraform's `cloud-design-prod-api-gateway`).
+  They are hand-readable reference documents with placeholder account IDs, not
+  what Terraform applies — `terraform/ecs_services.tf` is authoritative (see
+  [Setup](#setup)).
+- **DNS per env (`RABBITMQ_HOST`):** compose `rabbit-queue:5672` (plaintext,
+  `docker-compose.yml`); manifests `rabbitmq-service:5672` (plaintext,
+  `manifests/configmap.yaml`); ECS bare AMQPS hostname `local.mq_amqps_host`
+  with `RABBITMQ_PORT = 5671` (TLS-only, `ecs_services.tf:64-65,170-171`);
+  `ecs-tasks/*.json` placeholder `b-12345678.mq.us-east-1.amazonaws.com:5671`.
+  Same pattern for databases: compose `inventory-database`/`billing-database`,
+  manifests `inventory-database-service`/`billing-database-service`
+  (`configmap.yaml`), ECS RDS endpoints (`ecs_services.tf:115-116,166-167`).
+
 There are **two** PostgreSQL engines in this project and they are not the same
 version, which is worth knowing before an auditor diffs them: the **local images
 are PostgreSQL 17** (`postgres:17-alpine`), the **RDS instances are 16.3**
@@ -274,10 +310,22 @@ are PostgreSQL 17** (`postgres:17-alpine`), the **RDS instances are 16.3**
 | Layer | Mechanism | Bounds |
 |---|---|---|
 | ECS request path | `ECSServiceAverageCPUUtilization` target tracking, **60 %** (`autoscaling.tf`) | `api-gateway` and `inventory-app`: min 1 / max 3; scale-out cooldown **60 s**, scale-in **300 s** |
-| Queue consumer | deliberately **no** scaling policy | `billing-app` pinned at `desired_count = 2` |
-| Manifests path | 3 HorizontalPodAutoscalers, 60 % CPU | min 1 / max 3 (`manifests/{api-gateway,inventory-app,billing-app}.yaml`) |
+| Queue consumer | `AWS/AmazonMQ MessageCount` target tracking — **backlog, not CPU** (`autoscaling.tf`) | `billing-app`: min 2 / max 6 (`billing_queue_depth_target = 50` messages) |
+| Manifests path | 3 HorizontalPodAutoscalers, 60 % CPU | min 1 / max 3 for `api-gateway` and `inventory-app`; min 2 / max 6 for `billing-app` |
 | Storage | RDS storage autoscaling | 20 GB → 100 GB (`db_max_allocated_storage`) |
 | Burst absorption | the RabbitMQ queue | an `api-gateway` outage does not lose orders; they sit in `billing_queue` and drain when it returns |
+
+The consumer scales on **queue depth** rather than CPU because CPU is the wrong
+signal for it: a consumer blocked on an AMQP socket is *idle* while the backlog
+grows, so CPU target tracking would never react to the one condition that needs
+more consumers. `min 2` is never 1 — a single consumer task is a single point of
+failure for order processing, and with `prefetch_count = 1` each task holds one
+unacked message, so two tasks also drain in parallel. Amazon MQ for RabbitMQ
+publishes no per-queue CloudWatch dimension, so `MessageCount` is a broker-level
+approximation of the `billing_queue` depth — the same metric dashboarded as queue
+depth. The Kubernetes HPA uses CPU because a plain cluster has no broker metric
+without an exporter; its *bounds* match the ECS ones, and the difference is
+written down in `manifests/billing-app.yaml`.
 
 The 60 % target is not arbitrary: it is far enough below saturation to leave room
 for a container to become ready before it is loaded, and the 300 s scale-in
@@ -430,30 +478,45 @@ placeholder domains are rejected at plan time by a `validation` block.
 
 ## Auto-scaling
 
-**ECS (the deployed path).** Two Application Auto Scaling targets, both
-`ecs:service:DesiredCount`, both target tracking on
-`ECSServiceAverageCPUUtilization` at `var.autoscaling_target_cpu` (60), with
+**ECS (the deployed path).** Three Application Auto Scaling targets, all on
+`ecs:service:DesiredCount`, all `TargetTrackingScaling`, all with
 `scale_out_cooldown = 60` and `scale_in_cooldown = 300`:
 
-| Service | min | max | Policy |
-|---|---|---|---|
-| `cloud-design-prod-api-gateway` | 1 | 3 | `…-apigw-cpu-target-tracking-60` |
-| `cloud-design-prod-inventory-app` | 1 | 3 | `…-inventory-cpu-target-tracking-60` |
-| `cloud-design-prod-billing-app` | **2 (fixed)** | — | **none — deliberately** |
+| Service | min | max | Metric | Target | Policy |
+|---|---|---|---|---|---|
+| `cloud-design-prod-api-gateway` | 1 | 3 | `ECSServiceAverageCPUUtilization` | `var.autoscaling_target_cpu` = 60 % | `…-apigw-cpu-target-tracking-60` |
+| `cloud-design-prod-inventory-app` | 1 | 3 | `ECSServiceAverageCPUUtilization` | 60 % | `…-inventory-cpu-target-tracking-60` |
+| `cloud-design-prod-billing-app` | **2** | **6** | `AWS/AmazonMQ MessageCount` | `var.billing_queue_depth_target` = 50 messages | `…-billing-queue-depth-target-tracking` |
 
-`billing-app` is excluded because it is the **only** RabbitMQ consumer and the
-**only** writer to the billing database. A queue consumer that scales to zero
-stops draining the queue, and CPU is the wrong signal for it anyway: a
-backlogged queue keeps the process *idle* while work piles up. Two fixed replicas
-give AZ independence plus parallel drain capacity, since each task holds a
-`prefetch_count = 1` window. The exclusion is stated in the file header at
-`terraform/autoscaling.tf:1-7` so it reads as a decision, not an omission.
+`billing-app` is the odd one out on purpose. It is the **only** RabbitMQ consumer
+and the **only** writer to the billing database, so:
+
+- **It scales on backlog, not CPU.** A consumer blocked on an AMQP socket is
+  *idle* while work piles up, so CPU target tracking would never fire in the one
+  situation that needs another consumer. The policy tracks the broker's
+  `MessageCount` instead.
+- **`min_capacity` is 2, never 1.** One task is a single point of failure for
+  order processing, and with `prefetch_count = 1` each task holds exactly one
+  unacked message, so two tasks give AZ independence *and* parallel drain
+  capacity. It cannot reach zero while messages are queued.
+- **`max_capacity` is bounded at 6.** Enough to work off a sustained burst, small
+  enough that each extra task — another writer to `billing_db`, another entry in
+  `DatabaseConnections` — stays accounted for.
+
+One honest caveat: Amazon MQ for RabbitMQ publishes **no per-queue CloudWatch
+dimension**, so `MessageCount` is a broker-level approximation of the
+`billing_queue` depth. It is the only backlog signal AWS exposes for this broker,
+and it is the same metric shown as queue depth on the dashboard.
 
 **Kubernetes (the manifests path).** Three HPAs — `api-gateway-hpa`,
-`inventory-app-hpa`, `billing-app-hpa` — min 1 / max 3 / 60 % CPU (`manifests/api-gateway.yaml`, `manifests/inventory-app.yaml`, `manifests/billing-app.yaml`). They require
-`metrics-server`; without it they report `<unknown>`, `scalingActive=false`,
-`FailedGetResourceMetric`, and **silently never scale anything**, which is the
-worst failure mode for a "we auto-scale" claim.
+`inventory-app-hpa` (min 1 / max 3 / 60 % CPU) and `billing-app-hpa`
+(min 2 / max 6 / 60 % CPU) — in `manifests/{api-gateway,inventory-app,billing-app}.yaml`.
+The consumer's **bounds match the ECS policy**; its metric cannot, because a plain
+cluster has no RabbitMQ metric without an exporter or KEDA, so CPU stands in as a
+documented proxy. All three require `metrics-server`; without it they report
+`<unknown>`, `scalingActive=false`, `FailedGetResourceMetric`, and **silently
+never scale anything**, which is the worst failure mode for a "we auto-scale"
+claim.
 
 **Storage.** RDS `max_allocated_storage = 100` against
 `allocated_storage = 20` enables storage autoscaling on both instances.
@@ -488,14 +551,29 @@ worst failure mode for a "we auto-scale" claim.
   designed behaviour, not a bypass. It also reveals nothing but a static
   `{"status":"healthy"}`.
 - **Cognito user pool**: `mfa_configuration = "OPTIONAL"` (offered, not enforced,
-  so the audit walkthrough is not blocked by device registration), password
-  policy requiring upper/lower/digit/symbol with minimum length 8,
-  `password_history_size = 3`, `prevent_user_existence_errors = "ENABLED"`, and
+  so the audit walkthrough is not blocked by device registration), a
+  `password_policy` block requiring upper/lower/digit/symbol with minimum length
+  8 and `password_history_size = 3` (on AWS provider 5.x that argument exists
+  **only inside** `password_policy` — at resource top level `terraform validate`
+  rejects it), `prevent_user_existence_errors = "ENABLED"`, and
   email attributes requiring re-verification before update. The browser client
   uses the OAuth **authorization-code** flow — the deprecated `implicit` flow was
   dropped because it returns tokens in the URL fragment. An optional demo user and
   a confidential demo app client sit behind `enable_demo_cognito_user`.
 - **Throttling** on the `$default` stage: 5000 burst / 2500 steady-state.
+- **ALB auth bypass (disclosed, docs-only).** The ALB (`alb.tf`, `internal = false`,
+  `:443` open to `0.0.0.0/0`) forwards `/api/*` to `api-gateway` with **no**
+  authorizer — the Cognito JWT authorizer lives on API Gateway only, and the
+  `:443` listener's default action forwards to the same target group. So
+  `terraform output app_base_url_via_alb` (`outputs.tf:66-69`, *"bypasses the
+  Cognito authorizer, so it is unauthenticated"*) is a direct unauthenticated
+  path to every route the gateway serves, writes included. Production fix, in
+  order of preference: make the ALB `internal = true` and keep the public path
+  on API Gateway; failing that, put WAF plus an auth-aware listener rule in
+  front of it; failing that, restrict ALB `:443` ingress to the VPC Link
+  security group. None of these is applied here so `terraform apply` keeps
+  working on a fresh account — see [Known
+  limitations](#known-limitations--verified-vs-not).
 
 ### Data tier
 
@@ -522,8 +600,10 @@ worst failure mode for a "we auto-scale" claim.
 - **Network isolation**: `publicly_accessible = false` on both RDS instances and
   the broker; the private **db** route table has no default route; the db and mq
   security groups accept 5432 and 5671/15671 **only** from the app security group,
-  never `0.0.0.0/0`. The only `0.0.0.0/0` ingress rules in the whole Terraform
-  are ALB `:80` and `:443`.
+  never `0.0.0.0/0`. The only `0.0.0.0/0` **ingress** rules in the whole
+  Terraform are ALB `:80` and `:443`. There is exactly one `0.0.0.0/0`
+  **egress** rule — app SG `:443` to the AWS APIs (ECR, CloudWatch, Secrets
+  Manager) via NAT — and the route tables' defaults are `0.0.0.0/0` by design.
 
 ### Secrets
 
@@ -688,15 +768,33 @@ PUSH=1 bash scripts/build_push.sh
 
 > The ECS task definitions in `terraform/ecs_services.tf` are authoritative.
 > `ecs-tasks/*.json` (6 files) are standalone, hand-readable task definitions with
-> **placeholder** account IDs (`123456789012`) and ARNs, kept as documentation; they
-> are not what Terraform applies and not what ECS runs.
+> **placeholder** account IDs (`123456789012`), placeholder broker host
+> (`b-12345678.mq.us-east-1.amazonaws.com`) and placeholder ARNs, kept as
+> documentation; they are not what Terraform applies and not what ECS runs.
+> Other committed placeholders, each with its in-file comment saying what to
+> substitute: `manifests/secrets.yaml` ships `REPLACE_ME_*` only (see the trap
+> below); `manifests/ingress.yaml` ships
+> `arn:aws:acm:us-east-1:123456789012:certificate/REPLACE_ME_VALIDATED_ACM_CERT_ARN`
+> plus host `cloud-design.example.com` (substitute a validated ACM ARN and the
+> DNS name the certificate is issued for); `terraform/terraform.tfvars.example`
+> and `variables.tf` default `allowed_origins` to `["https://app.example.com"]`
+> (substitute the real frontend domain — a placeholder blocks every browser
+> request from the real frontend).
 
 ### The Kubernetes path (manifests, local cluster)
 
 ```bash
-# cluster + metrics-server (the HPAs need it)
-k3d cluster create cd-audit --servers 3
-kubectl apply -f https://github.com/k3s-io/metrics-server/releases/latest/download/metrics-server.yaml
+# cluster + metrics-server (the HPAs need it).
+# NOTE the pinned metrics-server URL: the old
+# github.com/k3s-io/metrics-server/releases/latest/... path now returns 404, and
+# a floating `latest` would make the audit non-reproducible anyway.
+k3d cluster create cd-audit --servers 3 \
+  --k3s-arg '--kube-apiserver-arg=service-node-port-range=30000-32767@server:*'
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.8.0/components.yaml
+
+# or just run the script, which does all of the above plus the image preload,
+# the secret injection and the rollout wait:
+bash scripts/deploy-k3d.sh
 
 # build and preload so the kubelet needs no registry
 bash scripts/build_push.sh
@@ -885,7 +983,9 @@ curl -s -X POST http://localhost:3000/api/billing \
 #    exposes only POST /api/billing)
 curl -s http://localhost:8082/orders
 # e.g. {"orders":[{"created_at":"...","id":11,"number_of_items":2,
-#                 "total_amount":49.99,"user_id":"20"}, ...]}
+#                 "total_amount":"49.99","user_id":20}, ...]}
+# `user_id` is an INTEGER and `total_amount` is a JSON string preserving the
+# NUMERIC(12,2) scale (see `srcs/billing-app/app/orders.py:25-36`).
 ```
 
 Or in one shot: `make test` — byte-compiles every source file, runs **18 unit
@@ -893,8 +993,8 @@ tests** (9 in `inventory-app`, 9 in `billing-app`) and then a **6-step HTTP smok
 test** through the load balancer. `make verify` adds the queue-depth check.
 
 `total_amount` comes back as `49.99`, never `49.989999`. Money is
-`NUMERIC(12,2)` in both the SQLAlchemy model (`srcs/billing-app/app/orders.py:14`)
-and the canonical SQL schema (`srcs/billing-database/init.sql:32`).
+`NUMERIC(12,2)` in both the SQLAlchemy model (`srcs/billing-app/app/orders.py`)
+and the canonical SQL schema (`srcs/billing-database/init.sql`).
 
 ### AWS: calling the protected routes
 
@@ -1006,8 +1106,11 @@ docker compose exec rabbit-queue \
   rabbitmqctl list_queues -p / name messages_ready messages_unacknowledged
 
 curl -s -X POST http://localhost:3000/api/billing -H 'Content-Type: application/json' \
-  -d '{"user_id":"readme-drill","number_of_items":"4","total_amount":"123.45"}'
+  -d '{"user_id":"999991","number_of_items":"4","total_amount":"123.45"}'
 # 200 {"message":"… sent"}   <- the request path does not care that nobody is consuming
+# NOTE: the id must be numeric. A non-numeric user_id (e.g. "readme-drill")
+# is now rejected at the edge (400) and, if it ever reaches the queue, is
+# poison-acked/discarded by the consumer instead of being persisted.
 
 docker compose exec rabbit-queue \
   rabbitmqctl list_queues -p / name messages_ready messages_unacknowledged
@@ -1021,6 +1124,49 @@ docker compose start billing-app
 the consumer exits **0** rather than being SIGKILLed at 137; the order survives in
 the durable queue (`delivery_mode=Persistent`, `durable=True`); and it is
 persisted with exact decimal precision once the consumer returns.
+
+### API behaviour notes
+
+- **POST /api/billing is strict at the edge and in the consumer.** All three
+  fields (`user_id`, `number_of_items`, `total_amount`) are required; `user_id`
+  / `number_of_items` must be INT32 integers (or canonical decimal-integer
+  strings, no bool/float/blank/trailing garbage) and `total_amount` must be an
+  exact `Decimal >= 0` (plain decimal string or int, never float/scientific).
+  The gateway rejects violations with **400** before publishing
+  (`_validate_billing_payload` in `srcs/api-gateway-app/app/proxy.py`); a
+  malformed message that still reaches the queue is **poison-acked and
+  discarded** by the consumer (`coerce_order_payload` → `InvalidOrderError`
+  → `basic_ack` in `srcs/billing-app/app/validation.py` and
+  `srcs/billing-app/app/consume_queue.py`). E.g. `{"user_id":"20"}` (missing
+  two fields) now returns **400**; before edge validation it returned 200
+  and was queued.
+- **DELETE /api/movies requires `?confirm=all`.** A bare
+  `DELETE /api/movies` returns **400** with a hint instead of wiping the
+  catalogue; only `DELETE /api/movies?confirm=all` deletes everything.
+  Deliberate deviation from the spec text, kept because the endpoint is
+  unauthenticated and reachable through the public gateway — one stray request
+  must not destroy the data under evaluation. Delete a single row with
+  `DELETE /api/movies/<id>`.
+- **Malformed movie ids answer JSON 404, never HTML and never a wrong row.**
+  `GET /api/movies/007`, `/api/movies/-5` (no such row) and `/api/movies/abc`
+  all return `{"error": "Movie with ID … not found"}` with **404** (string
+  converter plus the `_is_invalid_id` guard in
+  `srcs/inventory-app/app/movies.py:17-45`). Previously the Flask `<int:…>`
+  converter answered negatives with an HTML 404 page, and `007` silently
+  matched row 7.
+- **PostgreSQL versions differ by platform (already disclosed above).**
+  Local images build `FROM postgres:17-alpine`; RDS declares
+  `engine_version = "16.3"` (`postgres16`). Intentional version floor for the
+  managed service; see the component-mapping note.
+- **VARCHAR → INTEGER migration caveat.** `orders.user_id` is now `INTEGER`
+  (`srcs/billing-app/app/orders.py`, `srcs/billing-database/init.sql`).
+  A named volume created by an older checkout still has the `VARCHAR` column,
+  so inserts fail after pulling this change. Fix with `make down-v` (deletes
+  the data volumes) followed by `make up`. A manual
+  `ALTER TABLE orders ALTER COLUMN user_id TYPE INTEGER
+  USING user_id::integer;` only works on volumes whose existing rows are all
+  numeric — legacy volumes containing rows like `resilience-drill` or
+  `readme-drill` cannot be cast and must use `make down-v` (data loss).
 
 ---
 
@@ -1080,7 +1226,7 @@ reports three verdicts, never two: `[PASS]`, `[FAIL]`, and `[INVALID]` — the
 last meaning "cannot be determined here", counted separately and **never** as a
 pass.
 
-Current real result on this machine: **PASS=173, FAIL=0, INVALID=4, NOTES=39**.
+Current real result on this machine: **PASS=181, FAIL=0, INVALID=1, NOTES=39**.
 Before this README was rewritten the same script reported **FAIL=2**, and both
 were documentation bugs found by the script itself: the README never mentioned
 `.env` even though `docker-compose.yml` reads eight credentials from it, and it
@@ -1198,8 +1344,8 @@ Optimizer, Savings Plans recommendations.
 
 3. **Money stored as a float.** `total_amount` was a float column, so totals
    drifted by IEEE-754 rounding. Fix: `NUMERIC(12, 2)` in both the SQLAlchemy
-   model (`srcs/billing-app/app/orders.py:14`) and the canonical schema
-   (`srcs/billing-database/init.sql:32`), with `Decimal` coercion in the
+   model (`srcs/billing-app/app/orders.py`) and the canonical schema
+   (`srcs/billing-database/init.sql`), with `Decimal` coercion in the
    validation helper and an explicit unit test
    (`test_total_amount_stays_exact_decimal`). Both files carry a comment saying
    they must stay in sync, because `create_all()` finds an existing table and
@@ -1305,7 +1451,7 @@ Claimed against `docs/readme.md`'s bonus list. Each item says exactly what exist
 
 - [x] `README.md` — architecture diagrams, component descriptions, design rationale, prerequisites, setup, configuration, usage, verification
 - [x] `srcs/` — application source for all six components, with tests
-- [x] `terraform/` — 18 `.tf` files, 129 `resource` blocks (122 `aws_*`), 28 variables, 38 outputs, 6 `data` blocks, 0 modules
+- [x] `terraform/` — 18 `.tf` files, 131 `resource` blocks (124 `aws_*`), 31 variables, 38 outputs, 6 `data` blocks, 0 modules
 - [x] `docker-compose.yml`, `Makefile`, `.env.example`, `.dockerignore`, `.gitignore`
 - [x] `manifests/` — 29 Kubernetes objects including `kustomization.yaml`
 - [x] `ecs-tasks/` — 6 standalone task-definition documents with placeholder ARNs (the authoritative ones are in `terraform/ecs_services.tf`)
@@ -1348,40 +1494,50 @@ find a gap you did not mention.
 | Warm rebuild | 2.95 s (api-gateway), 1.69 s (inventory), 1.92 s (billing) with the layer cache warm |
 | Manifests render and apply | `kubectl kustomize manifests/` → 29 objects; applied to a live k3d cluster |
 | Static suite | `bash scripts/test_cloud.sh` → **50 PASS / 0 FAIL / 3 WARN** |
-| Rubric suite | `bash scripts/run-audit-checks.sh` → **PASS=173, FAIL=0, INVALID=4, NOTES=39** |
+| Rubric suite | `bash scripts/run-audit-checks.sh` → **PASS=181, FAIL=0, INVALID=1, NOTES=39** |
 | AMQPS behaviour | correct CA accepted; wrong CA rejected; wrong hostname rejected; plaintext client against a TLS listener refused |
 
-### Four verdicts that are INVALID, not PASS
+### What is INVALID, not PASS
 
-`scripts/run-audit-checks.sh` reports these as `[INVALID]` and never as a pass,
-because `aws` and `terraform` are **not installed in this environment** and no API
-Gateway is deployed:
+`scripts/run-audit-checks.sh` reports these as `[INVALID]` and never as a pass.
+`terraform` and the `aws` CLI **are** installed here, so this is not a missing-binaries
+problem — it is a missing **deployment** and missing **credentials**:
 
-1. **`terraform fmt -check`** — cannot run; the HCL formatting verdict is
-   **unknown**, not "clean".
-2. **`terraform validate`** — cannot run; the HCL *semantic* verdict is
-   **unknown**. All Terraform evidence in this repo is static text analysis.
-3. **The credential-less request rejection test at API Gateway** — proving a
-   `401` requires a deployed endpoint. What *can* be proven locally is the static
-   fact that `authorizer_id` and `authorization_type = "JWT"` are set on all four
+1. **`terraform plan` / `terraform apply`** — the binaries exist (Terraform v1.9.5)
+   but there is no AWS account with credentials, so anything that talks to the AWS
+   API is INVALID. What *is* genuinely run, and run for real, is
+   `terraform fmt -check -recursive` (**clean**) and `terraform validate`
+   (**`Success! The configuration is valid.`**). Those are the only two Terraform
+   verdicts in this repo that are observed rather than asserted.
+2. **The credential-less request rejection test at API Gateway** — proving a `401`
+   requires a deployed endpoint. What *can* be proven locally is the static fact
+   that `authorizer_id` and `authorization_type = "JWT"` are set on all four
    `/api/*` routes. No live 401 is claimed.
-4. **Live AWS resource inspection generally** — no `describe-*` call was executed,
+3. **Live AWS resource inspection generally** — no `describe-*` call was executed,
    so nothing in this README about an existing deployed stack is asserted as
    observed. Every AWS statement is "Terraform declares …", never "the console
    shows …".
 
 Treating an unrunnable check as a pass is the failure mode this distinction
-exists to prevent.
+exists to prevent. The corollary matters just as much: `terraform validate` did
+**fail** the first time it was run here — `password_history_size` sat at resource
+top level, where AWS provider 5.x rejects it — and it is reported above as passing
+only because it now does.
 
 ### Real gaps in the solution
 
 - **The ALB path is unauthenticated.** `alb.tf` sets `internal = false` and the
   ALB security group allows `0.0.0.0/0` on `:443`; the `:443` listener forwards
-  `/api/*` to `api-gateway`. The Cognito JWT authorizer is attached at **API
-  Gateway only**, so a request that skips API Gateway and addresses the ALB
-  directly reaches the application without a token. `terraform output
-  app_base_url_via_alb` documents exactly this. Fix: restrict the ALB `:443`
-  ingress to the VPC Link security group and keep the public path on API Gateway.
+  `/api/*` to `api-gateway`, and its default action forwards to the same target
+  group. The Cognito JWT authorizer is attached at **API Gateway only**, so a
+  request that skips API Gateway and addresses the ALB directly reaches the
+  application without a token — every route the gateway serves, writes
+  included. `terraform output app_base_url_via_alb` documents exactly this.
+  Fix, in order of preference: make the ALB `internal = true` and keep the
+  public path on API Gateway; failing that, put WAF plus an auth-aware
+  listener rule in front of it; failing that, restrict the ALB `:443`
+  ingress to the VPC Link security group. Left public here so `terraform
+  apply` succeeds on a fresh account with no certificate prerequisite.
 - **One Secret for three apps** — `envFrom` gives every app every credential
   (recorded in `manifests/secrets.yaml:93-102`).
 - **`sslmode` is not set client-side**, so TLS to RDS relies on libpq's
@@ -1408,7 +1564,7 @@ exists to prevent.
 
 | Tool | What it does | Live result |
 |---|---|---|
-| `scripts/run-audit-checks.sh` | Walks all 22 rubric items in `docs/audit.md`, runs the real command for each, prints real stdout/stderr, and grades PASS / FAIL / **INVALID** / NOTE. Never hides a command | PASS=173, FAIL=0, INVALID=4, NOTES=39 |
+| `scripts/run-audit-checks.sh` | Walks all 22 rubric items in `docs/audit.md`, runs the real command for each, prints real stdout/stderr, and grades PASS / FAIL / **INVALID** / NOTE. Never hides a command | PASS=181, FAIL=0, INVALID=1, NOTES=39 |
 | `scripts/test_cloud.sh` | Static-only suite: reads files, parses manifests, grades Dockerfiles / Terraform / manifests / scripts. Deliberately separate from the live suite so a reviewer can tell reading-based proof from running-based proof | 50 PASS / 0 FAIL / 3 WARN |
 | `scripts/step_by_step_audit.py` | Sends the literal rubric commands to a terminal pane one at a time, so the examiner watches each command typed and its real output. `--list`, `--dry-run`, `--only <section>`, `--section`, `--pane` | — |
 | `scripts/build_push.sh` | Builds all six images, verifies each one exists, optionally pushes to ECR with `PUSH=1`, prints the real size table | — |

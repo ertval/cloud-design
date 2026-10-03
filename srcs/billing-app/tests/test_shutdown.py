@@ -66,11 +66,21 @@ class FakeSession:
     def add(self, obj):
         self._state["added"].append(obj)
 
+    def flush(self):
+        # SQLAlchemy populates an autoincrement PK on INSERT, which flush()
+        # emits -- and a primary key is never expired by commit(), so reading it
+        # straight after flush is safe on a detached instance. The production
+        # code depends on exactly that, so the double has to model it.
+        obj = self._state["added"][-1] if self._state["added"] else None
+        if obj is not None and obj.id is None:
+            obj.id = 42
+
     def commit(self):
         if self._state["commit_error"] is not None:
             raise self._state["commit_error"]
         obj = self._state["added"][-1]
-        obj.id = 42
+        if obj.id is None:
+            obj.id = 42
 
     def rollback(self):
         self._state["rollbacks"] += 1

@@ -59,7 +59,11 @@ def create_app():
     db_user = _require_env("INVENTORY_DB_USER")
     db_password = _require_env("INVENTORY_DB_PASSWORD")
     db_host = _env_or_default("INVENTORY_DB_HOST", "inventory-database")
-    db_port = _env_or_default("INVENTORY_DB_PORT", "5432")
+    try:
+        db_port = int(_env_or_default("INVENTORY_DB_PORT", "5432"))
+    except ValueError:
+        logger.warning("Invalid INVENTORY_DB_PORT; falling back to 5432.")
+        db_port = 5432
     db_name = _env_or_default("INVENTORY_DB_NAME", "inventory_db")
 
     # URL.create() percent-encodes the password; f-string interpolation would
@@ -140,8 +144,16 @@ def create_app():
     # cluster PostgreSQL needed ~145s to accept connections (initdb + role,
     # database and table creation), while a 30 x 2s = 60s budget made the app
     # exit and be restarted twice before the database was up.
-    max_retries = int(_env_or_default("DB_CONNECT_MAX_RETRIES", "180"))
-    retry_delay = float(_env_or_default("DB_CONNECT_RETRY_DELAY", "2"))
+    try:
+        max_retries = int(_env_or_default("DB_CONNECT_MAX_RETRIES", "180"))
+    except ValueError:
+        logger.warning("Invalid DB_CONNECT_MAX_RETRIES; falling back to 180.")
+        max_retries = 180
+    try:
+        retry_delay = float(_env_or_default("DB_CONNECT_RETRY_DELAY", "2"))
+    except ValueError:
+        logger.warning("Invalid DB_CONNECT_RETRY_DELAY; falling back to 2.")
+        retry_delay = 2.0
     with app.app_context():
         for attempt in range(1, max_retries + 1):
             try:

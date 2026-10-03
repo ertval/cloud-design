@@ -65,7 +65,8 @@ def _env_or_default(name: str, default: str) -> str:
     """Non-secret setting with a safe default.
 
     `os.getenv(name, default)` is not enough: Docker Compose interpolates an
-    *undefined* variable as an empty string, which would defeat the default.
+    *undefined* variable as an empty string rather than leaving it unset, so a
+    missing or partial `.env` would yield `""` and defeat the default.
     """
     value = os.getenv(name)
     if value is None or not value.strip():
@@ -74,6 +75,7 @@ def _env_or_default(name: str, default: str) -> str:
 
 
 def _env_port(name: str, default: int) -> int:
+    """Non-secret port with a safe default, tolerant of empty/blank values."""
     raw = os.getenv(name)
     if raw is None or not raw.strip():
         return default
@@ -194,8 +196,9 @@ def build_ssl_options(host: str) -> pika.SSLOptions:
             "Mount the CA bundle into the container or unset the variable to use "
             "the system trust store (see .env.example)."
         )
-    # cafile=None loads the platform default CA store; a supplied cafile adds
-    # trust for a private CA.
+    # cafile=None loads the platform default CA store; a supplied cafile
+    # REPLACES it, so the bundle must contain the full chain the broker may
+    # present.
     context = ssl.create_default_context(cafile=ca_file)
 
     if _env_flag("RABBITMQ_TLS_VERIFY") is False:
@@ -222,8 +225,9 @@ def ssl_options_for(raw_host: str, port: int) -> pika.SSLOptions | None:
     """Return SSLOptions for an AMQPS target, or None for plaintext AMQP.
 
     None is the signal pika itself uses for "no TLS", so returning it (rather
-    than a disabled context) is what keeps the plaintext path byte-identical to
-    the pre-TLS behaviour.
+    than a disabled context) is what keeps the plaintext path
+    behaviour-identical to the pre-TLS path except for the bounded
+    connection/publish timeouts.
     """
     host, _, _ = _resolve_amqp_target(raw_host, port)
     if not tls_enabled_for(raw_host, port):
@@ -435,8 +439,15 @@ def start_consuming(db_session_factory, stop_event=None):
                             total_amount=total_amount
                         )
                         session.add(order)
+                        session.flush()  # INSERT; populates the autoincrement id
+                        # Capture ORM state while the session is still open:
+                        # after commit/close the instance is detached and
+                        # attribute access may fail (or fire a refresh against
+                        # a closed session). The log below uses only this
+                        # plain value plus the already-coerced locals.
+                        order_id = order.id
                         session.commit()
-                        logger.info(f"Successfully processed and recorded order #{order.id} for user '{user_id}' (items={number_of_items}, total=${total_amount:.2f})")
+                        logger.info(f"Successfully processed and recorded order #{order_id} for user '{user_id}' (items={number_of_items}, total=${total_amount:.2f})")
                         db_success = True
                         break
                     except Exception as db_err:

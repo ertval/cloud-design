@@ -20,10 +20,10 @@
       ],
       "environment": [
         { "name": "APP_PORT", "value": "3000" },
-        { "name": "INVENTORY_APP_HOST", "value": "inventory-app.cloud-design.local" },
+        { "name": "INVENTORY_APP_HOST", "value": "inventory-app.cloud-design-prod.local" },
         { "name": "INVENTORY_APP_PORT", "value": "8080" },
-        { "name": "RABBITMQ_HOST", "value": "rabbitmq.cloud-design.local" },
-        { "name": "RABBITMQ_PORT", "value": "5672" },
+        { "name": "RABBITMQ_HOST", "value": "b-12345678.mq.us-east-1.amazonaws.com" },
+        { "name": "RABBITMQ_PORT", "value": "5671" },
         { "name": "RABBITMQ_QUEUE", "value": "billing_queue" }
       ],
       "secrets": [

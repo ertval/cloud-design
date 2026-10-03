@@ -8,8 +8,8 @@
 #   gateway-lb (nginx)          ->  ALB + api-gateway target group (alb.tf)
 #   api-gateway-app  x2         ->  ECS service behind the ALB (ecs-tasks/)
 #   inventory-app / billing-app ->  ECS services on Fargate
-#   inventory-database          ->  RDS PostgreSQL 17 (rds.tf)
-#   billing-database            ->  RDS PostgreSQL 17 (rds.tf)
+#   inventory-database          ->  RDS PostgreSQL 16.3 (rds.tf)
+#   billing-database            ->  RDS PostgreSQL 16.3 (rds.tf)
 #   rabbit-queue                ->  Amazon MQ for RabbitMQ (amazon_mq.tf)
 #
 # Every variable name below matches EXACTLY what the application code reads:

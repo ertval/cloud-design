@@ -5,32 +5,38 @@
 #
 #   kubectl apply -k manifests/
 #
-# Two reasons, both verified with kubectl v1.36.1:
+# Two reasons (both structural, so they hold for any kubectl version):
 #
 #   1. ORDER. `kubectl apply -f <dir>` walks the directory in ALPHABETICAL
-#      order, so it applies api-gateway.yaml (eighth) before namespace.yaml
-#      and fails with
-#        namespaces "cloud-design" not found
-#      `resources:` below is an explicit, dependency-ordered list; kustomize
-#      emits objects in list order and kubectl applies them one API call at a
-#      time, so the Namespace is created first.
+#      order. Alphabetically that is:
+#        api-gateway.yaml, billing-app.yaml, billing-database.yaml, configmap.yaml,
+#        inventory-app.yaml, ...
+#      so the FIRST file applied is api-gateway.yaml, and its pods are created
+#      before namespace.yaml has ever run -> the namespace does not exist and the
+#      apply fails.
+#      `resources:` below is an explicit, dependency-ordered list; kustomize emits
+#      objects in list order and kubectl applies them one API call at a time, so
+#      the Namespace is created first.
 #
 #   2. THIS FILE ITSELF. `kubectl apply -f <dir>` also parses
-#      kustomization.yaml as if it were a manifest and fails with
-#        error validating "kustomization.yaml": error validating data:
-#        [apiVersion not set, kind not set]
-#      That is unavoidable and is why `kubectl apply -f manifests/` cannot be
-#      made to work while this file exists. (Adding apiVersion/kind to this
-#      file silences that specific error but breaks `kubectl apply -k`
-#      instead, because kustomize then tries to accumulate kustomization.yaml
-#      as one of its own resources: "missing metadata.name in object". Both
-#      variants were tested; neither works. Use `-k`.)
+#      kustomization.yaml as if it were a workload manifest. It is not one: it is
+#      an input to `kustomize build`. The API server has no Kustomization kind in
+#      any group kubectl would try, so that file cannot be applied by `-f` no
+#      matter what it contains.
+#      (An earlier draft of this comment claimed the failure was
+#      "[apiVersion not set, kind not set]" and suggested adding those two fields
+#      would fix it. They are already set below, so that error text was stale and
+#      the suggested "fix" would have broken `kubectl apply -k` instead — kustomize
+#      would try to accumulate this file as one of its own resources. The exact
+#      message kubectl prints also varies with version and cluster reachability,
+#      so the mechanism above is stated instead of a transcript that cannot be
+#      guaranteed to match. `-k` is the only supported form.)
 #
 # `kubectl apply -f <individual file>` also still works and is what
 # scripts/deploy.sh does, in the same order.
 #
 # MINIMUM TOOLING: `sortOptions` below needs kustomize v5, i.e. kubectl >= 1.28
-# (kubectl 1.36 embeds kustomize v5.8.1). On an older kubectl this file is
+# (kubectl 1.37 embeds kustomize v5.8.1). On an older kubectl this file is
 # rejected with `unknown field "sortOptions"` and you must apply the files
 # individually in the order listed below.
 # =============================================================================

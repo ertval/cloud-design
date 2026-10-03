@@ -1650,9 +1650,49 @@ else fail "api-gateway desired_count='${DC_API:-?}' is inconsistent with min_cap
 if count_ok "${DC_INV}" && [ "${DC_INV}" -ge 1 ]; then pass "inventory-app desired_count=${DC_INV} is consistent with min_capacity=1"
 else fail "inventory-app desired_count='${DC_INV:-?}' is inconsistent with min_capacity=1"; fi
 if count_ok "${DC_BIL}" && [ "${DC_BIL}" -ge 2 ]; then
-  pass "billing-app desired_count=${DC_BIL} -- deliberately pinned >=2 because it is the sole RabbitMQ consumer"
+  pass "billing-app desired_count=${DC_BIL} matches billing_app_min_capacity=2 -- never a single consumer"
 else
-  note "billing-app desired_count='${DC_BIL:-?}' (intentionally not auto-scaled: a queue consumer that scales to zero stops draining)"
+  fail "billing-app desired_count='${DC_BIL:-?}' must be >= 2: one consumer task is a single point of failure for order processing"
+fi
+
+# The queue consumer must scale on BACKLOG, not CPU: a consumer blocked on an
+# AMQP socket is idle while messages pile up, so CPU target tracking would never
+# fire in the one situation that needs another consumer.
+if grep -q 'AWS/AmazonMQ' "${TF_DIR}/autoscaling.tf" 2>/dev/null \
+   && grep -q 'MessageCount' "${TF_DIR}/autoscaling.tf" 2>/dev/null; then
+  pass "the billing-app policy scales on AWS/AmazonMQ MessageCount backlog, not on CPU"
+else
+  fail "no Amazon MQ MessageCount policy for billing-app -- a queue consumer scaled on CPU does not react to a backlog"
+fi
+QD="$(awk '/^variable .billing_queue_depth_target./{f=1} f && /default[[:space:]]*=/{gsub(/[^0-9.]/,"");print;exit}' "${TF_DIR}/variables.tf" 2>/dev/null)"
+show "billing_queue_depth_target default" "${QD:-<not found>} messages"
+if count_ok "${QD%%.*}" && [ "${QD%%.*}" -ge 1 ]; then
+  pass "the backlog target is a concrete message count (${QD}), not a placeholder"
+else
+  fail "billing_queue_depth_target has no numeric default (got '${QD:-}')"
+fi
+
+# Cross-path consistency: the Kubernetes HPA bounds must agree with the ECS
+# target, or the two orchestrators tell the examiner different stories. The ECS
+# target binds VARIABLES rather than literals, so the authoritative numbers are
+# the variable defaults it references -- and that binding is itself asserted, so
+# "documented bounds" cannot drift away from "enforced bounds".
+BIL_MN="$(awk '/^kind: HorizontalPodAutoscaler/{f=1} f && /minReplicas/{gsub(/[^0-9]/,"");print;exit}' "${MAN_DIR}/billing-app.yaml" 2>/dev/null)"
+BIL_MX="$(awk '/^kind: HorizontalPodAutoscaler/{f=1} f && /maxReplicas/{gsub(/[^0-9]/,"");print;exit}' "${MAN_DIR}/billing-app.yaml" 2>/dev/null)"
+TF_BIL_MN="$(awk '/^variable .billing_app_min_capacity./{f=1} f && /default[[:space:]]*=/{gsub(/[^0-9]/,"");print;exit}' "${TF_DIR}/variables.tf" 2>/dev/null)"
+TF_BIL_MX="$(awk '/^variable .billing_app_max_capacity./{f=1} f && /default[[:space:]]*=/{gsub(/[^0-9]/,"");print;exit}' "${TF_DIR}/variables.tf" 2>/dev/null)"
+TF_BINDS="$(fcount 'min_capacity[[:space:]]*=[[:space:]]*var\.billing_app_min_capacity' "${TF_DIR}/autoscaling.tf")"
+show "billing consumer bounds: ECS vs manifests" "ecs=${TF_BIL_MN:-?}/${TF_BIL_MX:-?}  k8s-hpa=${BIL_MN:-?}/${BIL_MX:-?}  (ecs target binds the vars: ${TF_BINDS:-0})"
+if count_ok "${TF_BINDS}" && [ "${TF_BINDS}" -ge 1 ]; then
+  pass "the ECS billing-app target binds var.billing_app_min_capacity / _max_capacity instead of hardcoding numbers"
+else
+  fail "aws_appautoscaling_target.billing_app does not bind var.billing_app_min_capacity -- the documented bounds are not the enforced ones"
+fi
+if count_ok "${TF_BIL_MN}" && count_ok "${BIL_MN}" && [ "${TF_BIL_MN}" = "${BIL_MN}" ] \
+   && count_ok "${TF_BIL_MX}" && count_ok "${BIL_MX}" && [ "${TF_BIL_MX}" = "${BIL_MX}" ]; then
+  pass "both orchestrators agree on the consumer's bounds (min ${BIL_MN} / max ${BIL_MX})"
+else
+  fail "the two orchestrators disagree on billing-app bounds: ECS ${TF_BIL_MN:-?}/${TF_BIL_MX:-?} vs manifests ${BIL_MN:-?}/${BIL_MX:-?}"
 fi
 
 HPAS="$(grep -rh '^kind: HorizontalPodAutoscaler' "${MAN_DIR}"/*.yaml 2>/dev/null | wc -l | tr -d ' ')"
@@ -2081,6 +2121,9 @@ if grep -qiE 'zero[^.]{0,24}module|module[^.]{0,24}zero|0 +(\*\*)?modules' "${RO
 else
   note "no explicit 'zero modules' statement was found in docs/AUDIT_GUIDE.md to cross-check against terraform/'s ${TF_MODULE_BLOCKS} \`module\` blocks; not scored, and not asserted either way"
 fi
+TF_ALARM_COUNT="$(fcount '^resource "aws_cloudwatch_metric_alarm"' "${TF_DIR}/cloudwatch.tf")"
+TF_WIDGET_COUNT="$(fcount 'type[[:space:]]*=[[:space:]]*"metric"' "${TF_DIR}/cloudwatch.tf")"
+note "Also measured by this run: ${TF_ALARM_COUNT:-?} CloudWatch metric alarms and ${TF_WIDGET_COUNT:-?} dashboard widgets. Terraform .tf FILES are not modules - this project has ${TF_MODULE_BLOCKS} 'module' blocks, and conflating the two was one of the errors this project already had to correct. This script deliberately does not edit docs/."
 fi
 
 # =============================================================================

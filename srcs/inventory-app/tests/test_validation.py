@@ -1,5 +1,9 @@
 """Unit tests for the inventory movie validation rules.
 
+FULLY STRICT Python: no implicit `str()` conversion. `title` must be a genuine
+`str` and `description` must be a `str` or `None` — dicts, lists and numbers
+are rejected instead of being stringified.
+
 Dependency-free on purpose: `python3 -m unittest discover -s tests` runs on a
 bare host with no Flask, no SQLAlchemy and no database, which is what
 `make test-py` does. `app/validation.py` is kept import-light for exactly this
@@ -37,6 +41,9 @@ class ValidateMoviePayloadTest(unittest.TestCase):
     def test_missing_description_defaults_to_empty_string(self):
         self.assertEqual(validate_movie_payload({"title": "Dune"})[1], "")
 
+    def test_none_description_defaults_to_empty_string(self):
+        self.assertEqual(validate_movie_payload({"title": "Dune", "description": None}), ("Dune", ""))
+
     def test_partial_update_may_omit_the_title(self):
         self.assertEqual(
             validate_movie_payload({"description": "sequel"}, require_title=False),
@@ -49,7 +56,7 @@ class ValidateMoviePayloadTest(unittest.TestCase):
         self.assertEqual(validate_movie_payload({"title": "Dune", "year": 2026}), ("Dune", ""))
 
     def test_rejects_payloads_that_are_not_a_json_object(self):
-        for bad in ([], None, "Dune", 42, ()):
+        for bad in ([], None, "Dune", 42, (), True, 3.14, ["title"]):
             with self.assertRaises(ValueError):
                 validate_movie_payload(bad)
 
@@ -62,9 +69,27 @@ class ValidateMoviePayloadTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_movie_payload(bad)
 
+    def test_rejects_non_string_title(self):
+        # STRICT: no str() coercion. None/bool/numbers/dicts/lists are not titles.
+        for bad_title in (None, True, False, 123, 3.14, {"t": "x"}, ["Dune"], ("Dune",)):
+            with self.assertRaises(ValueError):
+                validate_movie_payload({"title": bad_title})
+
+    def test_rejects_non_string_description(self):
+        # STRICT: no str() coercion to "[object Object]" / "1,2" style text.
+        for bad_desc in (123, 3.14, True, False, {"text": "x"}, ["a", "b"], ("x",)):
+            with self.assertRaises(ValueError):
+                validate_movie_payload({"title": "Dune", "description": bad_desc})
+            with self.assertRaises(ValueError):
+                validate_movie_payload(
+                    {"description": bad_desc}, require_title=False
+                )
+
     def test_error_messages_name_the_offending_field(self):
         with self.assertRaisesRegex(ValueError, "title"):
             validate_movie_payload({"title": ""})
+        with self.assertRaisesRegex(ValueError, "description"):
+            validate_movie_payload({"title": "Dune", "description": {"a": 1}})
 
 
 class TitleLengthBoundaryTest(unittest.TestCase):

@@ -51,6 +51,13 @@ resource "aws_cognito_user_pool" "main" {
     require_numbers                  = true
     require_symbols                  = true
     temporary_password_validity_days = 7
+    # Reuse of the previous 3 passwords is refused, which blunts credential
+    # stuffing against a known password list.
+    # NOTE: on AWS provider 5.x this attribute exists ONLY inside the
+    # `password_policy` block. Declared at resource top level it fails
+    # `terraform validate` with "An argument named password_history_size is not
+    # expected here" - which is exactly how it was found by the audit script.
+    password_history_size = 3
   }
 
   verification_message_template {
@@ -73,11 +80,8 @@ resource "aws_cognito_user_pool" "main" {
   }
 
   # Require a fresh password on every credential change. Equivalent intent to
-  # Cognito's account-takeover protection.
-  # NOTE: `account_takeover_protection_settings` does NOT exist in AWS provider
-  # 5.100.0 (it arrives in v6.x), so password_history_size is the hardening that
-  # is actually available on the pinned version.
-  password_history_size = 3
+  # Cognito's account-takeover protection; the setting itself lives inside the
+  # `password_policy` block above (see the note there).
 
   # Any authenticated user may change their own email, but only to a value they
   # have already verified - blocks silent account-hijack via attribute edit.

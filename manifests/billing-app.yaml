@@ -303,13 +303,21 @@ spec:
 # -----------------------------------------------------------------------------
 # billing-app is the burst-critical component and was the odd one out: the
 # gateway and inventory-app both had an HPA while the queue consumer that
-# silently backs up first under load had none. A backlog does not show up in
-# pod CPU, so this HPA is a floor/safety net rather than a backlog-driven
-# autoscaler -- real scale-out of a queue consumer is normally driven by queue
-# depth (KEDA / RabbitMQ queue-length metric), which is out of scope here.
-# Documented rather than overstated: at minReplicas 1 / maxReplicas 3 on a
-# 60% CPU target this bounds the blast radius of a CPU-bound consumer; it does
-# not drain a backlog.
+# silently backs up first under load had none.
+#
+# BOUNDS ARE THE POINT: minReplicas 2 / maxReplicas 6 match
+# var.billing_app_min_capacity / var.billing_app_max_capacity on the deployed
+# ECS path, so both orchestrators agree on how many consumers may exist. One
+# consumer would be a single point of failure for order processing.
+#
+# THE METRIC IS A DOCUMENTED PROXY, and this is the one place the two paths
+# differ. A backlog does not show up in pod CPU - a consumer blocked on an AMQP
+# socket is idle while work piles up - so CPU is the wrong signal for this
+# workload. On AWS the billing-app policy targets Amazon MQ `MessageCount`
+# instead (terraform/autoscaling.tf). This manifest cannot: Kubernetes has no
+# broker metric without an exporter or KEDA, which is out of scope here. So the
+# HPA bounds the blast radius of a CPU-bound consumer and does NOT drain a
+# backlog. Stated rather than overstated.
 #
 # REQUIRES metrics-server. Without it the HPA reports
 #   <unknown>  scaling active=false  FailedGetResourceMetric
@@ -340,8 +348,8 @@ spec:
     apiVersion: apps/v1
     kind: StatefulSet
     name: billing-app
-  minReplicas: 1
-  maxReplicas: 3
+  minReplicas: 2
+  maxReplicas: 6
   metrics:
     - type: Resource
       resource:

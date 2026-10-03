@@ -164,7 +164,7 @@ consumer-drain: ## PROVE the queue survives a consumer outage
 	@echo "-- posting an order while NO consumer is running"; \
 		curl -fsS -X POST $(GATEWAY_URL)/api/billing \
 			-H 'Content-Type: application/json' \
-			-d '{"user_id":"resilience","number_of_items":"7","total_amount":"99.95"}' && echo
+			-d '{"user_id":"999983","number_of_items":"7","total_amount":"99.95"}' && echo
 	@echo "-- queue while the consumer is down (must be >= 1)"; \
 		$(MAKE) --no-print-directory queue-drain
 	@echo "-- restarting the consumer"; \

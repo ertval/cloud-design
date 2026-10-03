@@ -1,13 +1,34 @@
 import os
+import re
 import time
 import logging
 import requests
+from decimal import Decimal
 from flask import Blueprint, request, Response, jsonify
 from app.queue_sender import RabbitMQSender, describe_error
 
 logger = logging.getLogger(__name__)
 proxy_bp = Blueprint("proxy", __name__)
-sender = RabbitMQSender()
+
+# Lazily constructed on first POST /api/billing so a missing broker secret
+# or bad CA bundle fails only the billing path — GET /api/movies and /health
+# must stay up even when the broker is misconfigured.
+_sender = None
+_sender_error = None
+
+
+def get_sender():
+    global _sender, _sender_error
+    if _sender is not None:
+        return _sender
+    if _sender_error is not None:
+        raise _sender_error
+    try:
+        _sender = RabbitMQSender()
+        return _sender
+    except Exception as exc:
+        _sender_error = exc
+        raise
 
 INVENTORY_HOST = os.getenv("INVENTORY_APP_HOST", "").strip() or "inventory-app"
 INVENTORY_PORT = os.getenv("INVENTORY_APP_PORT", "").strip() or "8080"
@@ -55,6 +76,120 @@ def _upstream_5xx(response):
     a client error is the client's, not a dependency outage.
     """
     return response.status_code >= 500
+
+
+# Strict billing-payload check, intentionally duplicated here instead of
+# importing billing-app/app/validation.py: the gateway and billing services
+# ship as separate container images with no shared package, so a cross-service
+# import would crash the gateway at startup. Keep in sync with
+# srcs/billing-app/app/validation.py (FULLY STRICT Python: all three fields
+# required, no bool/None/blank/trailing-garbage, canonical INT32 integers,
+# exact Decimal >= 0 for money).
+_BILLING_INT32_MIN = -2147483648
+_BILLING_INT32_MAX = 2147483647
+_BILLING_INT_RE = re.compile(r"-?(0|[1-9][0-9]*)")
+_BILLING_DECIMAL_RE = re.compile(r"[+-]?(?:\d+(?:\.\d+)?|\.\d+)")
+
+
+def _billing_strict_int(value, field, *, minimum, maximum):
+    import math as _math
+
+    if isinstance(value, bool):
+        raise ValueError(f"Field '{field}' must be an integer, not bool")
+    if isinstance(value, int):
+        coerced = value
+    elif isinstance(value, float):
+        if not _math.isfinite(value) or not value.is_integer():
+            raise ValueError(
+                f"Field '{field}' must be an integer or decimal integer string, "
+                f"got {value!r}"
+            )
+        coerced = int(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise ValueError(f"Field '{field}' cannot be empty")
+        if _BILLING_INT_RE.fullmatch(text) is None:
+            raise ValueError(
+                f"Field '{field}' must be a decimal integer string, got {value!r}"
+            )
+        try:
+            coerced = int(text, 10)
+        except ValueError as exc:
+            raise ValueError(
+                f"Field '{field}' must be a decimal integer string, got {value!r}"
+            ) from exc
+    else:
+        raise ValueError(
+            f"Field '{field}' must be an integer or decimal integer string, "
+            f"got {type(value).__name__}"
+        )
+    if coerced < minimum or coerced > maximum:
+        raise ValueError(
+            f"Field '{field}' out of range [{minimum}, {maximum}]: {coerced!r}"
+        )
+    return coerced
+
+
+def _billing_strict_amount(value):
+    import math as _math
+
+    if isinstance(value, bool):
+        raise ValueError("Field 'total_amount' must be a decimal, not bool")
+    if isinstance(value, float):
+        if not _math.isfinite(value):
+            raise ValueError(
+                f"Field 'total_amount' must be finite, got {value!r}"
+            )
+        amount = Decimal(str(value))
+    elif isinstance(value, int):
+        amount = Decimal(value)
+    elif isinstance(value, Decimal):
+        amount = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise ValueError("Field 'total_amount' cannot be empty")
+        if _BILLING_DECIMAL_RE.fullmatch(text) is None:
+            raise ValueError(
+                f"Field 'total_amount' must be a valid decimal, got {value!r}"
+            )
+        try:
+            amount = Decimal(text)
+        except Exception as exc:
+            raise ValueError(
+                f"Field 'total_amount' must be a valid decimal, got {value!r}"
+            ) from exc
+    else:
+        raise ValueError(
+            "Field 'total_amount' must be a decimal string, int or Decimal, "
+            f"got {type(value).__name__}"
+        )
+    if not amount.is_finite():
+        raise ValueError(f"Field 'total_amount' must be finite, got {value!r}")
+    if amount < 0:
+        raise ValueError(f"Field 'total_amount' must be >= 0, got {value!r}")
+    return amount
+
+
+def _validate_billing_payload(payload):
+    """Reject invalid billing payloads at the edge, before publishing."""
+    if not isinstance(payload, dict):
+        raise ValueError("Payload must be a JSON object")
+    for required in ("user_id", "number_of_items", "total_amount"):
+        if required not in payload:
+            raise ValueError(f"Missing required field: '{required}'")
+        if payload[required] is None:
+            raise ValueError(f"Field '{required}' cannot be null")
+    _billing_strict_int(
+        payload["user_id"], "user_id",
+        minimum=_BILLING_INT32_MIN, maximum=_BILLING_INT32_MAX,
+    )
+    _billing_strict_int(
+        payload["number_of_items"], "number_of_items",
+        minimum=0, maximum=_BILLING_INT32_MAX,
+    )
+    _billing_strict_amount(payload["total_amount"])
 
 
 def _sanitise_subpath(subpath: str) -> str | None:
@@ -187,9 +322,15 @@ def create_billing_order():
     if not data or not isinstance(data, dict):
         return jsonify({"error": "Valid JSON body is required"}), 400
 
+    try:
+        _validate_billing_payload(data)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
     raw_body = request.get_data(as_text=True).strip()
 
     try:
+        sender = get_sender()
         sender.publish_message(raw_body)
         logger.info(f"Billing message enqueued: {raw_body}")
         return jsonify({"message": f"{raw_body} sent"}), 200

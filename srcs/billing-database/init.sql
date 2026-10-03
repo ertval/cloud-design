@@ -23,7 +23,11 @@ SELECT format('GRANT ALL ON SCHEMA public TO %I', :'db_user') \gexec
 
 CREATE TABLE IF NOT EXISTS orders (
     id              SERIAL PRIMARY KEY,
-    user_id         VARCHAR(255)   NOT NULL,
+    -- INTEGER, not VARCHAR: the consumer coerces the queue payload's user_id
+    -- string ("20") to int before the insert (app/validation.py), so literal
+    -- SQL such as `SELECT * FROM orders WHERE user_id=20;` works. Must stay
+    -- in sync with the SQLAlchemy model in srcs/billing-app/app/orders.py.
+    user_id         INTEGER        NOT NULL,
     number_of_items INTEGER        NOT NULL,
     -- NUMERIC(12,2), never DOUBLE PRECISION: money must not accumulate
     -- IEEE-754 rounding drift. This must match `Numeric(12, 2)` in

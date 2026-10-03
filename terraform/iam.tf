@@ -11,7 +11,7 @@ resource "aws_iam_role" "ecs_task_execution" {
   name = "${local.name_prefix}-ecs-task-execution-role"
 
   assume_role_policy = jsonencode({
-    Version   = "2012-10-17"
+    Version = "2012-10-17"
     Statement = [
       {
         Action = "sts:AssumeRole"
@@ -40,7 +40,7 @@ resource "aws_iam_policy" "ecs_ecr_pull" {
   description = "Allows ECS tasks to pull container images from the project ECR repositories only"
 
   policy = jsonencode({
-    Version   = "2012-10-17"
+    Version = "2012-10-17"
     Statement = [
       {
         Effect = "Allow"
@@ -69,7 +69,7 @@ resource "aws_iam_policy" "ecs_secrets_access" {
   description = "Allows ECS tasks to read database and MQ credentials from Secrets Manager"
 
   policy = jsonencode({
-    Version   = "2012-10-17"
+    Version = "2012-10-17"
     Statement = [
       {
         Effect = "Allow"
@@ -110,7 +110,7 @@ resource "aws_iam_role" "ecs_task" {
   name = "${local.name_prefix}-ecs-task-role"
 
   assume_role_policy = jsonencode({
-    Version   = "2012-10-17"
+    Version = "2012-10-17"
     Statement = [
       {
         Action = "sts:AssumeRole"
@@ -130,7 +130,7 @@ resource "aws_iam_policy" "ecs_task_cloudwatch_policy" {
   description = "Allows containers to emit custom CloudWatch metrics and traces"
 
   policy = jsonencode({
-    Version   = "2012-10-17"
+    Version = "2012-10-17"
     Statement = [
       {
         # cloudwatch:PutMetricData and X-Ray APIs do not support
@@ -184,7 +184,7 @@ resource "aws_iam_role" "api_gateway_cloudwatch" {
   name = "${local.name_prefix}-apigw-cloudwatch-role"
 
   assume_role_policy = jsonencode({
-    Version   = "2012-10-17"
+    Version = "2012-10-17"
     Statement = [
       {
         Action = "sts:AssumeRole"

@@ -44,12 +44,9 @@ AMQPS_PORT = 5671            # the only listener Amazon MQ for RabbitMQ provides
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _FALSY = frozenset({"0", "false", "no", "off"})
 
-# Total budget for a single publish, in seconds. The audit requires a fast
-# HTTP 200 from the gateway; a client must never be left hanging on a dead
-# broker. Tuned so the worst case stays well under the gateway's own timeouts.
-PUBLISH_SOCKET_TIMEOUT = float(os.getenv("RABBITMQ_SOCKET_TIMEOUT") or "3")
-PUBLISH_MAX_RETRIES = int(os.getenv("RABBITMQ_PUBLISH_MAX_RETRIES") or "2")
-PUBLISH_RETRY_DELAY = float(os.getenv("RABBITMQ_RETRY_DELAY") or "1")
+# NOTE: PUBLISH_* budgets are defined AFTER the _env_* helpers below (not
+# here) so garbage values like RABBITMQ_SOCKET_TIMEOUT=abc fall back with a
+# warning instead of raising ValueError at import time.
 
 
 def _require_env(name: str) -> str:
@@ -109,6 +106,56 @@ def _env_flag(name: str) -> bool | None:
         f"expected one of {sorted(_TRUTHY | _FALSY)}. Falling back to auto-detection."
     )
     return None
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw.strip())
+    except ValueError:
+        logger.warning(f"Invalid value for {name}={raw!r}; falling back to {default}.")
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        logger.warning(f"Invalid value for {name}={raw!r}; falling back to {default}.")
+        return default
+
+
+# =============================================================================
+# Bounded publish budget - one POST /api/billing must fail fast, never hang.
+# Defaults: RABBITMQ_SOCKET_TIMEOUT=3, RABBITMQ_PUBLISH_MAX_RETRIES=2,
+#           RABBITMQ_RETRY_DELAY=1.
+# Worst-case wall time for publish_message():
+#     max_retries * socket_timeout + (max_retries - 1) * retry_delay
+#   = 2 * 3s + 1 * 1s = ~7s socket-bound (+ small AMQP handshake overhead).
+# DNS-down is slower: Docker's embedded DNS burns ~5s resolver timeout per
+# attempt, measured live at ~10s total (see docs/AUDIT_GUIDE.md §8.5) —
+# still bounded, not hung, and the read path is unaffected.
+# That stays well under the edge timeouts (nginx proxy_read_timeout 60s in
+# docker-compose.yml; waitress has no request timeout; the inventory upstream
+# path uses UPSTREAM_TIMEOUT=10s), so a dead broker surfaces as a prompt
+# HTTP 500 instead of a hung client.
+# Tradeoff vs play (5 retries / socket 5s / connection_attempts 3 with linear
+# backoff, worst case ~30s+): the smaller budget is LESS resilient to a
+# transient broker blip and will 500 where play would eventually succeed, but
+# it is what keeps the gateway's fast-200/500 contract. Do NOT raise these
+# without also raising the gateway/client timeouts above - a larger budget
+# just turns a dead broker into a hung request.
+# Each value is tolerant of garbage (e.g. "abc"): invalid input logs a
+# warning and falls back to the default instead of crashing at import.
+# =============================================================================
+PUBLISH_SOCKET_TIMEOUT = _env_float("RABBITMQ_SOCKET_TIMEOUT", 3.0)
+PUBLISH_MAX_RETRIES = _env_int("RABBITMQ_PUBLISH_MAX_RETRIES", 2)
+PUBLISH_RETRY_DELAY = _env_float("RABBITMQ_RETRY_DELAY", 1.0)
 
 
 def _resolve_amqp_target(raw_host: str, port: int) -> tuple[str, int, bool]:
@@ -187,8 +234,9 @@ def build_ssl_options(host: str) -> pika.SSLOptions:
             "Mount the CA bundle into the container or unset the variable to use "
             "the system trust store (see .env.example)."
         )
-    # cafile=None loads the platform default CA store; a supplied cafile adds
-    # trust for a private CA.
+    # cafile=None loads the platform default CA store; a supplied cafile
+    # REPLACES it, so the bundle must contain the full chain the broker may
+    # present.
     context = ssl.create_default_context(cafile=ca_file)
 
     if _env_flag("RABBITMQ_TLS_VERIFY") is False:
@@ -215,8 +263,9 @@ def ssl_options_for(raw_host: str, port: int) -> pika.SSLOptions | None:
     """Return SSLOptions for an AMQPS target, or None for plaintext AMQP.
 
     None is the signal pika itself uses for "no TLS", so returning it (rather
-    than a disabled context) is what keeps the plaintext path byte-identical to
-    the pre-TLS behaviour.
+    than a disabled context) is what keeps the plaintext path
+    behaviour-identical to the pre-TLS path except for the bounded
+    connection/publish timeouts.
     """
     host, _, _ = _resolve_amqp_target(raw_host, port)
     if not tls_enabled_for(raw_host, port):

@@ -34,7 +34,7 @@ locals {
 }
 
 resource "aws_secretsmanager_secret" "mq_credentials" {
-  name                    = "${local.name_prefix}-amazon-mq-credentials"
+  name = "${local.name_prefix}-amazon-mq-credentials"
   # FIX: this secret was the only one of the three with no CMK, so the broker
   # admin password sat under the AWS-managed aws/secretsmanager key while the
   # documentation claimed every credential was encrypted with the project's own

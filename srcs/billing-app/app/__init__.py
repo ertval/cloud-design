@@ -57,7 +57,11 @@ def create_app(stop_event=None):
     db_user = _require_env("BILLING_DB_USER")
     db_password = _require_env("BILLING_DB_PASSWORD")
     db_host = _env_or_default("BILLING_DB_HOST", "billing-database")
-    db_port = _env_or_default("BILLING_DB_PORT", "5432")
+    try:
+        db_port = int(_env_or_default("BILLING_DB_PORT", "5432"))
+    except ValueError:
+        logger.warning("Invalid BILLING_DB_PORT; falling back to 5432.")
+        db_port = 5432
     db_name = _env_or_default("BILLING_DB_NAME", "billing_db")
 
     # URL.create() percent-encodes the password; f-string interpolation would
@@ -83,8 +87,20 @@ def create_app(stop_event=None):
     # during a cold start would have to wait out the entire budget - up to
     # 180 x 2s = 360s - and be SIGKILLed (exit 137). Returns (None, None) so the
     # caller can exit 0 instead.
-    max_retries = int(_env_or_default("DB_CONNECT_MAX_RETRIES", "180"))
-    retry_delay = float(_env_or_default("DB_CONNECT_RETRY_DELAY", "2"))
+    #
+    # A malformed budget must not crash start-up either: a typo in the env var
+    # falls back to the documented default with a warning rather than raising
+    # ValueError out of the initialiser.
+    try:
+        max_retries = int(_env_or_default("DB_CONNECT_MAX_RETRIES", "180"))
+    except ValueError:
+        logger.warning("Invalid DB_CONNECT_MAX_RETRIES; falling back to 180.")
+        max_retries = 180
+    try:
+        retry_delay = float(_env_or_default("DB_CONNECT_RETRY_DELAY", "2"))
+    except ValueError:
+        logger.warning("Invalid DB_CONNECT_RETRY_DELAY; falling back to 2.")
+        retry_delay = 2.0
     session_factory = None
     for attempt in range(1, max_retries + 1):
         if stop_event is not None and stop_event.is_set():

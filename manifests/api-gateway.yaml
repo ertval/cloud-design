@@ -243,7 +243,7 @@ spec:
 # and silently never scales anything -- it does not error, it just does nothing,
 # which is the worst possible failure mode for a "we auto-scale" claim.
 #   k3d:   k3d cluster create <name> --servers 3
-#          kubectl apply -f https://github.com/k3s-io/metrics-server/releases/latest/download/metrics-server.yaml
+#          kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.8.0/components.yaml
 #   EKS:   already installed by default in most EKS clusters
 #          (if not: aws eks create-addon --cluster-name <c> --addon-name metrics-server)
 # Verify with:  kubectl top pods -n cloud-design

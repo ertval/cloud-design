@@ -32,8 +32,8 @@ variable "availability_zones" {
     name was previously the reason the stack failed to apply outside us-east-1.
     Must contain at least two entries (vpc.tf asserts this at plan time).
   EOT
-  type    = list(string)
-  default = []
+  type        = list(string)
+  default     = []
 
   validation {
     condition     = length(var.availability_zones) == 0 || length(var.availability_zones) >= 2
@@ -70,8 +70,8 @@ variable "single_nat_gateway" {
     any environment you intend to call highly available, and set it true only
     for a short-lived, disposable dev sandbox.
   EOT
-  type    = bool
-  default = false
+  type        = bool
+  default     = false
 }
 
 # ------------------------------------------------------------------------------
@@ -86,8 +86,8 @@ variable "enable_acm_certificate" {
     already own. The false path falls back to a self-signed certificate so
     `terraform apply` always succeeds.
   EOT
-  type    = bool
-  default = false
+  type        = bool
+  default     = false
 }
 
 variable "alb_domain_name" {
@@ -172,8 +172,8 @@ variable "ecs_use_fargate_spot" {
     an in-flight task. Deliberately false by default so the graded
     "Availability" and "Scalability" pillars are not undermined.
   EOT
-  type    = bool
-  default = false
+  type        = bool
+  default     = false
 }
 
 # ------------------------------------------------------------------------------
@@ -183,6 +183,42 @@ variable "autoscaling_target_cpu" {
   description = "Target average CPU utilization percentage for autoscaling trigger"
   type        = number
   default     = 60
+}
+
+variable "billing_app_min_capacity" {
+  description = <<-EOT
+    Minimum number of billing-app tasks - the only RabbitMQ consumer and the
+    only writer to the billing database. Never 1: a single consumer task is a
+    single point of failure for order processing, and with prefetch_count = 1
+    each task holds exactly one unacked message, so two tasks also drain the
+    queue in parallel. Scales on queue backlog, not CPU.
+  EOT
+  type        = number
+  default     = 2
+}
+
+variable "billing_app_max_capacity" {
+  description = <<-EOT
+    Maximum number of billing-app tasks. Bounded well above min_capacity so a
+    sustained write burst can be worked off, while still capping the blast
+    radius: every extra task is another writer against billing_db and another
+    connection in DatabaseConnections.
+  EOT
+  type        = number
+  default     = 6
+}
+
+variable "billing_queue_depth_target" {
+  description = <<-EOT
+    Target average AWS/AmazonMQ MessageCount for billing-app target tracking, in
+    messages. The backlog size at which one more consumer pays for itself. Keep
+    it comfortably above normal jitter so a quiet minute does not add capacity,
+    and below the point where customers notice order latency. NOTE: Amazon MQ
+    for RabbitMQ publishes no per-queue CloudWatch dimension, so this metric is
+    broker-level and approximates the depth of billing_queue.
+  EOT
+  type        = number
+  default     = 50
 }
 
 variable "log_retention_days" {
@@ -199,8 +235,8 @@ variable "alarm_email" {
     that silently swallowed every notification, so placeholder domains are now
     rejected at plan time by the validation block below.
   EOT
-  type    = string
-  default = ""
+  type        = string
+  default     = ""
 
   validation {
     condition     = var.alarm_email == "" || !can(regex("@(example|invalid|test)\\.(com|org|net|local)$", lower(var.alarm_email)))
@@ -291,8 +327,8 @@ variable "enable_demo_cognito_user" {
     up in Terraform state either way (this is why it is also offered as a
     sensitive input via demo_user_password).
   EOT
-  type    = bool
-  default = true
+  type        = bool
+  default     = true
 }
 
 variable "demo_user_email" {

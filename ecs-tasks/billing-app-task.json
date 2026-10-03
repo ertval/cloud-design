@@ -24,7 +24,7 @@
         { "name": "BILLING_DB_PORT", "value": "5432" },
         { "name": "BILLING_DB_NAME", "value": "billing_db" },
         { "name": "RABBITMQ_HOST", "value": "b-12345678.mq.us-east-1.amazonaws.com" },
-        { "name": "RABBITMQ_PORT", "value": "5672" },
+        { "name": "RABBITMQ_PORT", "value": "5671" },
         { "name": "RABBITMQ_QUEUE", "value": "billing_queue" }
       ],
       "secrets": [

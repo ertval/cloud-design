@@ -5,11 +5,13 @@ set -uo pipefail
 # cloud-design - deploy to a LOCAL k3d cluster (no AWS account required)
 # ==============================================================================
 # WHY THIS EXISTS
-#   The AWS path in scripts/deploy.sh needs `aws` + `terraform`, neither of which
-#   is installed in this environment, so it cannot be demonstrated here. A local
-#   k3d cluster CAN be, and it is the only orchestrator in this repository that
-#   an examiner can actually watch converge. This script deploys the real
-#   manifests/ to a real cluster, for real.
+#   The AWS path in scripts/deploy.sh needs a *deployed account* (`aws sts
+#   get-caller-identity`), which this environment does not have, so it cannot be
+#   demonstrated here. `aws` and `terraform` themselves ARE installed and
+#   `terraform validate` passes - what is missing is credentials, not binaries.
+#   A local k3d cluster CAN be demonstrated, and it is the only orchestrator in
+#   this repository that an examiner can actually watch converge. This script
+#   deploys the real manifests/ to a real cluster, for real.
 #
 # WHAT IT DOES
 #   0. checks k3d / kubectl / docker, hard-fails on anything missing
@@ -118,15 +120,22 @@ if [ "${CLUSTER_EXISTS}" -eq 0 ] && [ "${REUSE}" -eq 0 ]; then
     # mandatory: an HPA without it reports <unknown> scaling active=false and
     # silently never scales, which is the worst possible failure mode for a
     # "we auto-scale" claim (documented in manifests/api-gateway.yaml).
+    #
+    # The `@server:*` suffix on --k3s-arg is a node filter and is REQUIRED from
+    # k3d v5.7: a bare --k3s-arg that would apply to more than one node is
+    # rejected with "K3sExtraArg ... lacks a node filter, but there's more than
+    # one node", so cluster creation dies before it starts. It targets every
+    # server node (all of which run the apiserver, so they must agree on
+    # service-node-port-range).
     ${K3D} cluster create "${CLUSTER_NAME}" \
       --servers 3 \
       --kubeconfig-update-default \
-      --k3s-arg '--kube-apiserver-arg=service-node-port-range=30000-32767' \
+      --k3s-arg '--kube-apiserver-arg=service-node-port-range=30000-32767@server:*' \
       || die "k3d cluster create failed"
     echo "  [ok]   cluster created"
 
     echo "  [..]   installing metrics-server (required by the HPAs)"
-    kubectl apply -f https://github.com/k3s-io/metrics-server/releases/latest/download/metrics-server.yaml \
+    kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.8.0/components.yaml \
       || die "metrics-server install failed -- the HPAs would silently never scale"
     kubectl -n kube-system rollout status deploy/metrics-server --timeout=180s \
       || echo "  [WARN] metrics-server did not become ready in time; HPAs may report <unknown>"
@@ -158,20 +167,57 @@ if [ "${DRY_RUN}" -eq 1 ]; then
   echo "  [--]   DRY RUN: not importing images"
 else
   IMAGES=()
+  # IMAGE NAME DRIFT, made explicit. The build produces one image per srcs/
+  # DIRECTORY (cloud-design/api-gateway-app, cloud-design/rabbit-queue), while
+  # the manifests reference the SERVICE names used on AWS
+  # (cloud-design/api-gateway, cloud-design/rabbitmq). Two of the six differ, so
+  # tagging by directory name silently produces an image the kubelet never asks
+  # for and the pod sits in ImagePullBackOff forever.
+  #   srcs directory        manifest image name
+  alias_image_name() {
+    case "$1" in
+      api-gateway-app) echo "api-gateway"   ;;
+      rabbit-queue)     echo "rabbitmq"      ;;
+      *)                echo "$1"            ;;
+    esac
+  }
   for d in "$ROOT_DIR"/srcs/*/; do
     [ -d "$d" ] || continue
     c="$(basename "$d")"
     # The manifests reference the ':latest' tag with imagePullPolicy IfNotPresent,
     # so that is the tag that must exist on the node.
     if docker image inspect "cloud-design/${c}:local" >/dev/null 2>&1; then
-      docker tag "cloud-design/${c}:local" "cloud-design/${c}:latest"
-      IMAGES+=("cloud-design/${c}:latest")
+      name="$(alias_image_name "${c}")"
+      docker tag "cloud-design/${c}:local" "cloud-design/${name}:latest"
+      IMAGES+=("cloud-design/${name}:latest")
     else
       die "cloud-design/${c}:local is missing; run ./scripts/build_push.sh first"
     fi
   done
+
+  # Guard: every image the manifests actually reference must now exist locally.
+  # Without this the failure surfaces much later as ImagePullBackOff, which looks
+  # like a cluster problem instead of a naming one.
+  MISSING_IMG=()
+  while read -r ref; do
+    [ -n "${ref}" ] || continue
+    docker image inspect "${ref}" >/dev/null 2>&1 || MISSING_IMG+=("${ref}")
+  done <<EOF
+$(grep -rhoE 'image:[[:space:]]*cloud-design/[a-z0-9-]+:latest' "${MAN_DIR}"/*.yaml 2>/dev/null \
+   | sed -E 's/image:[[:space:]]*//' | sort -u)
+EOF
+  if [ "${#MISSING_IMG[@]}" -gt 0 ]; then
+    die "the manifests reference image(s) that do not exist locally: ${MISSING_IMG[*]} -- fix the mapping in Step 3 of this script"
+  fi
+  echo "  [ok]   every image referenced by manifests/ exists locally"
+
   echo "  importing ${#IMAGES[@]} image(s): ${IMAGES[*]}"
-  ${K3D} image import "${CLUSTER_NAME}" "${IMAGES[@]}" \
+  # `-c/--cluster` is REQUIRED and must be a FLAG. In k3d v5.9 the positional
+  # cluster argument is silently ignored, so `k3d image import cd-audit img:tag`
+  # falls back to the built-in default and fails with
+  #   "failed to get cluster k3s-default: No nodes found for given cluster"
+  # even though cd-audit exists and is running. Verified against v5.9.0.
+  ${K3D} image import -c "${CLUSTER_NAME}" "${IMAGES[@]}" \
     || die "k3d image import failed -- pods would fall back to imagePullBackOff"
   echo "  [ok]   images imported into the cluster"
 fi

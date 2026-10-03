@@ -157,6 +157,7 @@ paths:
         - name: id
           in: path
           required: true
+          description: Canonical decimal integer string (no leading zeros, no plus sign). Non-canonical values (007, +5, abc) return JSON 404 via the string guard, not a type error.
           schema:
             type: integer
       responses:
@@ -174,6 +175,7 @@ paths:
         - name: id
           in: path
           required: true
+          description: Canonical decimal integer string (no leading zeros, no plus sign). Non-canonical values (007, +5, abc) return JSON 404 via the string guard, not a type error.
           schema:
             type: integer
       requestBody:
@@ -219,6 +221,7 @@ paths:
         - name: id
           in: path
           required: true
+          description: Canonical decimal integer string (no leading zeros, no plus sign). Non-canonical values (007, +5, abc) return JSON 404 via the string guard, not a type error.
           schema:
             type: integer
       responses:
