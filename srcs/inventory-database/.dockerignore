@@ -1,0 +1,6 @@
+# Allowlist build context: the data image needs exactly two files.
+# `docker build` still reads the Dockerfile itself, so excluding it here is safe
+# and it is never part of the context sent to the daemon.
+*
+!init-db.sh
+!init.sql

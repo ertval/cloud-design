@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify
 from app.extensions import db
+from app.validation import validate_movie_payload
 
 movies_bp = Blueprint("movies", __name__, url_prefix="/api/movies")
 
@@ -29,14 +30,12 @@ def list_movies():
 
 @movies_bp.route("", methods=["POST"], strict_slashes=False)
 def create_movie():
-    data = request.get_json(force=True, silent=True)
-    if not data or "title" not in data or not str(data["title"]).strip():
-        return jsonify({"error": "Field 'title' is required"}), 400
+    try:
+        title, description = validate_movie_payload(request.get_json(force=True, silent=True))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
-    movie = Movie(
-        title=str(data["title"]).strip(),
-        description=str(data.get("description", "")).strip() if data.get("description") is not None else ""
-    )
+    movie = Movie(title=title, description=description)
     db.session.add(movie)
     db.session.commit()
     return jsonify(movie.to_dict()), 200
@@ -55,16 +54,18 @@ def update_movie(movie_id):
         return jsonify({"error": f"Movie with ID {movie_id} not found"}), 404
 
     data = request.get_json(force=True, silent=True)
-    if not data:
+    if not isinstance(data, dict) or not data:
         return jsonify({"error": "Invalid or missing JSON payload"}), 400
 
+    # Title stays optional here (partial update), but must not be blanked out.
     if "title" in data:
-        if not str(data["title"]).strip():
-            return jsonify({"error": "Field 'title' cannot be empty"}), 400
-        movie.title = str(data["title"]).strip()
+        try:
+            movie.title, _ = validate_movie_payload(data)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
 
     if "description" in data:
-        movie.description = str(data.get("description", "")).strip()
+        _, movie.description = validate_movie_payload(data, require_title=False)
 
     db.session.commit()
     return jsonify(movie.to_dict()), 200
@@ -81,6 +82,16 @@ def delete_movie(movie_id):
 
 @movies_bp.route("", methods=["DELETE"], strict_slashes=False)
 def delete_all_movies():
+    # Destructive and reachable unauthenticated through the public gateway, so it
+    # requires an explicit opt-in. DELETE /api/movies by itself must not wipe the
+    # catalogue: one stray request would destroy the data an evaluator is
+    # inspecting. Delete a single row with DELETE /api/movies/<id>.
+    if request.args.get("confirm") != "all":
+        return jsonify({
+            "error": "Refusing to delete the whole catalogue without confirmation",
+            "hint": "Re-run with ?confirm=all, or delete a single movie with DELETE /api/movies/<id>"
+        }), 400
+
     deleted_count = db.session.query(Movie).delete()
     db.session.commit()
     return jsonify({"message": f"All {deleted_count} movies deleted"}), 200

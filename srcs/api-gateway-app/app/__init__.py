@@ -4,12 +4,19 @@ from logging.handlers import RotatingFileHandler
 from flask import Flask, jsonify, render_template_string, send_from_directory
 from app.proxy import proxy_bp
 
+MAX_CONTENT_LENGTH = 1 * 1024 * 1024
+SWAGGER_UI_VERSION = "5.33.0"
+
 def setup_logging():
     log_format = "%(asctime)s [%(levelname)s] [api-gateway-app] %(message)s"
     formatter = logging.Formatter(log_format)
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
+
+    # pika logs every socket read/write at INFO, which buries the gateway's own
+    # request lines in the rotated volume log.
+    logging.getLogger("pika").setLevel(logging.WARNING)
 
     # Avoid adding duplicate handlers if reinitialized
     if not root_logger.handlers:
@@ -39,12 +46,16 @@ SWAGGER_UI_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="utf-8" />
   <title>Play with Containers - API Gateway</title>
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@%s/swagger-ui.css" />
   <style>body { margin: 0; background: #fafafa; }</style>
 </head>
 <body>
+  <p style="font-family: sans-serif; padding: 0.5rem 1rem; background: #fff3cd;">
+    The Swagger UI assets are loaded from unpkg.com (pinned to %s), so this page
+    renders blank until the browser can reach the internet once.
+  </p>
   <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script src="https://unpkg.com/swagger-ui-dist@%s/swagger-ui-bundle.js"></script>
   <script>
     window.onload = () => {
       window.ui = SwaggerUIBundle({
@@ -61,11 +72,12 @@ SWAGGER_UI_HTML = """<!DOCTYPE html>
   </script>
 </body>
 </html>
-"""
+""" % (SWAGGER_UI_VERSION, SWAGGER_UI_VERSION, SWAGGER_UI_VERSION)
 
 def create_app():
     setup_logging()
     app = Flask(__name__)
+    app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
 
     app.register_blueprint(proxy_bp)
 

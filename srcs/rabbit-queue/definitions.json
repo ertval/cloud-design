@@ -1,0 +1,42 @@
+{
+  "_comment": [
+    "Credential-free description of the broker topology this stack expects.",
+    "This file is the auditable reference for what entrypoint.sh creates at",
+    "runtime. It is intentionally NOT imported with `rabbitmqctl import_definitions`:",
+    "a definitions file must embed a password hash, and that would put a",
+    "credential in version control, which the audit explicitly forbids.",
+    "Credentials come from RABBITMQ_USER / RABBITMQ_PASSWORD in the environment",
+    "(compose `.env`, or a k8s secretKeyRef) and are applied by entrypoint.sh,",
+    "which verifies them with `rabbitmqctl authenticate_user` before writing the",
+    "/tmp/rabbit-queue-ready sentinel.",
+    "REPLACE_ME_* values below are placeholders, not secrets."
+  ],
+  "rabbit_version": "3.13",
+  "vhosts": [
+    {
+      "name": "/",
+      "description": "Default vhost used by the gateway publisher and the billing consumer"
+    }
+  ],
+  "policies": [
+    {
+      "vhost": "/",
+      "user": "REPLACE_ME_RABBITMQ_USER",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
+  "queues": [
+    {
+      "name": "billing_queue",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    }
+  ],
+  "exchanges": [],
+  "bindings": [],
+  "topic_permissions": []
+}

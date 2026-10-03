@@ -28,7 +28,10 @@ paths:
   /api/movies:
     get:
       summary: List all movies
-      description: Returns all movie items with optional case-insensitive substring search by title.
+      description: |
+        Returns all movie items with optional case-insensitive substring search by title.
+        The trailing-slash form `/api/movies/` is equivalent and is the spelling used
+        by the audit checklist.
       parameters:
         - name: title
           in: query
@@ -48,6 +51,12 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/Movie'
+        '502':
+          description: The inventory service could not be reached.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
     post:
       summary: Create a new movie
       description: Adds a new movie record to the inventory database.
@@ -75,9 +84,28 @@ paths:
                 $ref: '#/components/schemas/Movie'
         '400':
           description: Missing or invalid title
+        '502':
+          description: |
+            The inventory service could not be reached. The gateway retries the
+            upstream call a bounded number of times before returning this.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
     delete:
-      summary: Delete all movies
-      description: Clears all movies from the inventory database.
+      summary: Delete all movies (requires ?confirm=all)
+      description: >-
+        Clears all movies from the inventory database. Destructive and
+        unauthenticated, so it is refused unless the caller passes ?confirm=all.
+        Delete a single movie with DELETE /api/movies/{id}.
+      parameters:
+        - name: confirm
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ['all']
+          description: Must be exactly `all` for the catalogue to be cleared.
       responses:
         '200':
           description: All movies deleted
@@ -89,6 +117,8 @@ paths:
                   message:
                     type: string
                     example: All 5 movies deleted
+        '400':
+          description: Missing ?confirm=all
 
   /api/movies/{id}:
     get:
@@ -158,10 +188,16 @@ paths:
         '404':
           description: Movie not found
 
-  /api/billing/:
+  /api/billing:
     post:
       summary: Submit billing order
-      description: Enqueues a new order message into RabbitMQ for asynchronous billing processing.
+      description: |
+        Enqueues a new order message into RabbitMQ for asynchronous billing
+        processing. The trailing-slash form `/api/billing/` is equivalent and is
+        the spelling used by the audit checklist. The gateway does not wait for
+        the consumer, so this returns 200 even when `billing-app` is stopped; the
+        order is buffered in the durable queue and persisted once the worker
+        returns.
       requestBody:
         required: true
         content:
@@ -200,6 +236,12 @@ paths:
 
 components:
   schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          example: Inventory service unavailable
     Movie:
       type: object
       properties:

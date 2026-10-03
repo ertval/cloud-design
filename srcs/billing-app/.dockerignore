@@ -1,0 +1,22 @@
+# Keep the build context to the files the image actually needs. Everything below
+# is either regenerated at build time or belongs to the host, so shipping it
+# would only slow the context transfer and bust the layer cache.
+**/__pycache__/
+__pycache__/
+*.py[cod]
+**/*.py[cod]
+*.so
+**/*.so
+.pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+**/.mypy_cache/
+tests/
+**/tests/
+*.md
+README*
+.env
+.env.*
+Dockerfile*
+.dockerignore
+.dockerignore.*

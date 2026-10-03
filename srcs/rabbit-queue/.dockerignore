@@ -1,0 +1,3 @@
+# Allowlist build context: the broker image needs exactly one file.
+*
+!entrypoint.sh

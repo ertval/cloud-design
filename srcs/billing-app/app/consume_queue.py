@@ -1,31 +1,289 @@
 import os
+import ssl
 import json
 import time
 import logging
+import signal
+import threading
 import pika
 from app.orders import Order
+from app.validation import InvalidOrderError, coerce_order_payload
 
 logger = logging.getLogger(__name__)
 
+# =============================================================================
+# AMQPS / TLS - ONE rule, implemented identically in
+#   srcs/api-gateway-app/app/queue_sender.py  (publisher)
+#   srcs/billing-app/app/consume_queue.py    (consumer)
+# The publisher and the consumer MUST agree on the connection mode: a plaintext
+# publisher against a TLS-only broker drops orders, and a plaintext consumer
+# against the same broker reconnects forever. Both files therefore derive the
+# mode from the same rule and the same environment variables.
+#
+#   TLS is ON  if  RABBITMQ_TLS is explicitly truthy ("1"/"true"/"yes"/"on"),
+#               OR RABBITMQ_TLS is unset/blank AND the target implies TLS:
+#                   * the effective port is 5671 (the AMQPS port), OR
+#                   * RABBITMQ_HOST carried an "amqps://" scheme.
+#
+#   TLS is OFF if  RABBITMQ_TLS is explicitly falsy ("0"/"false"/"no"/"off"),
+#               OR the target does not imply TLS.
+#
+# Why 5671 is the load-bearing signal: terraform/amazon_mq.tf strips the scheme
+# and the port off the AWS endpoint, so on ECS RABBITMQ_HOST is a BARE hostname
+# (b-xxxx.mq.<region>.amazonaws.com) and RABBITMQ_PORT=5671 is the only signal
+# left to detect. Amazon MQ for RabbitMQ has NO plaintext listener at all, so
+# without this rule this consumer would reconnect in a loop forever against a
+# plaintext AMQP greeting and no order would ever reach PostgreSQL.
+#
+# Locally (docker-compose.yml) RABBITMQ_HOST=rabbit-queue, RABBITMQ_PORT=5672
+# and RABBITMQ_TLS is unset, so the rule resolves to plaintext 5672 and the
+# local stack behaves exactly as it did before.
+#
+# Certificate verification is ON unless RABBITMQ_TLS_VERIFY is explicitly
+# falsy - see build_ssl_options(). Disabling it by default would reintroduce
+# the very defect this change exists to fix.
+# =============================================================================
+
+DEFAULT_AMQP_PORT = 5672
+AMQPS_PORT = 5671            # the only listener Amazon MQ for RabbitMQ provides
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_FALSY = frozenset({"0", "false", "no", "off"})
+
+
+def _require_env(name: str) -> str:
+    """Return required secret env var or raise (no hardcoded fallback for secrets)."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"Missing required secret environment variable: {name}. "
+            "Set it via .env / compose environment (see .env.example)."
+        )
+    return value.strip()
+
+
+def _env_or_default(name: str, default: str) -> str:
+    """Non-secret setting with a safe default.
+
+    `os.getenv(name, default)` is not enough: Docker Compose interpolates an
+    *undefined* variable as an empty string, which would defeat the default.
+    """
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip()
+
+
+def _env_port(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        logger.warning(f"Invalid value for {name}={raw!r}; falling back to {default}.")
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw.strip())
+    except ValueError:
+        logger.warning(f"Invalid value for {name}={raw!r}; falling back to {default}.")
+        return default
+
+
+def _env_flag(name: str) -> bool | None:
+    """Three-state flag: True, False, or None when unset/blank/unrecognised.
+
+    None is deliberately distinct from False. It is what lets auto-detection
+    tell "the operator explicitly said no TLS" apart from "the operator said
+    nothing", which is the difference between honouring RABBITMQ_TLS=false and
+    falling back to the port heuristic.
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    value = raw.strip().lower()
+    if value in _TRUTHY:
+        return True
+    if value in _FALSY:
+        return False
+    logger.warning(
+        f"Ignoring unrecognised value {raw!r} for {name}; "
+        f"expected one of {sorted(_TRUTHY | _FALSY)}. Falling back to auto-detection."
+    )
+    return None
+
+
+def _resolve_amqp_target(raw_host: str, port: int) -> tuple[str, int, bool]:
+    """Normalise RABBITMQ_HOST / RABBITMQ_PORT into (host, port, scheme_is_tls).
+
+    pika wants a bare hostname and an integer port. Handing it
+    "amqps://broker:5671" fails as a DNS lookup error rather than a TLS error,
+    which hides the real fault, so the scheme is stripped here. A port carried
+    inside the URL is adopted rather than ignored: silently connecting to 5672
+    when the operator wrote 5671 is exactly the failure being fixed.
+    """
+    host = raw_host.strip()
+    scheme_is_tls = host.lower().startswith("amqps://")
+    if "://" in host:
+        host = host.split("://", 1)[1]
+
+    # Split a trailing ":port" off the host, leaving a bracketed IPv6 literal
+    # such as "[::1]:5671" intact - a naive rpartition(":") would corrupt it.
+    port_in_host: str | None = None
+    if host.startswith("["):
+        literal, bracket, remainder = host.partition("]")
+        if remainder.startswith(":"):
+            host, port_in_host = literal + bracket, remainder[1:]
+    elif host.count(":") == 1:
+        candidate_host, _, candidate_port = host.partition(":")
+        if candidate_port.strip().isdigit():
+            host, port_in_host = candidate_host, candidate_port.strip()
+
+    if port_in_host:
+        port = int(port_in_host)
+    return host, port, scheme_is_tls
+
+
+def tls_enabled_for(raw_host: str, port: int) -> bool:
+    """Return the connection mode from THE rule documented at the top of this file.
+
+    Explicit RABBITMQ_TLS wins in both directions; when it is absent the target
+    decides, so an operator only has to set the host and port that Terraform
+    already injects.
+    """
+    _, effective_port, scheme_is_tls = _resolve_amqp_target(raw_host, port)
+    override = _env_flag("RABBITMQ_TLS")
+    if override is not None:
+        return override
+    return scheme_is_tls or effective_port == AMQPS_PORT
+
+
+def build_ssl_options(host: str) -> pika.SSLOptions:
+    """Build `pika.SSLOptions` with certificate verification ENABLED.
+
+    * `ssl.create_default_context()` yields check_hostname=True and
+      verify_mode=CERT_REQUIRED, so an expired, self-signed or wrong-name
+      certificate is rejected. That is what keeps the AMQP password and the
+      queued orders confidential and untamperable in transit.
+    * `RABBITMQ_CA_FILE` supplies a private/self-signed CA bundle for a broker
+      that no public authority vouches for. It REPLACES the default trust
+      store, so it must contain every CA the broker may present. Leave it unset
+      on AWS: an Amazon MQ certificate chains to the public Amazon Trust
+      Services CA, which the system store already contains.
+    * `pika.SSLOptions(context, host)` puts the broker hostname into SNI and
+      into the certificate hostname check, so TLS cannot succeed against a
+      certificate issued for a different name.
+    * `RABBITMQ_TLS_VERIFY` is the only opt-out and it is INSECURE: with it
+      falsy, check_hostname and verify_mode are both cleared, so ANY certificate
+      from ANY holder is accepted and an attacker can impersonate the broker,
+      read the credentials and read or alter queued orders. Off by default; for
+      a throwaway lab broker with a self-signed cert only.
+    """
+    ca_file = os.getenv("RABBITMQ_CA_FILE")
+    ca_file = ca_file.strip() if ca_file and ca_file.strip() else None
+    if ca_file is not None and not os.path.isfile(ca_file):
+        # Raised, not warned: an unreadable CA bundle would otherwise surface
+        # later as an opaque "certificate verify failed" on the first publish.
+        raise RuntimeError(
+            f"RABBITMQ_CA_FILE points at {ca_file!r}, which is not a readable file. "
+            "Mount the CA bundle into the container or unset the variable to use "
+            "the system trust store (see .env.example)."
+        )
+    # cafile=None loads the platform default CA store; a supplied cafile adds
+    # trust for a private CA.
+    context = ssl.create_default_context(cafile=ca_file)
+
+    if _env_flag("RABBITMQ_TLS_VERIFY") is False:
+        logger.warning(
+            "INSECURE: RABBITMQ_TLS_VERIFY is falsy, so the broker certificate "
+            "and hostname are NOT verified. Any man-in-the-middle can impersonate "
+            "the broker and read the AMQP credentials and queued orders. Use only "
+            "against a local test broker with a self-signed certificate."
+        )
+        # check_hostname must be cleared BEFORE verify_mode: Python refuses
+        # verify_mode=CERT_NONE while check_hostname is still True.
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+
+    logger.info(
+        f"TLS enabled for {host}: context={context.__class__.__name__} "
+        f"check_hostname={context.check_hostname} verify_mode={context.verify_mode} "
+        f"ca_file={ca_file or 'system default'}"
+    )
+    return pika.SSLOptions(context, host)
+
+
+def ssl_options_for(raw_host: str, port: int) -> pika.SSLOptions | None:
+    """Return SSLOptions for an AMQPS target, or None for plaintext AMQP.
+
+    None is the signal pika itself uses for "no TLS", so returning it (rather
+    than a disabled context) is what keeps the plaintext path byte-identical to
+    the pre-TLS behaviour.
+    """
+    host, _, _ = _resolve_amqp_target(raw_host, port)
+    if not tls_enabled_for(raw_host, port):
+        return None
+    return build_ssl_options(host)
+
+
+# Pause before requeueing a message whose database write failed. With
+# prefetch_count=1 this is what turns a database outage into a slow retry
+# loop instead of a hot spin.
+REDELIVERY_BACKOFF_SECONDS = _env_float("REDELIVERY_BACKOFF_SECONDS", 5.0)
+
+
 def start_consuming(db_session_factory, stop_event=None):
-    rabbitmq_host = os.getenv("RABBITMQ_HOST", "rabbit-queue")
-    rabbitmq_port = int(os.getenv("RABBITMQ_PORT", "5672"))
-    rabbitmq_user = os.getenv("RABBITMQ_USER", "rabbit_user")
-    rabbitmq_password = os.getenv("RABBITMQ_PASSWORD", "rabbit_password")
-    queue_name = os.getenv("RABBITMQ_QUEUE", "billing_queue")
+    """Consume billing orders from RabbitMQ until `stop_event` is set.
+
+    The consumer runs as PID 1's worker thread. On SIGTERM the process must stop
+    cleanly: leaving `stop_event` unset means the loop never terminates, Docker
+    waits out its 10 s grace period and SIGKILLs the container (exit 137).
+    """
+    if stop_event is None:
+        stop_event = threading.Event()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, lambda *_: (
+                logger.info("Shutdown signal received; stopping queue consumer"),
+                stop_event.set(),
+            ))
+
+    # Non-secrets keep safe defaults; secrets MUST come from env.
+    raw_host = _env_or_default("RABBITMQ_HOST", "rabbit-queue")
+    raw_port = _env_port("RABBITMQ_PORT", DEFAULT_AMQP_PORT)
+    rabbitmq_user = _require_env("RABBITMQ_USER")
+    rabbitmq_password = _require_env("RABBITMQ_PASSWORD")
+    queue_name = _env_or_default("RABBITMQ_QUEUE", "billing_queue")
+
+    # Resolved once, before the loop: an unreadable CA bundle must fail loudly
+    # here rather than as a reconnect loop that silently consumes no orders.
+    rabbitmq_host, rabbitmq_port, _ = _resolve_amqp_target(raw_host, raw_port)
+    ssl_options = ssl_options_for(raw_host, raw_port)
 
     credentials = pika.PlainCredentials(rabbitmq_user, rabbitmq_password)
     parameters = pika.ConnectionParameters(
         host=rabbitmq_host,
         port=rabbitmq_port,
         credentials=credentials,
+        # None means plaintext AMQP; an SSLOptions instance switches pika to an
+        # AMQPS handshake with verification. Derived from RABBITMQ_TLS /
+        # RABBITMQ_PORT by the rule at the top of this file, which the gateway
+        # applies identically - a mismatch here is what silently loses orders.
+        ssl_options=ssl_options,
         heartbeat=60,
         blocked_connection_timeout=300
     )
 
-    logger.info(f"Billing consumer starting up. Target queue: {queue_name} on {rabbitmq_host}:{rabbitmq_port}")
+    logger.info(
+        f"Billing consumer starting up. Target queue: {queue_name} on "
+        f"{rabbitmq_host}:{rabbitmq_port} tls={'on' if ssl_options else 'off'}"
+    )
 
-    while stop_event is None or not stop_event.is_set():
+    while not stop_event.is_set():
         connection = None
         try:
             logger.info("Attempting connection to RabbitMQ broker...")
@@ -38,7 +296,19 @@ def start_consuming(db_session_factory, stop_event=None):
 
             logger.info(f"Connected to RabbitMQ. Waiting for billing messages on '{queue_name}'...")
 
-            def callback(ch, method, properties, body):
+            def _handle_message(ch, method, body):
+                """Parse, validate and persist one delivery.
+
+                Acknowledgement policy (this is what guarantees at-least-once):
+                  * ack   -> the order is durably committed to PostgreSQL, OR the
+                             payload is a permanent poison message (non-JSON /
+                             missing user_id) that can never succeed.
+                  * nack  -> the database could not be written, or shutdown was
+                             requested mid-flight. The message goes back on the
+                             queue so it is retried once the DB recovers.
+                             Acknowledging here instead would silently lose the
+                             order.
+                """
                 logger.info(f"Received raw message delivery #{method.delivery_tag}: {body.decode('utf-8', errors='replace')}")
                 try:
                     payload = json.loads(body.decode("utf-8"))
@@ -49,22 +319,20 @@ def start_consuming(db_session_factory, stop_event=None):
 
                 # Robust type coercion according to contract
                 try:
-                    if not isinstance(payload, dict):
-                        raise ValueError("Payload must be a JSON object")
-                    user_id = str(payload.get("user_id", "")).strip()
-                    number_of_items = int(payload.get("number_of_items", 0))
-                    total_amount = float(payload.get("total_amount", 0.0))
-
-                    if not user_id:
-                        raise ValueError("user_id cannot be empty")
-                except Exception as parse_err:
+                    user_id, number_of_items, total_amount = coerce_order_payload(payload)
+                except InvalidOrderError as parse_err:
                     logger.error(f"Invalid order fields in payload {payload}: {parse_err}. Acknowledging and discarding poison message.")
                     ch.basic_ack(delivery_tag=method.delivery_tag)
                     return
 
                 # Persist order to billing database with bounded retries
                 db_success = False
+                last_db_error = None
                 for retry in range(5):
+                    if stop_event.is_set():
+                        logger.info("Shutdown requested mid-retry; nacking message for redelivery")
+                        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                        return
                     session = db_session_factory()
                     try:
                         order = Order(
@@ -79,23 +347,69 @@ def start_consuming(db_session_factory, stop_event=None):
                         break
                     except Exception as db_err:
                         session.rollback()
+                        last_db_error = db_err
                         logger.warning(f"Database insertion retry {retry + 1}/5 failed: {db_err}")
                         time.sleep(1)
                     finally:
                         session.close()
 
-                # Always acknowledge once handled (or if persistent DB failures exceeded limit, log and ack to maintain queue flow)
-                ch.basic_ack(delivery_tag=method.delivery_tag)
-                if not db_success:
-                    logger.error(f"Failed to persist order after retries. Payload: {payload}")
+                if db_success:
+                    # Acknowledge only after the transaction is committed, so a crash
+                    # before this point causes RabbitMQ to redeliver the order.
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                else:
+                    # Never ack a failed insert: that would silently discard a
+                    # customer order. Requeue so another worker (or a later
+                    # delivery of this same message) can process it.
+                    logger.error(
+                        f"Failed to persist order for user '{user_id}' after 5 attempts "
+                        f"({last_db_error}). Nacking back to '{queue_name}' for redelivery "
+                        f"once the database is reachable - the order is NOT lost."
+                    )
+                    # Throttle before requeueing: with prefetch_count=1 an immediate
+                    # redelivery would otherwise spin in a tight loop against a
+                    # database that is still down.
+                    time.sleep(REDELIVERY_BACKOFF_SECONDS)
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+
+            def callback(ch, method, properties, body):
+                # Safety net: ANY escaping exception must nack+requeue, never
+                # ack. An unconditional ack here would silently destroy the order.
+                try:
+                    _handle_message(ch, method, body)
+                except Exception as handler_err:
+                    logger.exception(f"Unhandled error while processing delivery #{method.delivery_tag}: {handler_err}")
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
 
             channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=False)
+
+            # `start_consuming()` blocks this thread in the AMQP socket read and
+            # never checks stop_event, so a shutdown request would otherwise be
+            # ignored until the next message arrived. A watcher thread closes
+            # the loop through pika's thread-safe callback mechanism.
+            def _stop_on_shutdown():
+                stop_event.wait()
+                try:
+                    connection.add_callback_threadsafe(channel.stop_consuming)
+                except Exception as e:
+                    logger.debug(f"Could not schedule stop_consuming: {e}")
+
+            threading.Thread(
+                target=_stop_on_shutdown,
+                daemon=True,
+                name="BillingQueueShutdownWatcher"
+            ).start()
+
             channel.start_consuming()
 
         except (pika.exceptions.AMQPConnectionError, pika.exceptions.AMQPChannelError) as amqp_err:
+            if stop_event.is_set():
+                break
             logger.warning(f"RabbitMQ connection lost/unavailable: {amqp_err}. Retrying in 3 seconds...")
             time.sleep(3)
         except Exception as e:
+            if stop_event.is_set():
+                break
             logger.error(f"Unexpected error in consumer loop: {e}. Retrying in 3 seconds...")
             time.sleep(3)
         finally:
@@ -105,3 +419,4 @@ def start_consuming(db_session_factory, stop_event=None):
                 except Exception:
                     pass
 
+    logger.info("Billing queue consumer stopped cleanly.")
