@@ -64,6 +64,11 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
+# KEEP `|| true`: `command -v` exits 1 when the OPTIONAL tool is absent, and an
+# absent k3d is a supported configuration here (teardown of an EKS/ECS stack, or
+# of a cluster that was never created locally). The absence is handled explicitly
+# a few lines below by branching on the empty K3D, so swallowing the exit status
+# does not swallow a failure.
 [ -x "${K3D}" ] || K3D="$(command -v k3d 2>/dev/null || true)"
 
 die() { echo "[FATAL] $*" >&2; exit 1; }

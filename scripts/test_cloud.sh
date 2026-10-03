@@ -111,6 +111,7 @@ fi
 # NOTE the rules live in separate `aws_security_group_rule` resources that
 # reference `aws_security_group.<db|mq>.id`, so the port must be read from a rule
 # block, not from the (short) `aws_security_group` block itself.
+SG_PARSER="$SCRIPT_DIR/lib/hcl_sg_world_open.awk"
 sg_rule_port() { # sg_rule_port <sg-name>
     awk -v sg="$1" '
         /^resource "aws_security_group_rule"/ { blk=$3; gsub(/"/,"",blk); port=""; target="" }
@@ -121,11 +122,65 @@ sg_rule_port() { # sg_rule_port <sg-name>
 }
 DB_SG_PORT="$(sg_rule_port db)"
 MQ_SG_PORT="$(sg_rule_port mq)"
-WORLD_OPEN="$(awk '/^resource .aws_security_group./{sg=$3; gsub(/"/,"",sg)} /0\.0\.0\.0\/0/{print sg}' "$ROOT_DIR/terraform/security_groups.tf" 2>/dev/null | grep -Ex 'db|mq' || true)"
-if [ "$DB_SG_PORT" = "5432" ] && [ "$MQ_SG_PORT" = "5671" ] && [ -z "$WORLD_OPEN" ]; then
-    pass "Data tier is private: db rule pins 5432 from the app SG only, mq rule pins 5671 (AMQPS/TLS) from the app SG only, neither opens 0.0.0.0/0"
+
+# World-open exposure is decided from the ATTACHMENT of each rule, via the shared
+# brace-balanced HCL parser. The previous revision used
+#   awk '/^resource .aws_security_group./{sg=$3} /0.0.0.0\/0/{print sg}' | grep -Ex 'db|mq'
+# where `$3` is the RESOURCE LABEL, not the group a rule attaches to. The answer
+# therefore depended on where in the file a rule sat: the SAME exposure written as
+# a standalone aws_security_group_rule PASSed, and written as an inline
+# `ingress { }` block FAILED. See scripts/lib/hcl_sg_world_open.awk.
+if [ ! -f "$SG_PARSER" ]; then
+    fail "scripts/lib/hcl_sg_world_open.awk is missing -- data-tier exposure could not be evaluated. NOT treated as a pass."
 else
-    fail "Data-tier isolation is wrong: db from_port='${DB_SG_PORT:-?}' (want 5432), mq from_port='${MQ_SG_PORT:-?}' (want 5671), world-open SGs='${WORLD_OPEN:-none}'"
+    ALL_WORLD="$(awk -f "$SG_PARSER" "$ROOT_DIR"/terraform/*.tf 2>/dev/null)"
+    if [ -z "$ALL_WORLD" ]; then
+        fail "the HCL parser found NO world-open ingress rule at all, yet security_groups.tf contains 0.0.0.0/0 literals -- parser and file disagree, so nothing is claimed"
+    else
+        # awk -F'\t' '<sg>\t<style>\t<file:line>' | column -t
+        printf '         world-open ingress rules (sg, style, file:line):\n'
+        printf '%s\n' "$ALL_WORLD" | awk -F'\t' '{printf "           %-8s %-18s %s\n", $1, $2, $3}'
+        WORLD_OPEN="$(printf '%s\n' "$ALL_WORLD" | awk -F'\t' '$1=="db"||$1=="mq"||$1 ~ /^UNATTRIBUTED\(/{printf "%s (%s at %s) ", $1, $2, $3}')"
+        WORLD_OPEN="${WORLD_OPEN% }"
+        PUB_OPEN="$(printf '%s\n' "$ALL_WORLD" | awk -F'\t' '$1!="db" && $1!="mq" && $1 !~ /^UNATTRIBUTED\(/{printf "%s ", $1}' | sort -u | tr '\n' ' ')"
+        if [ "$DB_SG_PORT" = "5432" ] && [ "$MQ_SG_PORT" = "5671" ] && [ -z "$WORLD_OPEN" ]; then
+            pass "Data tier is private: db rule pins 5432 from the app SG only, mq rule pins 5671 (AMQPS/TLS) from the app SG only, and no 0.0.0.0/0 ingress rule attaches to db or mq in ANY HCL style (standalone rule, inline ingress{}, or aws_vpc_security_group_ingress_rule)"
+        else
+            fail "Data-tier isolation is wrong: db from_port='${DB_SG_PORT:-?}' (want 5432), mq from_port='${MQ_SG_PORT:-?}' (want 5671), world-open data-tier rules='${WORLD_OPEN:-none}'"
+        fi
+        if [ -n "$PUB_OPEN" ]; then
+            pass "every world-open ingress rule found attaches to '${PUB_OPEN% }' -- the public ALB edge only, as terraform/security_groups.tf documents"
+        else
+            fail "expected the public ALB SG to hold the only world-open ingress rules, but the parser found none at all (it is not reporting reality)"
+        fi
+    fi
+fi
+
+# ---- encryption IN TRANSIT: rds.force_ssl -----------------------------------
+# storage_encrypted covers "at rest"; the "in transit" half is rds.force_ssl in
+# the custom parameter group, and nothing checked it. `rds.force_ssl = 0` (or a
+# dropped parameter block) left this suite green while the documentation sells
+# the control as one of three headline security properties.
+FSSL_BLOCK="$(awk '
+    /^resource "aws_db_parameter_group"/ {f=1}
+    f && /^}/ {exit}
+    f {print}
+' "$ROOT_DIR/terraform/rds.tf" 2>/dev/null)"
+FSSL_VAL="$(printf '%s\n' "$FSSL_BLOCK" | awk '/rds\.force_ssl/{f=1} f && /value[[:space:]]*=/{gsub(/[^0-9]/,"");print;exit}')"
+FSSL_USERS="$(grep -cE 'parameter_group_name[[:space:]]*=[[:space:]]*aws_db_parameter_group\.postgres\.name' "$ROOT_DIR/terraform/rds.tf" 2>/dev/null | head -1)"
+echo "  ---- rds.force_ssl (encryption in transit) ----"
+echo "  declarations of rds.force_ssl : $(printf '%s\n' "$FSSL_BLOCK" | grep -cE '^[[:space:]]*name[[:space:]]*=[[:space:]]*"rds\.force_ssl"')"
+echo "  value                         : ${FSSL_VAL:-<none>}"
+echo "  aws_db_instance blocks adopting the parameter group : ${FSSL_USERS:-0}"
+if [ "$FSSL_VAL" = "1" ]; then
+    pass "postgres16 parameter group sets rds.force_ssl = 1 -- plaintext PostgreSQL sessions are refused, not merely discouraged"
+else
+    fail "rds.force_ssl is not 1 in terraform/rds.tf (value='${FSSL_VAL:-<none>}'); the database tier accepts unencrypted connections"
+fi
+if [ "${FSSL_USERS:-0}" -ge 2 ] 2>/dev/null; then
+    pass "both aws_db_instance blocks adopt aws_db_parameter_group.postgres, so force_ssl is applied and not just declared on an orphaned group"
+else
+    fail "only ${FSSL_USERS:-0}/2 aws_db_instance blocks adopt the force_ssl parameter group"
 fi
 
 if grep -qE 'resource .aws_cognito_user_pool.' "$ROOT_DIR/terraform/cognito.tf"; then
@@ -138,11 +193,31 @@ fi
 # the string "60" appears somewhere.
 AS_MIN="$(awk '/^resource .aws_appautoscaling_target./{f=1} f&&/min_capacity/{gsub(/[^0-9]/,"");print;exit}' "$ROOT_DIR/terraform/autoscaling.tf" 2>/dev/null)"
 AS_MAX="$(awk '/^resource .aws_appautoscaling_target./{f=1} f&&/max_capacity/{gsub(/[^0-9]/,"");print;exit}' "$ROOT_DIR/terraform/autoscaling.tf" 2>/dev/null)"
-AS_TGT="$(awk '/^variable .autoscaling_target_cpu./{f=1} f&&/default[[:space:]]*=/{gsub(/[^0-9.]/,"");print;exit}' "$ROOT_DIR/terraform/variables.tf" 2>/dev/null)"
+AS_TGT="$(grep -A200 '^variable "autoscaling_target_cpu"' "$ROOT_DIR/terraform/variables.tf" 2>/dev/null | grep -m1 -E '^[[:space:]]*default[[:space:]]*=' | sed -E 's/.*=[[:space:]]*//; s/[^0-9.]//g')"
 if [ -n "$AS_MIN" ] && [ -n "$AS_MAX" ] && [ "$AS_MAX" -gt "$AS_MIN" ] && [ "${AS_TGT%%.*}" -ge 30 ] 2>/dev/null; then
     pass "Auto-scaling: target tracking min=${AS_MIN} max=${AS_MAX} at ${AS_TGT}% CPU"
 else
     fail "Auto-scaling target tracking is missing or nonsensical (min='${AS_MIN}' max='${AS_MAX}' target='${AS_TGT}')"
+fi
+
+# The CEILING matters as much as the floor. min=0 was always caught; max=99 was
+# not, so a target could be handed an unbounded spend permission and still be
+# called "configured correctly". Every target AND every HPA is bounded.
+AS_MAX_CEILING=20
+AS_OVER="$(awk -v ceil="$AS_MAX_CEILING" '
+    /^resource "aws_appautoscaling_target"/ {n=$3; gsub(/"/,"",n); inb=1; next}
+    inb && /^}/ { if (mx != "" && (mx+0) > ceil) print "aws_appautoscaling_target." n " max_capacity=" mx; inb=0; mx=""; next }
+    inb && /max_capacity/ {s=$0; gsub(/[^0-9]/,"",s); mx=s}
+' "$ROOT_DIR/terraform/autoscaling.tf" 2>/dev/null | tr '\n' ' ')"
+HPA_OVER="$(awk -v ceil="$AS_MAX_CEILING" '
+    /^kind:[[:space:]]*HorizontalPodAutoscaler/ {inb=1; next}
+    inb && /^---/ {inb=0}
+    inb && /^[[:space:]]*maxReplicas[[:space:]]*:/ {s=$0; gsub(/[^0-9]/,"",s); if ((s+0) > ceil) print "HPA maxReplicas=" s}
+' "$ROOT_DIR"/manifests/*.yaml 2>/dev/null | tr '\n' ' ')"
+if [ -z "$AS_OVER" ] && [ -z "$HPA_OVER" ]; then
+    pass "Auto-scaling has an upper bound as well as a lower one: every aws_appautoscaling_target max_capacity and every HPA maxReplicas is <= ${AS_MAX_CEILING}, so worst-case cost is capped"
+else
+    fail "auto-scaling ceiling is unbounded (> ${AS_MAX_CEILING}): ${AS_OVER}${HPA_OVER}"
 fi
 
 if grep -rqE 'resource .aws_inspector2_enabler.|resource .aws_inspector2_filter.' "$ROOT_DIR/terraform/"; then
@@ -166,7 +241,88 @@ else
     fail "manifests/kustomization.yaml is missing; 'kubectl apply -f manifests/' cannot be made to work without it"
 fi
 
+# ---- PodDisruptionBudgets, judged against the replicas they select ----------
+# Counting PDB objects proves nothing: every `maxUnavailable` could be set to 100
+# and the object count would be unchanged. The shipped manifests were already
+# vacuous -- all six workloads declare `replicas: 1` and the three PDBs declare
+# `maxUnavailable: 1`, which together permit evicting the only pod. The same
+# brace/path-aware parser is used here as in run-audit-checks.sh (one file, so the
+# two suites cannot drift on the most safety-critical manifest claim).
+K8S_PARSER="$SCRIPT_DIR/lib/k8s_doc.awk"
+if [ ! -f "$K8S_PARSER" ]; then
+    fail "scripts/lib/k8s_doc.awk is missing -- PDB effectiveness and probe semantics cannot be evaluated. NOT treated as a pass."
+else
+    K8S_ROWS="$(awk -f "$K8S_PARSER" "$ROOT_DIR"/manifests/*.yaml 2>/dev/null)"
+    pdb_num() { case "$1" in '') echo "-" ;; *%) echo "$(( (${1%%%} * $2 + 99) / 100 ))" ;; *) echo "$1" ;; esac; }
+    echo "  ---- workload / PodDisruptionBudget / probe matrix ----"
+    printf '%s\n' "$K8S_ROWS" | awk -F'\t' '
+        $1=="Deployment"||$1=="StatefulSet"||$1=="PodDisruptionBudget" {
+            printf "    %-20s %-19s replicas=%-4s maxUnavailable=%-4s minAvailable=%-4s selector=%-19s liveness=%-9s readiness=%-9s\n",
+                   $1,$2,$3,$4,$5,$6,$7,$8
+        }'
+    VACUOUS=""; VACUOUS_N=0; WL_N=0; NOPDB_SS=""
+    while IFS=$'\t' read -r kind name reps maxun minav sel _x _y _z _w; do
+        case "$kind" in Deployment|StatefulSet) ;; *) continue ;; esac
+        WL_N=$((WL_N + 1))
+        reps_n="$(pdb_num "$reps" 1)"; [ "$reps_n" = "-" ] && reps_n=1
+        pdb="$(printf '%s\n' "$K8S_ROWS" | awk -F'\t' -v s="$sel" '$1=="PodDisruptionBudget" && $6==s {print; exit}')"
+        if [ -n "$pdb" ]; then
+            pmax="$(cut -f4 <<<"$pdb")"; pmin="$(cut -f5 <<<"$pdb")"
+            if [ "$pmax" != "-" ]; then
+                [ "$(pdb_num "$pmax" "$reps_n")" -ge "$reps_n" ] 2>/dev/null && { VACUOUS_N=$((VACUOUS_N+1)); VACUOUS+="$name (maxUnavailable=$pmax >= replicas=$reps_n) "; }
+            elif [ "$pmin" != "-" ]; then
+                [ "$(pdb_num "$pmin" "$reps_n")" -le 0 ] 2>/dev/null && { VACUOUS_N=$((VACUOUS_N+1)); VACUOUS+="$name (minAvailable=$pmin <= 0) "; }
+            else
+                VACUOUS_N=$((VACUOUS_N+1)); VACUOUS+="$name (no maxUnavailable and no minAvailable) "
+            fi
+        elif [ "$reps_n" -ge 2 ] 2>/dev/null; then
+            VACUOUS_N=$((VACUOUS_N+1)); VACUOUS+="$name (replicas=$reps_n, NO PodDisruptionBudget) "
+        else
+            [ "$kind" = "StatefulSet" ] && NOPDB_SS+="$name "
+        fi
+    done <<<"$K8S_ROWS"
+    if [ "$WL_N" -lt 1 ]; then
+        fail "no Deployment/StatefulSet could be parsed out of manifests/ -- no PDB verdict is possible"
+    elif [ "$VACUOUS_N" -eq 0 ]; then
+        pass "every PodDisruptionBudget in manifests/ still leaves at least one replica in service at the declared replica count"
+    else
+        fail "$VACUOUS_N disruption-budget finding(s) are vacuous: a PDB that permits evicting every pod still gets counted as a control -- ${VACUOUS}"
+    fi
+    if [ -n "$NOPDB_SS" ]; then
+        warn "StatefulSet(s) with no PodDisruptionBudget: ${NOPDB_SS% } (both databases and the broker are single-replica; a PDB only becomes meaningful above replicas=1, and at replicas=1 maxUnavailable:1 is exactly the vacuous case flagged above)"
+    else
+        pass "every StatefulSet in manifests/ has a PodDisruptionBudget selecting it"
+    fi
+
+    # ---- probe semantics: liveness must not be coupled to the database ------
+    # Rewiring livenessProbe from /health to /ready couples pod liveness to
+    # database reachability, so a transient DB blip fails every app pod's liveness
+    # probe at once and Kubernetes restarts the whole tier. Nothing checked this.
+    PROBE_BAD=""; PROBE_OK=0; PROBE_EXEC=0
+    while IFS=$'\t' read -r kind name reps maxun minav sel lpath rpath lkind rkind _w; do
+        case "$kind" in Deployment|StatefulSet) ;; *) continue ;; esac
+        [ "$lkind" = "-" ] || [ "$rkind" = "-" ] && continue
+        if [ "$lpath" = "-" ]; then PROBE_EXEC=$((PROBE_EXEC+1)); continue; fi
+        PROBE_OK=$((PROBE_OK + 1))
+        case "$lpath" in
+            */ready|*/readyz) PROBE_BAD+="$kind/$name liveness=$lpath " ;;
+            */health|*/healthz|*/live|*/ping|*/startup) : ;;
+            *) PROBE_BAD+="$kind/$name liveness=$lpath is not a recognised liveness endpoint " ;;
+        esac
+    done <<<"$K8S_ROWS"
+    if [ "$PROBE_OK" -eq 0 ] && [ "$PROBE_EXEC" -eq 0 ]; then
+        warn "no workload declares both a liveness and a readiness probe -- probe semantics could not be evaluated"
+    elif [ -n "$PROBE_BAD" ]; then
+        fail "liveness is wired to a DB-dependent or unrecognised endpoint: ${PROBE_BAD}-- a transient database outage would restart every pod in that tier simultaneously"
+    else
+        pass "all $PROBE_OK path-based workload(s) probe liveness on a DB-independent endpoint ($PROBE_EXEC further workload(s) use exec/tcp probes, which carry no path and cannot be rewired)"
+    fi
+fi
+
 # The committed Secret must be placeholders only.
+# KEEP `|| true`: the trailing `grep -v` exits 1 when it filters out EVERY line,
+# which is precisely the desired outcome (all values are placeholders). Only the
+# output is used, never the exit status.
 NON_PLACEHOLDER="$(grep -E '^[[:space:]]+[A-Z0-9_]+:[[:space:]]*"' "$ROOT_DIR/manifests/secrets.yaml" 2>/dev/null | grep -v 'REPLACE_ME_' || true)"
 if [ -z "$NON_PLACEHOLDER" ]; then
     pass "manifests/secrets.yaml contains only REPLACE_ME_* placeholders (no real credential committed)"
@@ -207,8 +363,12 @@ if [ "$DF_IGNORE" -eq "$DF_TOTAL" ]; then pass "every component ships a .dockeri
 else fail "${DF_IGNORE}/${DF_TOTAL} components have a .dockerignore"; fi
 
 # -----------------------------------------------------------------------------
-echo ">>> 5. Python sources compile"
+echo ">>> 5. Application source: compiles, is wired up, imports, and passes its own tests"
 # -----------------------------------------------------------------------------
+# py_compile only proves a file PARSES. Deleting srcs/inventory-app/app/validation.py
+# -- a module movies.py imports -- left every py_compile green, killed the app at
+# startup, and neither suite noticed: this file only byte-compiled the three
+# server.py entry points, imported nothing, and never ran srcs/*/tests/.
 PY_N=0
 for app in api-gateway-app inventory-app billing-app; do
     s="$ROOT_DIR/srcs/$app/server.py"
@@ -217,12 +377,98 @@ for app in api-gateway-app inventory-app billing-app; do
     if python3 -m py_compile "$s" 2>/dev/null; then pass "Python compiles: srcs/$app/server.py"
     else fail "Python compile error: srcs/$app/server.py"; fi
 done
-# Byte-compile artefacts must not be tracked (see the .gitignore header).
-TRACKED_PYCACHE="$(cd "$ROOT_DIR" && git ls-files 2>/dev/null | grep -cE '__pycache__|\.pyc' || true)"
-if [ "${TRACKED_PYCACHE:-0}" -eq 0 ]; then
-    pass "no __pycache__/*.pyc files are tracked in git"
+
+# ---- 5a. every internal import resolves to a file that exists ---------------
+IMP_N=0; IMP_BROKEN=""
+echo "         ---- internal 'app.*' imports resolved against the filesystem ----"
+for d in "$ROOT_DIR"/srcs/*/; do
+    c="$d"; [ -d "$c/app" ] || continue
+    comp="$(basename "$c")"
+    refs="$(grep -rhoE '^[[:space:]]*(from|import)[[:space:]]+app([.][A-Za-z0-9_]+)*' --include='*.py' "$c" 2>/dev/null \
+          | sed -E 's/^[[:space:]]*(from|import)[[:space:]]+//; s/\.$//; s/^app$//; s/^app[.]//' \
+          | tr '.' '/' | sed 's#^$#__init__#' | sort -u)"
+    for ref in ${refs}; do
+        IMP_N=$((IMP_N + 1))
+        if [ -f "$c/app/${ref}.py" ] || [ -f "$c/app/${ref}/__init__.py" ]; then
+            printf '           %-18s app/%s -> present\n' "$comp" "$ref"
+        else
+            IMP_BROKEN+="${comp}: app/${ref}.py "
+            printf '           %-18s app/%s -> MISSING\n' "$comp" "$ref"
+        fi
+    done
+done
+if [ "$IMP_N" -eq 0 ]; then
+    fail "no internal 'app.*' import was found under srcs/ -- the resolution check had nothing to check"
+elif [ -z "$IMP_BROKEN" ]; then
+    pass "all $IMP_N intra-package import(s) under srcs/ resolve to a file that exists; a deleted app module can no longer hide behind py_compile"
 else
-    warn "${TRACKED_PYCACHE} __pycache__/*.pyc file(s) are still TRACKED in git. .gitignore cannot untrack them; run: git rm -r --cached srcs/api-gateway-app/__pycache__ srcs/billing-app/__pycache__ srcs/inventory-app/__pycache__"
+    fail "srcs/ imports a module that does not exist -- ${IMP_BROKEN}the service dies at import time"
+fi
+
+# ---- 5b. hardcoded-credential scan over the application source -------------
+# The old regex was `grep -rnE 'getenv\([^)]*,\s*"[^"]*pass'`, which looks for the
+# substring "pass" INSIDE THE DEFAULT VALUE. Replacing
+# `_require_env("INVENTORY_DB_PASSWORD")` with
+# `os.getenv("INVENTORY_DB_PASSWORD", "hunter2")` therefore passed, because
+# "hunter2" contains no "pass" -- it is the NAME that says "credential". The scan
+# keys on the variable name and rejects any non-empty string-literal default, plus
+# three other literal-credential shapes. Comment-only lines are dropped.
+CRED_NAME='(PASSWORD|PASSWD|PASSPHRASE|SECRET|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIAL)'
+CRED_HITS=""
+for re in \
+  "os\.(getenv|environ\.get)\(\s*[\"'][^\"']*${CRED_NAME}[^\"']*[\"']\s*,\s*[\"'][^\"']+[\"']" \
+  "os\.(getenv|environ\.get)\([\"'][^\"')]*${CRED_NAME}[^\"')]*[\"']\)\s*or\s*[\"'][^\"']+[\"']" \
+  "os\.environ\.setdefault\(\s*[\"'][^\"']*${CRED_NAME}[^\"']*[\"']\s*,\s*[\"'][^\"']+[\"']" \
+  "(^|[^A-Za-z0-9_])([A-Za-z0-9_]*_)?(password|passwd|passphrase|secret|token|api_?key|access_?key|private_?key|credential)s?[[:space:]]*[:=][[:space:]]*[\"'][^\"']{3,}[\"']" \
+  "[a-zA-Z][a-zA-Z0-9+.-]*://[^:/[:space:]\"']+:[^@/[:space:]\"']+@" ; do
+    h="$(grep -rInEi "$re" --include='*.py' "$ROOT_DIR/srcs" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | head -20)"
+    [ -n "$h" ] && CRED_HITS+="${h}"$'\n'
+done
+CRED_HITS="${CRED_HITS%$'\n'}"
+CRED_FILES="$(find "$ROOT_DIR/srcs" -name '*.py' -type f 2>/dev/null | wc -l | tr -d ' ')"
+if [ "${CRED_FILES:-0}" -lt 1 ]; then
+    fail "no Python sources found under srcs/ -- the hardcoded-credential scan had nothing to scan"
+elif [ -z "$CRED_HITS" ]; then
+    pass "scanned all $CRED_FILES .py files under srcs/: no credential-shaped environment lookup carries a literal default, no password/secret/token/key is assigned a string literal, and no URL embeds user:password -- credentials come from the environment with no fallback"
+else
+    fail "hardcoded credential literal(s) in the application source:"
+    printf '%s\n' "$CRED_HITS" | sed 's/^/         /'
+fi
+REQ_ENV_PW="$(grep -rInE '_require_env\(\s*"[^"]*(PASSWORD|PASSWD|SECRET|USER)[^"]*"' --include='*.py' "$ROOT_DIR/srcs" 2>/dev/null | wc -l | tr -d ' ')"
+if [ "${REQ_ENV_PW:-0}" -ge 1 ] 2>/dev/null; then
+    pass "$REQ_ENV_PW credential value(s) are read through the fail-closed _require_env() helper, which raises at startup instead of falling back -- this is what makes the absence of literals above meaningful"
+else
+    fail "no credential is read through _require_env(); 'no hardcoded default' would then only mean the credential is not read at all"
+fi
+
+# ---- 5c. run the repository's OWN unit tests -------------------------------
+if command -v make >/dev/null 2>&1; then
+    UT_OUT="$(cd "$ROOT_DIR" && make test-py 2>&1)"; UT_RC=$?
+    UT_RAN="$(grep -oE 'Ran [0-9]+ tests?' <<<"$UT_OUT" | grep -oE '[0-9]+' | paste -sd+ - | bc 2>/dev/null)"
+    UT_ERR="$(grep -E '^(FAIL|ERROR): ' <<<"$UT_OUT" | head -6 | tr '\n' ';')"
+    echo "         make test-py -> exit ${UT_RC}, $(grep -cE '^test_' <<<"$UT_OUT") test lines, verdict '$(grep -E '^(OK|FAILED)' <<<"$UT_OUT" | paste -sd' ' -)'"
+    if [ "$UT_RC" -eq 0 ] && [ "${UT_RAN:-0}" -ge 1 ] 2>/dev/null; then
+        pass "'make test-py' passes: ${UT_RAN} unit tests across srcs/*/tests/, exit 0"
+    else
+        fail "'make test-py' fails (exit ${UT_RC}, ${UT_RAN:-0} tests ran): ${UT_ERR:-<no FAIL/ERROR line captured>}"
+    fi
+else
+    warn "make NOT installed -- the repo's own 'make test-py' could not be executed, so the unit-test verdict is UNKNOWN (neither a pass nor a failure)"
+fi
+
+# Byte-compile artefacts must not be tracked (see the .gitignore header).
+# `git ls-files` failing (not a git checkout) used to be swallowed by `|| true`
+# and produced 0, which then PASSED as "nothing tracked". That masks a real
+# failure, so a non-git tree is reported as unverified instead.
+if (cd "$ROOT_DIR" && git rev-parse --is-inside-work-tree >/dev/null 2>&1); then
+    TRACKED_PYCACHE="$(cd "$ROOT_DIR" && git ls-files 2>/dev/null | grep -cE '__pycache__|\.pyc' || true)"
+    if [ "${TRACKED_PYCACHE:-0}" -eq 0 ]; then
+        pass "no __pycache__/*.pyc files are tracked in git"
+    else
+        warn "${TRACKED_PYCACHE} __pycache__/*.pyc file(s) are still TRACKED in git. .gitignore cannot untrack them; run: git rm -r --cached srcs/api-gateway-app/__pycache__ srcs/billing-app/__pycache__ srcs/inventory-app/__pycache__"
+    fi
+else
+    warn "this tree is not a git checkout, so 'no .pyc files are tracked' could NOT be verified (previously this silently counted 0 via '|| true' and passed)"
 fi
 
 # -----------------------------------------------------------------------------
@@ -238,6 +484,9 @@ for py in "$SCRIPT_DIR"/*.py; do
     if python3 -m py_compile "$py" 2>/dev/null; then pass "py_compile clean: $(basename "$py")"
     else fail "py_compile reports a syntax error: $(basename "$py")"; fi
 done
+# KEEP `|| true`: best-effort tidy-up of an artefact this suite itself created a
+# few lines earlier (py_compile). If the removal fails the suite must still reach
+# its summary and report the real verdict.
 rm -rf "$SCRIPT_DIR/__pycache__" 2>/dev/null || true
 
 # -----------------------------------------------------------------------------
