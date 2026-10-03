@@ -3,8 +3,21 @@
 **Date:** 2026-10-03 21:20 UTC
 **Repo:** `/home/ertval/code/zone-modules/cloud-design`
 **Branch:** `main` -> `origin` (`https://platform.zone01.gr/git/ekaramet/cloud-design.git`)
-**HEAD at handoff:** `ba14ad9` — *docs: consolidate the audit guide under `docs/` and rewrite the README*
-**Agents running at handoff:** none. All three work waves are finished or dead (see §4).
+**Final HEAD:** `b7b761a`. Working tree clean; local `main` is identical to `origin/main`.
+**Agents running at handoff:** none. All three work waves finished (see §4).
+
+The four commits on top of the previous baseline `ba14ad9`, each produced by a separate
+agent that committed its own work:
+
+| Commit | Wave | Subject |
+|---|---|---|
+| `9c8ddf2` | Terraform | fix(terraform): close the unauthenticated write path and five apply blockers |
+| `5f59829` | Docs | docs: add handoff recording the adversarial audit state |
+| `7718508` | Application | fix(srcs): report dependency outages as 503 and unblock the queue shutdown |
+| `b7b761a` | Scripts | test: replace defeatable greps with real parsers in the audit scripts |
+
+Note the commit order does **not** match the order the waves finished, because the agents
+committed independently. Nothing is uncommitted.
 
 ---
 
@@ -223,13 +236,19 @@ herdr pane list --workspace "$HERDR_WORKSPACE_ID"
 herdr pane run --help      # inspect the invocation syntax before first use
 ```
 
-### 6.6 Uncommitted work
+### 6.6 Commit state — everything is committed, nothing is at risk
 
-All of §5 and §6.2 exists **only in the working tree** — 26 modified files and 3
-untracked paths (`scripts/lib/`, `srcs/billing-app/tests/test_shutdown.py`,
-`terraform/storage.tf`). Only `docs/HANDOFF.md` is committed. Decide whether to commit
-the rest as a reviewed WIP commit or to revert it. **Do not `git checkout .` casually** —
-it would destroy ~2000 lines of work.
+An earlier draft of this handoff claimed the work was uncommitted. That was wrong, and
+worth recording why it went wrong: **a `git commit` writes no working-tree file**, so
+checking file mtimes to decide whether an agent was still active gave a false "all quiet".
+`ps` for python/pytest/docker-compose also came back empty, because the agent was
+committing, not testing. The scripts agent was alive and committing at that moment.
+
+The reliable checks are `git log`, `git status`, and `git rev-list --left-right --count
+origin/main...HEAD`. Use those, not mtimes.
+
+Current state: working tree clean, `HEAD` == `origin/main` == `b7b761a`, 0 ahead / 0
+behind. The four wave commits plus the baseline are all on the remote.
 
 ---
 
