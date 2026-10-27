@@ -155,6 +155,16 @@ data "aws_iam_policy_document" "artifacts_tls_only" {
       aws_s3_bucket.artifacts[0].arn,
       "${aws_s3_bucket.artifacts[0].arn}/*",
     ]
+
+    # FIX: this condition was missing, so the statement denied EVERY request
+    # from every principal, TLS or not. Once applied, Terraform itself got
+    # AccessDenied on the bucket, so the next plan and the destroy failed, and
+    # only the account root user could delete the policy.
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
   }
 
   # Deny an upload that explicitly asks for something other than server-side

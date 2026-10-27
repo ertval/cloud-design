@@ -28,12 +28,14 @@ private_db_subnet_cidrs  = ["10.0.20.0/24", "10.0.21.0/24"]
 single_nat_gateway = false
 
 # ------------------------------------------------------------------------------
-# !! TLS AT THE PUBLIC ALB - read this before demonstrating the stack
+# TLS on the API Gateway -> internal ALB hop
 # ------------------------------------------------------------------------------
-# With the default false, the ALB gets a SELF-SIGNED certificate. Browsers warn,
-# and the API Gateway VPC Link integration validates the certificate chain, so
-# the private ALB integration is the most likely thing to need a real domain.
-# To get an AWS-issued certificate you must already own the domain in Route 53:
+# The ALB is internal: API Gateway (HTTPS, AWS-managed certificate) is the only
+# public entry and reaches the ALB through the VPC Link. With the default false,
+# that hop is plain HTTP on :80 inside the VPC, and no domain is needed.
+# true switches the ALB listener to HTTPS :443 with an AWS-issued ACM
+# certificate, and API Gateway then verifies it against alb_domain_name. That
+# requires a domain you already own in a Route 53 public hosted zone:
 enable_acm_certificate = false
 alb_domain_name         = "" # e.g. "api.example.com"  (required if enable_acm_certificate)
 alb_hosted_zone_id      = "" # e.g. "Z0123456789ABC"    (required if enable_acm_certificate)
@@ -47,7 +49,7 @@ db_max_allocated_storage = 100
 db_username              = "dbadmin"
 
 # ------------------------------------------------------------------------------
-# Amazon MQ RabbitMQ (ACTIVE_STANDBY_MULTI_AZ)
+# Amazon MQ RabbitMQ (SINGLE_INSTANCE; see the trade-off in amazon_mq.tf)
 # ------------------------------------------------------------------------------
 mq_engine_version = "3.13"
 # NOT mq.t3.micro: AWS has deprecated that instance type for new brokers
@@ -78,8 +80,8 @@ log_retention_days     = 30
 # !! anything.
 alarm_email = ""
 
-# ~$410/month steady state (the broker move off the retired mq.t3.micro is what
-# raised it); see the itemised estimate on var.monthly_budget_limit.
+# ~$295/month steady state with the single-instance broker; see the itemised
+# estimate on var.monthly_budget_limit.
 monthly_budget_limit = 450
 
 # ------------------------------------------------------------------------------

@@ -130,29 +130,37 @@ MQ_SG_PORT="$(sg_rule_port mq)"
 # therefore depended on where in the file a rule sat: the SAME exposure written as
 # a standalone aws_security_group_rule PASSed, and written as an inline
 # `ingress { }` block FAILED. See scripts/lib/hcl_sg_world_open.awk.
+# The ALB is internal (terraform/alb.tf), so the expected answer is now NO
+# world-open ingress rule anywhere. An empty parser result is only trusted after
+# the parser has detected a one-rule probe, so a parser that silently stopped
+# working cannot turn into a pass.
+SG_PROBE='resource "aws_security_group_rule" "probe" {
+  type              = "ingress"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.probe.id
+}'
 if [ ! -f "$SG_PARSER" ]; then
     fail "scripts/lib/hcl_sg_world_open.awk is missing -- data-tier exposure could not be evaluated. NOT treated as a pass."
+elif [ "$(printf '%s\n' "$SG_PROBE" | awk -f "$SG_PARSER" 2>/dev/null | cut -f1)" != "probe" ]; then
+    fail "the HCL parser did not detect its world-open probe rule, so an empty result would prove nothing -- nothing is claimed"
 else
     ALL_WORLD="$(awk -f "$SG_PARSER" "$ROOT_DIR"/terraform/*.tf 2>/dev/null)"
-    if [ -z "$ALL_WORLD" ]; then
-        fail "the HCL parser found NO world-open ingress rule at all, yet security_groups.tf contains 0.0.0.0/0 literals -- parser and file disagree, so nothing is claimed"
-    else
+    if [ -n "$ALL_WORLD" ]; then
         # awk -F'\t' '<sg>\t<style>\t<file:line>' | column -t
         printf '         world-open ingress rules (sg, style, file:line):\n'
         printf '%s\n' "$ALL_WORLD" | awk -F'\t' '{printf "           %-8s %-18s %s\n", $1, $2, $3}'
-        WORLD_OPEN="$(printf '%s\n' "$ALL_WORLD" | awk -F'\t' '$1=="db"||$1=="mq"||$1 ~ /^UNATTRIBUTED\(/{printf "%s (%s at %s) ", $1, $2, $3}')"
-        WORLD_OPEN="${WORLD_OPEN% }"
-        PUB_OPEN="$(printf '%s\n' "$ALL_WORLD" | awk -F'\t' '$1!="db" && $1!="mq" && $1 !~ /^UNATTRIBUTED\(/{printf "%s ", $1}' | sort -u | tr '\n' ' ')"
-        if [ "$DB_SG_PORT" = "5432" ] && [ "$MQ_SG_PORT" = "5671" ] && [ -z "$WORLD_OPEN" ]; then
-            pass "Data tier is private: db rule pins 5432 from the app SG only, mq rule pins 5671 (AMQPS/TLS) from the app SG only, and no 0.0.0.0/0 ingress rule attaches to db or mq in ANY HCL style (standalone rule, inline ingress{}, or aws_vpc_security_group_ingress_rule)"
-        else
-            fail "Data-tier isolation is wrong: db from_port='${DB_SG_PORT:-?}' (want 5432), mq from_port='${MQ_SG_PORT:-?}' (want 5671), world-open data-tier rules='${WORLD_OPEN:-none}'"
-        fi
-        if [ -n "$PUB_OPEN" ]; then
-            pass "every world-open ingress rule found attaches to '${PUB_OPEN% }' -- the public ALB edge only, as terraform/security_groups.tf documents"
-        else
-            fail "expected the public ALB SG to hold the only world-open ingress rules, but the parser found none at all (it is not reporting reality)"
-        fi
+    fi
+    WORLD_OPEN="$(printf '%s\n' "$ALL_WORLD" | awk -F'\t' '$1=="db"||$1=="mq"||$1 ~ /^UNATTRIBUTED\(/{printf "%s (%s at %s) ", $1, $2, $3}')"
+    WORLD_OPEN="${WORLD_OPEN% }"
+    if [ "$DB_SG_PORT" = "5432" ] && [ "$MQ_SG_PORT" = "5671" ] && [ -z "$WORLD_OPEN" ]; then
+        pass "Data tier is private: db rule pins 5432 from the app SG only, mq rule pins 5671 (AMQPS/TLS) from the app SG only, and no 0.0.0.0/0 ingress rule attaches to db or mq in ANY HCL style (standalone rule, inline ingress{}, or aws_vpc_security_group_ingress_rule)"
+    else
+        fail "Data-tier isolation is wrong: db from_port='${DB_SG_PORT:-?}' (want 5432), mq from_port='${MQ_SG_PORT:-?}' (want 5671), world-open data-tier rules='${WORLD_OPEN:-none}'"
+    fi
+    if [ -z "$ALL_WORLD" ]; then
+        pass "no security group admits 0.0.0.0/0 ingress (the parser detected its probe rule, so the empty result is real): the ALB is internal and API Gateway is the only public entry"
+    else
+        fail "world-open ingress rule(s) found on '$(printf '%s\n' "$ALL_WORLD" | cut -f1 | sort -u | tr '\n' ' ')': the ALB is internal (terraform/alb.tf), so no security group should admit 0.0.0.0/0"
     fi
 fi
 

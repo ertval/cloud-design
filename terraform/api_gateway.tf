@@ -114,24 +114,37 @@ resource "aws_apigatewayv2_vpc_link" "alb" {
   tags = local.common_tags
 }
 
-# 4. HTTP Proxy Integration Forwarding to ALB (via HTTPS listener only;
-# never the :80 redirect listener, so VPC_LINK traffic stays TLS-terminated)
+# 4. HTTP Proxy Integration Forwarding to the internal ALB over the VPC Link
+# FIX: this used to target the :443 listener with no tls_config. An HTTP API
+# private integration speaks HTTPS only when tls_config is set, so API Gateway
+# sent plain HTTP to a TLS port and no route could work. The integration now
+# targets aws_lb_listener.main, whose protocol follows var.enable_acm_certificate:
+# plain HTTP on :80 inside the VPC by default, or HTTPS on :443 with the
+# tls_config below, which makes API Gateway verify the ACM certificate against
+# alb_domain_name (see the two paths at the top of alb.tf).
 resource "aws_apigatewayv2_integration" "alb" {
   api_id             = aws_apigatewayv2_api.main.id
   integration_type   = "HTTP_PROXY"
-  integration_uri    = aws_lb_listener.https.arn
+  integration_uri    = aws_lb_listener.main.arn
   integration_method = "ANY"
   connection_type    = "VPC_LINK"
   connection_id      = aws_apigatewayv2_vpc_link.alb.id
 
   payload_format_version = "1.0"
+
+  dynamic "tls_config" {
+    for_each = var.enable_acm_certificate ? [var.alb_domain_name] : []
+
+    content {
+      server_name_to_verify = tls_config.value
+    }
+  }
 }
 
 # 5. Public Healthcheck Route (Unauthenticated for external uptime monitors)
-# Reaches api-gateway through the ALB rule aws_lb_listener_rule.vpc_link_hop,
-# which is scoped to the VPC CIDR because the source here is a VPC Link ENI, not
-# an Internet client - so leaving it unauthenticated does not expose /health on
-# the public listener (there the Cognito action in alb.tf returns 401).
+# The only route without the JWT authorizer. It reaches api-gateway's /health
+# through the ALB default action; the ALB itself is internal, so this route is
+# the only way the internet can see /health.
 resource "aws_apigatewayv2_route" "health" {
   api_id    = aws_apigatewayv2_api.main.id
   route_key = "GET /health"

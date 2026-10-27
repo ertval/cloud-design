@@ -79,25 +79,27 @@ variable "single_nat_gateway" {
 # ------------------------------------------------------------------------------
 variable "enable_acm_certificate" {
   description = <<-EOT
-    Request a real, AWS-issued ACM certificate for the ALB and publish an
-    alias record for it (requires alb_domain_name + alb_hosted_zone_id).
-    Leave false for a first apply in a brand-new account: DNS validation cannot
-    complete until the _acme-challenge TXT record is visible in a hosted zone you
-    already own. The false path falls back to a self-signed certificate so
-    `terraform apply` always succeeds.
+    false (default): the internal ALB listens on HTTP :80, so the API Gateway
+    VPC Link hop is plain HTTP inside the VPC and no domain is needed. The
+    public endpoint is API Gateway's own HTTPS endpoint either way.
+    true: request a real, AWS-issued ACM certificate (requires alb_domain_name +
+    alb_hosted_zone_id), switch the listener to HTTPS :443 and make API Gateway
+    verify the certificate against alb_domain_name. DNS validation cannot
+    complete until the validation record is visible in a hosted zone you
+    already own.
   EOT
   type        = bool
   default     = false
 }
 
 variable "alb_domain_name" {
-  description = "Fully qualified domain name for the public ALB (e.g. api.example.com). Required when enable_acm_certificate = true."
+  description = "Domain name the ALB certificate is issued for (e.g. api.example.com); API Gateway verifies the ALB certificate against it. Required when enable_acm_certificate = true."
   type        = string
   default     = ""
 }
 
 variable "alb_hosted_zone_id" {
-  description = "Route 53 public hosted zone ID that owns alb_domain_name. Required when enable_acm_certificate = true."
+  description = "Route 53 public hosted zone ID that owns alb_domain_name, used for the ACM DNS validation records. Required when enable_acm_certificate = true."
   type        = string
   default     = ""
 }
@@ -250,23 +252,25 @@ variable "monthly_budget_limit" {
     run-rate, so the budget alarm fired every single month and proved useless.
     Steady-state estimate for this design (us-east-1, on-demand Fargate):
 
-      Amazon MQ ACTIVE_STANDBY_MULTI_AZ mq.m7g.medium x2 + 200GB EBS each  ~$230
+      Amazon MQ SINGLE_INSTANCE mq.m7g.medium x1 + 200GB EBS .............  ~$115
       RDS PostgreSQL db.t4g.micro Multi-AZ x2 + storage ..................  ~$53
       NAT Gateways x2 .....................................................  ~$66
       Application Load Balancer ..........................................  ~$16
       ECS Fargate 4 x (0.25 vCPU / 0.5 GB) ................................  ~$37
       KMS keys, ECR storage + Inspector scans, CloudWatch logs/alarms ......  ~$9
       --------------------------------------------------------------------
-      TOTAL ..............................................................  ~$410/mo
+      TOTAL ..............................................................  ~$295/mo
 
     The MQ line is the one that moved: mq.t3.micro was ~$79 but AWS withdrew it
     for new brokers (see var.mq_host_instance_type), and mq.m7g.medium is roughly
-    double the instance hours plus two 200 GB EBS volumes at $0.10/GB-month.
+    double the instance hours plus a 200 GB EBS volume at $0.10/GB-month. It is
+    one broker, not two: Amazon MQ for RabbitMQ has no active/standby mode (see
+    amazon_mq.tf), and the three-node cluster would add ~$230.
     Peak (api-gateway + inventory-app auto-scaled to their max of 3, i.e. 8 tasks
-    instead of 4) is ~$450/mo, hence a 450 USD default: the 80% ACTUAL
-    notification then fires at $360 as a genuine early warning rather than as
-    routine noise. This is an estimate built from published unit prices, not a
-    quote - re-check it against the AWS Pricing Calculator before demoing.
+    instead of 4) is ~$335/mo. The 450 USD default was sized for the earlier
+    two-broker estimate (~$410 steady, ~$450 peak) and now sits above the peak.
+    This is an estimate built from published unit prices, not a quote - re-check
+    it against the AWS Pricing Calculator before demoing.
   EOT
   type        = number
   default     = 450

@@ -2,8 +2,10 @@
 # Least-Privilege Security Groups with Standalone Rules to Avoid Dependency Cycles
 # ------------------------------------------------------------------------------
 # The EKS control-plane security group and its three rules were removed with the
-# EKS path (see orchestration.tf). No private resource is reachable from outside
-# the VPC: only the ALB SG accepts 0.0.0.0/0, and only on 80 (redirect) / 443.
+# EKS path (see orchestration.tf). No resource is reachable from outside the
+# VPC: no security group accepts 0.0.0.0/0 ingress. The only public entry point
+# is API Gateway, which is AWS-managed and reaches the internal ALB through the
+# VPC Link (alb.tf).
 #
 # TASK-TO-TASK IS 8080 ONLY, AND ONLY WITHIN THE APP SG. Every one of api-gateway,
 # inventory-app and billing-app shares aws_security_group.app, so a rule opened
@@ -14,39 +16,19 @@
 # broker using its own credentials.
 # ------------------------------------------------------------------------------
 
-# 1. Public ALB Security Group (Internet-facing entrypoint)
+# 1. Internal ALB Security Group (reached only through the API Gateway VPC Link)
+# FIX: this group used to admit 0.0.0.0/0 on :80 and :443 because the ALB was
+# internet-facing. The ALB is internal now (alb.tf), and its one ingress rule is
+# alb_ingress_from_vpc_link below.
 resource "aws_security_group" "alb" {
   name        = "${local.name_prefix}-alb-sg"
-  description = "Allows incoming public HTTP/HTTPS traffic to Application Load Balancer"
+  description = "Internal ALB: accepts traffic only from the API Gateway VPC Link"
   vpc_id      = aws_vpc.main.id
 
   tags = merge(local.common_tags, {
     Name = "${local.name_prefix}-alb-sg"
-    Tier = "Public-ALB"
+    Tier = "Private-ALB"
   })
-}
-
-resource "aws_security_group_rule" "alb_ingress_http" {
-  description = "HTTP ingress (redirected to HTTPS)"
-  type        = "ingress"
-  from_port   = 80
-  to_port     = 80
-  protocol    = "tcp"
-  # JUSTIFICATION: public ALB must accept Internet clients; :80 serves
-  # redirect-to-:443 only (see alb.tf), no plaintext forwarding.
-  cidr_blocks       = ["0.0.0.0/0"]
-  security_group_id = aws_security_group.alb.id
-}
-
-resource "aws_security_group_rule" "alb_ingress_https" {
-  description = "HTTPS ingress for secure client traffic"
-  type        = "ingress"
-  from_port   = 443
-  to_port     = 443
-  protocol    = "tcp"
-  # JUSTIFICATION: public edge-TLS entrypoint; TLS 1.3 terminated at ALB.
-  cidr_blocks       = ["0.0.0.0/0"]
-  security_group_id = aws_security_group.alb.id
 }
 
 resource "aws_security_group_rule" "alb_egress_to_app" {
@@ -72,15 +54,15 @@ resource "aws_security_group_rule" "alb_egress_to_billing_app" {
   security_group_id        = aws_security_group.alb.id
 }
 
-# FIX (was missing entirely): API Gateway integrates with the ALB over the VPC
-# Link, and that integration targets the *HTTPS* listener (aws_lb_listener.https,
-# referenced by api_gateway.tf). Without this rule the VPC Link ENIs could not
-# reach :443 and every single API Gateway route returned HTTP 500.
+# The ALB's only ingress rule. API Gateway integrates with the ALB over the VPC
+# Link, on the port of aws_lb_listener.main (80, or 443 when
+# enable_acm_certificate = true). Without this rule the VPC Link ENIs could not
+# reach the listener and every API Gateway route would return HTTP 500.
 resource "aws_security_group_rule" "alb_ingress_from_vpc_link" {
-  description              = "Accept API Gateway VPC Link traffic on the HTTPS listener"
+  description              = "Accept API Gateway VPC Link traffic on the ALB listener"
   type                     = "ingress"
-  from_port                = 443
-  to_port                  = 443
+  from_port                = local.alb_listener_port
+  to_port                  = local.alb_listener_port
   protocol                 = "tcp"
   source_security_group_id = aws_security_group.vpc_link.id
   security_group_id        = aws_security_group.alb.id

@@ -1181,13 +1181,22 @@ show "grep -n 0.0.0.0/0 terraform/security_groups.tf" "$(grep -n '0\.0\.0\.0/0' 
 # `awk '/^resource .aws_security_group./{sg=$3} /0.0.0.0\/0/{print sg}'` printed
 # whichever SG label it had last walked past, so the same exposure PASSed as a
 # standalone rule and FAILED as an inline block.
+# The ALB is internal (terraform/alb.tf), so the expected answer is now NO
+# world-open ingress rule anywhere. An empty parser result is only trusted after
+# the parser has detected a one-rule probe, so a parser that silently stopped
+# working cannot turn into a pass.
+SG_PROBE='resource "aws_security_group_rule" "probe" {
+  type              = "ingress"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.probe.id
+}'
 ALL_WORLD="$(sg_world_open)"
 if [ "${ALL_WORLD}" = "__PARSER_MISSING__ ${SG_PARSER}" ]; then
   invalid "scripts/lib/hcl_sg_world_open.awk is missing -- the data-tier exposure check could not be executed, so it is INVALID and NOT a pass"
-elif [ -z "${ALL_WORLD}" ]; then
-  fail "the HCL parser found NO world-open ingress rule at all, but terraform/security_groups.tf does contain 0.0.0.0/0 literals -- the parser and the file disagree, so nothing is claimed"
+elif [ "$(printf '%s\n' "${SG_PROBE}" | awk -f "${SG_PARSER}" 2>/dev/null | cut -f1)" != "probe" ]; then
+  invalid "the HCL parser did not detect its world-open probe rule, so an empty result would prove nothing -- the exposure check is INVALID, not a pass"
 else
-  show "awk -f scripts/lib/hcl_sg_world_open.awk terraform/*.tf   (sg-label, style, file:line)" "${ALL_WORLD}"
+  show "awk -f scripts/lib/hcl_sg_world_open.awk terraform/*.tf   (sg-label, style, file:line)" "${ALL_WORLD:-<no world-open ingress rule; the probe rule was detected, so the parser works>}"
   DATA_OPEN="$(awk -F'\t' '$1=="db"||$1=="mq"{print $1" ("$2" at "$3")"}' <<<"${ALL_WORLD}" | sort -u | tr '\n' ' ')"
   DATA_OPEN="${DATA_OPEN% }"
   UNATTR="$(awk -F'\t' '$1 ~ /^UNATTRIBUTED\(/{print $1" at "$3}' <<<"${ALL_WORLD}" | tr '\n' ' ')"
@@ -1195,16 +1204,13 @@ else
   if [ -z "${DATA_OPEN}" ] && [ -z "${UNATTR}" ]; then
     pass "no 0.0.0.0/0 ingress rule is attached to the db or mq security groups in ANY HCL style (standalone aws_security_group_rule, inline ingress{} block, or aws_vpc_security_group_ingress_rule): the data tier is private"
   else
-    fail "a world-open ingress rule is attached to the data tier: ${DATA_OPEN:-none}${UNATTR:+, unattributable: ${UNATTR}} (every world-open ingress rule must attach to the public alb SG only)"
+    fail "a world-open ingress rule is attached to the data tier: ${DATA_OPEN:-none}${UNATTR:+, unattributable: ${UNATTR}}"
   fi
-  # The world-open rules that ARE legitimate, asserted so the count is not
-  # silently reduced to zero by a parser that stopped working.
-  PUB_OPEN="$(awk -F'\t' '$1!="db" && $1!="mq" && $1 !~ /^UNATTRIBUTED\(/{c++} END{print c+0}' <<<"${ALL_WORLD}")"
-  PUB_NAMES="$(awk -F'\t' '$1!="db" && $1!="mq" && $1 !~ /^UNATTRIBUTED\(/{print $1}' <<<"${ALL_WORLD}" | sort -u | tr '\n' ' ')"
-  if [ "${PUB_OPEN:-0}" -ge 1 ] && [ -n "${PUB_NAMES}" ]; then
-    pass "the ${PUB_OPEN} world-open ingress rule(s) the parser did find all attach to '${PUB_NAMES% }' -- the public ALB edge, as documented in terraform/security_groups.tf"
+  if [ -z "${ALL_WORLD}" ]; then
+    pass "no security group admits 0.0.0.0/0 ingress at all: the ALB is internal and API Gateway is the only public entry, as documented in terraform/security_groups.tf"
   else
-    fail "expected the public ALB SG to hold the only world-open ingress rules, but the parser found none at all (it is not reporting reality)"
+    PUB_NAMES="$(cut -f1 <<<"${ALL_WORLD}" | sort -u | tr '\n' ' ')"
+    fail "world-open ingress rule(s) found on '${PUB_NAMES% }': the ALB is internal (terraform/alb.tf), so no security group should admit 0.0.0.0/0"
   fi
 fi
 if [ -f "${ROOT_DIR}/.gitignore" ] && grep -q 'terraform.tfstate' "${ROOT_DIR}/.gitignore"; then
@@ -1841,15 +1847,22 @@ fi
 # SECTION 18 -- audit.md:94  security best practices incl. vulnerability scanning
 # =============================================================================
 if step "18" "Security best practices incl. vulnerability scanning" "audit.md:94"; then
+# The public edge is API Gateway, which AWS serves over HTTPS only; the ALB is
+# internal. The listener is HTTP :80 by default and HTTPS :443 with an ACM
+# certificate when enable_acm_certificate = true (terraform/alb.tf).
 ACMN="$(tf_res acm_certificate)"
-HTTPS_L="$(tf_block "${TF_DIR}/alb.tf" aws_lb_listener https | grep -cE 'protocol[[:space:]]*=[[:space:]]*.HTTPS.' | head -1)"
-REDIRECT="$(tf_block "${TF_DIR}/alb.tf" aws_lb_listener http | grep -c 'redirect' | head -1)"
-show "ACM certs / HTTPS listener / HTTP->HTTPS redirect" "acm=${ACMN:-0} https_listener=${HTTPS_L:-0} redirect_rule=${REDIRECT:-0}"
-if [ "${ACMN:-0}" -ge 1 ]; then pass "an ACM certificate is provisioned for the ALB"; else fail "no ACM certificate found"; fi
-if [ "${HTTPS_L:-0}" -ge 1 ]; then pass "an HTTPS (443) listener is declared"; else fail "no HTTPS listener on the ALB"; fi
-if [ "${REDIRECT:-0}" -ge 1 ]; then pass "plain HTTP (80) is redirect-only, forcing TLS"; else fail "no HTTP->HTTPS redirect listener rule"; fi
-TLSPOL="$(tf_block "${TF_DIR}/alb.tf" aws_lb_listener https | grep -oE 'ELBSecurityPolicy-TLS1[0-9-]*' | head -1)"
-if [ -n "${TLSPOL}" ]; then pass "a modern TLS policy is pinned (${TLSPOL})"; else note "no explicit ssl_policy found on the HTTPS listener"; fi
+ALB_INTERNAL="$(tf_block "${TF_DIR}/alb.tf" aws_lb main | grep -cE 'internal[[:space:]]*=[[:space:]]*true' | head -1)"
+TLSPOL="$(tf_block "${TF_DIR}/alb.tf" aws_lb_listener main | grep -oE 'ELBSecurityPolicy-TLS1[0-9-]*' | head -1)"
+TLSCFG="$(tf_block "${TF_DIR}/api_gateway.tf" aws_apigatewayv2_integration alb | grep -c 'server_name_to_verify' | head -1)"
+show "internal ALB / ACM certs / listener TLS policy / integration tls_config" "alb_internal=${ALB_INTERNAL:-0} acm=${ACMN:-0} tls_policy=${TLSPOL:-none} tls_config=${TLSCFG:-0}"
+if [ "${ALB_INTERNAL:-0}" -ge 1 ]; then pass "the ALB is internal: the only public entry point is the API Gateway endpoint, which AWS serves over HTTPS only"
+else fail "the ALB is not internal, so it is a second public entry point next to API Gateway"; fi
+if [ "${ACMN:-0}" -ge 1 ] && [ -n "${TLSPOL}" ] && [ "${TLSCFG:-0}" -ge 1 ]; then
+  pass "the optional HTTPS hop is wired: with enable_acm_certificate = true the listener serves an ACM certificate with ${TLSPOL} and API Gateway verifies it (tls_config server_name_to_verify)"
+else
+  fail "the optional HTTPS hop is incomplete: acm=${ACMN:-0} tls_policy=${TLSPOL:-none} tls_config=${TLSCFG:-0}"
+fi
+note "with the default enable_acm_certificate = false, the API Gateway -> ALB hop is plain HTTP on :80 inside the VPC, reachable only from the VPC Link security group (a documented cost trade-off: no domain needed)"
 
 if tf_any apigatewayv2_authorizer; then pass "API Gateway authorizer is provisioned (managed JWT validation)"; else fail "no API Gateway authorizer"; fi
 if tf_any cognito_user_pool; then pass "Cognito user pool provides the managed authentication"; else fail "no Cognito user pool"; fi
@@ -2068,7 +2081,7 @@ check_bonus "AWS Inspector v2 -- continuous vulnerability scanning" inspector2_e
 check_bonus "ECR image registry with scan-on-push"                   ecr_repository
 check_bonus "AWS Cloud Map service discovery"                        service_discovery_private_dns_namespace
 check_bonus "ACM certificate for the ALB"                            acm_certificate
-check_bonus "ACM/DNS validation with a self-signed fallback"         acm_certificate_validation
+check_bonus "ACM DNS validation for the optional HTTPS hop"           acm_certificate_validation
 check_bonus "Fargate Spot toggle (cost optimisation)"                ecs_cluster_capacity_providers
 check_bonus "AWS Budgets cost guardrail"                             budgets_budget
 check_bonus "AWS S3 object storage"                                  s3_bucket

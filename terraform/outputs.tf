@@ -34,7 +34,7 @@ output "availability_zones_in_use" {
 
 # Entrypoint / Gateway Outputs
 output "alb_dns_name" {
-  description = "Public DNS name of the Application Load Balancer"
+  description = "DNS name of the internal Application Load Balancer. It resolves to private IPs and is reachable only inside the VPC; the public entry point is api_gateway_invoke_url."
   value       = aws_lb.main.dns_name
 }
 
@@ -43,14 +43,14 @@ output "alb_arn" {
   value       = aws_lb.main.arn
 }
 
-output "alb_https_url" {
-  description = "Public HTTPS base URL of the ALB (custom domain when enable_acm_certificate = true, otherwise the ALB DNS name)"
-  value       = local.alb_base_url
+output "alb_listener" {
+  description = "Protocol and port of the internal ALB listener the API Gateway VPC Link integration targets: HTTP:80 by default, HTTPS:443 when enable_acm_certificate = true."
+  value       = "${local.alb_listener_protocol}:${local.alb_listener_port}"
 }
 
 output "alb_certificate_arn" {
-  description = "ARN of the certificate the ALB HTTPS listener terminates with"
-  value       = local.alb_certificate_arn
+  description = "ARN of the ACM certificate on the ALB listener, or null on the default HTTP listener (enable_acm_certificate = false)."
+  value       = one(aws_acm_certificate_validation.alb[*].certificate_arn)
 }
 
 output "api_gateway_invoke_url" {
@@ -63,13 +63,8 @@ output "app_base_url" {
   value       = "${aws_apigatewayv2_api.main.api_endpoint}/api/movies"
 }
 
-output "app_base_url_via_alb" {
-  description = "Base URL of the protected /api/movies resource reached directly at the ALB. NOT the documented path: the ALB :443 listener now has an authenticate-cognito action with on_unauthenticated_request = deny (alb.tf), so an unauthenticated call to this URL returns HTTP 401. Use api_gateway_invoke_url / app_base_url for the API Gateway path, or authenticate at the ALB with the hosted UI first."
-  value       = "${local.alb_base_url}/api/movies"
-}
-
 output "billing_orders_url" {
-  description = "Authenticated URL for GET /api/billing/orders. Reaches billing-app directly through the second ALB target group (aws_lb_target_group.billing + aws_lb_listener_rule.billing_orders); POST /api/billing still goes through api-gateway, which publishes to RabbitMQ."
+  description = "Authenticated URL for GET /api/billing/orders through API Gateway. The ALB rule aws_lb_listener_rule.billing_orders forwards it to billing-app's target group; POST /api/billing still goes to api-gateway, which publishes to RabbitMQ."
   value       = "${aws_apigatewayv2_api.main.api_endpoint}/api/billing/orders"
 }
 

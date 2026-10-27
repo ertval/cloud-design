@@ -5,7 +5,7 @@
 # validate` / apply; names match local.name_prefix convention used there.
 #
 # Three services, matching the three applications in srcs/:
-#   api-gateway  : internet-facing, behind the ALB target group (:3000)
+#   api-gateway  : public through API Gateway, behind the internal ALB target group (:3000)
 #   inventory-app: private, discovered by api-gateway over Cloud Map (:8080)
 #   billing-app  : private, the ONLY RabbitMQ consumer -> desired_count 2, and
 #                  additionally behind a second ALB target group (:8080) so
@@ -274,7 +274,7 @@ resource "aws_ecs_service" "api_gateway" {
   health_check_grace_period_seconds = 360
   enable_execute_command            = true
 
-  depends_on = [aws_lb_listener.https]
+  depends_on = [aws_lb_listener.main]
 
   tags = local.common_tags
 }
@@ -371,7 +371,7 @@ resource "aws_ecs_service" "billing_app" {
   }
 
   # FIX: billing-app's HTTP surface (GET /api/billing/orders) was registered with
-  # Cloud Map but nothing called it, so it was unreachable from outside the VPC.
+  # Cloud Map but nothing called it, so it was unreachable through API Gateway.
   # Registering it with the second ALB target group is what makes
   # aws_lb_listener_rule.billing_orders deliver those requests; no change to
   # srcs/ was needed, which matters because that directory is owned by another
@@ -390,7 +390,7 @@ resource "aws_ecs_service" "billing_app" {
   enable_execute_command            = true
 
   # ECS may only register targets with an ALB once the listener exists.
-  depends_on = [aws_lb_listener.https]
+  depends_on = [aws_lb_listener.main]
 
   tags = local.common_tags
 }

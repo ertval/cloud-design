@@ -2,9 +2,10 @@
 # Cloud Map Service Discovery: Private DNS for East-West Traffic
 # ------------------------------------------------------------------------------
 # WHY CLOUD MAP AND NOT PER-SERVICE ALB TARGET GROUPS
-# The architecture has exactly one internet-facing ALB, which fronts api-gateway
-# only (the ALB target group in alb.tf). inventory-app and billing-app are
-# private and must still be reachable by name, so they get their own mechanism:
+# The architecture has exactly one ALB, internal and behind API Gateway, which
+# fronts api-gateway (plus billing-app's read path, alb.tf). inventory-app and
+# billing-app are private and must still be reachable by name, so they get their
+# own mechanism:
 # a Cloud Map private DNS namespace. Each ECS service registers its tasks, and
 # AmazonProvidedDNS answers `inventory-app.<namespace>` with the healthy task
 # IPs. api-gateway then resolves INVENTORY_APP_HOST through normal VPC DNS.

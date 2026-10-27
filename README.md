@@ -3,14 +3,14 @@
 A six-container microservices application (movie catalogue + asynchronous billing)
 deployed on AWS with Terraform as the single source of infrastructure truth, and
 runnable end-to-end on a laptop with `docker compose`. Three Python/Flask
-applications sit on **Amazon ECS on Fargate** behind one internet-facing
-**Application Load Balancer** that terminates TLS with an ACM certificate.
-**Amazon API Gateway** with a **Cognito JWT authorizer** is the internet-facing
-entrypoint; **Amazon RDS PostgreSQL Multi-AZ** and **Amazon MQ for RabbitMQ**
-(`ACTIVE_STANDBY_MULTI_AZ`, AMQPS only) form a data tier with no route to the
+applications sit on **Amazon ECS on Fargate** behind one **internal
+Application Load Balancer**. **Amazon API Gateway** with a **Cognito JWT
+authorizer** is the only internet-facing entrypoint (HTTPS) and reaches the ALB
+through a VPC Link; **Amazon RDS PostgreSQL Multi-AZ** and **Amazon MQ for
+RabbitMQ** (`SINGLE_INSTANCE`, AMQPS only) form a data tier with no route to the
 internet. East–west traffic is resolved privately by **AWS Cloud Map**. Everything
-is described in Terraform: 19 `.tf` files, 142 `resource` blocks, 33 variables,
-41 outputs.
+is described in Terraform: 19 `.tf` files, 134 `resource` blocks, 33 variables,
+40 outputs.
 
 Everything asserted below is either reproducible from a command in this README or
 explicitly listed as unverified in [Known limitations](#known-limitations--verified-vs-not).
@@ -45,7 +45,8 @@ explicitly listed as unverified in [Known limitations](#known-limitations--verif
 
 Who talks to what, and which trust boundaries the traffic crosses. Cognito, ACM,
 Route 53, ECR, Inspector2, KMS, Secrets Manager and CloudWatch are AWS-managed
-and therefore live *outside* the VPC; only the ALB is internet-facing inside it.
+and therefore live *outside* the VPC. Nothing inside the VPC is internet-facing:
+the ALB is internal, and API Gateway is the only public entry.
 
 ```mermaid
 flowchart TB
@@ -56,11 +57,11 @@ flowchart TB
         subgraph Edge["Managed edge (outside the VPC)"]
             APIGW["Amazon API Gateway HTTP API<br/>Cognito JWT authorizer<br/>throttle 2500 rps / 5000 burst"]
             Cognito["Amazon Cognito User Pool<br/>signs + verifies the JWT"]
-            ACM["AWS Certificate Manager<br/>+ Route 53 DNS validation"]
+            ACM["AWS Certificate Manager<br/>+ Route 53 DNS validation<br/>(optional: enable_acm_certificate)"]
         end
 
         subgraph VPC["VPC 10.0.0.0/16 - 2 AZs"]
-            ALB["Application Load Balancer (internet-facing)<br/>:443 TLS 1.3, :80 -> 301"]
+            ALB["Application Load Balancer (internal)<br/>HTTP :80 from the VPC Link only<br/>(HTTPS :443 with ACM, optional)"]
             AppTier["ECS on Fargate - private app subnets<br/>api-gateway :3000 / inventory-app :8080 / billing-app :8080"]
             DataTier["Private data subnets - no route to the internet<br/>RDS PostgreSQL x2 :5432<br/>Amazon MQ RabbitMQ AMQPS :5671"]
             CloudMap["AWS Cloud Map<br/>private DNS for east-west"]
@@ -78,7 +79,7 @@ flowchart TB
     Cognito -->|"2. signed JWT"| Client
     Client -->|"3. HTTPS + Authorization: Bearer <JWT>"| APIGW
     APIGW -->|"4. verify signature/issuer/audience"| Cognito
-    APIGW -->|"5. VPC Link to the :443 listener"| ALB
+    APIGW -->|"5. VPC Link to the :80 listener"| ALB
     ALB -->|"6a. HTTP :3000 to apigw TG"| AppTier
     ALB -->|"6b. HTTP :8080 to billing TG<br/>rule prio 1 /api/billing/orders"| AppTier
     AppTier -->|"7. resolve inventory-app.<ns>.local"| CloudMap
@@ -88,7 +89,7 @@ flowchart TB
     CW --> SNS
     AppTier -.-> ECR
     ECR -.-> Insp
-    ACM -.-> ALB
+    ACM -.->|"optional"| ALB
     Auditor -.-> Repo[("this repository")]
 ```
 
@@ -103,25 +104,25 @@ flowchart TB
     IGW["Internet Gateway"]
 
     subgraph Managed["AWS-managed (outside the VPC)"]
-        APIGW2["API Gateway HTTP API<br/>VPC Link to ALB :443"]
-        R53["Route 53<br/>ACM DNS validation + ALB alias"]
+        APIGW2["API Gateway HTTP API<br/>HTTPS, Cognito JWT<br/>VPC Link to ALB :80"]
+        R53["Route 53<br/>ACM DNS validation (optional)"]
         KMS["KMS key (rotation on)"]
         SM["Secrets Manager<br/>3 secrets"]
     end
 
     subgraph VPC["VPC 10.0.0.0/16"]
         subgraph AZA["AZ a"]
-            PubA["public-subnet-1<br/>10.0.1.0/24<br/>ALB + NAT GW 1"]
+            PubA["public-subnet-1<br/>10.0.1.0/24<br/>NAT GW 1"]
             PrivAppA["private app subnet-1<br/>10.0.10.0/24"]
             PrivDbA["private db subnet-1<br/>10.0.20.0/24"]
         end
         subgraph AZB["AZ b"]
-            PubB["public-subnet-2<br/>10.0.2.0/24<br/>ALB + NAT GW 2"]
+            PubB["public-subnet-2<br/>10.0.2.0/24<br/>NAT GW 2"]
             PrivAppB["private app subnet-2<br/>10.0.11.0/24"]
             PrivDbB["private db subnet-2<br/>10.0.21.0/24"]
         end
 
-        ALB2["ALB (internet-facing)<br/>:443 TLS deny-by-default / :80 301<br/>2 TGs + 2 rules (prio 1 billing, prio 10 vpc-hop)"]
+        ALB2["ALB (internal, private app subnets)<br/>HTTP :80 from the VPC Link SG only<br/>2 TGs + 1 rule (prio 1 /api/billing/orders)"]
         NATA["NAT GW 1"]
         NATB["NAT GW 2"]
 
@@ -133,12 +134,11 @@ flowchart TB
 
         RDS1[("RDS inventory<br/>db.t4g.micro Multi-AZ<br/>PostgreSQL 16.9, force_ssl=1")]
         RDS2[("RDS billing<br/>db.t4g.micro Multi-AZ<br/>PostgreSQL 16.9, force_ssl=1")]
-        MQ["Amazon MQ RabbitMQ 3.13<br/>mq.m7g.medium<br/>ACTIVE_STANDBY_MULTI_AZ<br/>AMQPS 5671 only"]
+        MQ["Amazon MQ RabbitMQ 3.13<br/>mq.m7g.medium<br/>SINGLE_INSTANCE (AZ a)<br/>AMQPS 5671 only"]
         CMAP["Cloud Map namespace<br/>cloud-design-prod.local"]
 
-        IGW --> ALB2
-        ALB2 --- PubA
-        ALB2 --- PubB
+        ALB2 --- PrivAppA
+        ALB2 --- PrivAppB
         NATA --- PubA
         NATB --- PubB
         GW --- PrivAppA
@@ -176,9 +176,9 @@ flowchart TB
     GW -.->|"7. DNS query"| Res
     Res -.->|"healthy task IPs only"| INV
 
-    User -->|"443 via IGW (Cognito deny without session)"| ALB2
-    APIGW2 -->|"VPC Link, source_ip in VPC CIDR bypass"| ALB2
-    R53 -.-> ALB2
+    User -->|"HTTPS + Bearer JWT"| APIGW2
+    APIGW2 -->|"VPC Link ENIs in the private app subnets, HTTP :80"| ALB2
+    R53 -.->|"optional"| ALB2
 ```
 
 Routing truth, from `terraform/vpc.tf`: the private **data** route table has
@@ -197,7 +197,7 @@ sequenceDiagram
     autonumber
     participant C as Client
     participant APIGW as API Gateway<br/>(Cognito JWT authorizer)
-    participant ALB as ALB :443
+    participant ALB as internal ALB :80
     participant GW as api-gateway :3000
     participant MQ as RabbitMQ<br/>(Amazon MQ, AMQPS 5671)
     participant BI as billing-app :8080
@@ -205,7 +205,7 @@ sequenceDiagram
 
     C->>APIGW: POST /api/billing + Bearer JWT
     APIGW->>APIGW: verify signature, iss, aud
-    APIGW->>ALB: VPC Link, HTTPS
+    APIGW->>ALB: VPC Link, HTTP inside the VPC
     ALB->>GW: HTTP POST /api/billing
     Note over GW: JSON body captured verbatim<br/>(queue_sender.py: publish_message)
 
@@ -255,9 +255,9 @@ is listed as both a StatefulSet and an RDS instance.
 | 2 | `billing-database` | 5432 | `cloud-design/billing-database:local` (FROM `postgres:17-alpine`) | 5433 (5432 is taken) | **Amazon RDS PostgreSQL**, `multi_az = true`, `publicly_accessible = false` (`rds.tf`) | private db |
 | 3 | `inventory-app` | 8080 | `cloud-design/inventory-app:local` (FROM `python:3.11-alpine`) | 8081 (direct, bypasses the gateway) | **ECS task** `cloud-design-prod-inventory-app` (`ecs_services.tf`) | private app |
 | 4 | `billing-app` | 8080 | `cloud-design/billing-app:local` (FROM `python:3.11-alpine`) | 8082 (direct) | **ECS task** `cloud-design-prod-billing-app`, `desired_count = 2` (`ecs_services.tf`) | private app |
-| 5 | `RabbitMQ` queue | 5672 local / **5671 AWS** | `cloud-design/rabbit-queue:local` (FROM `rabbitmq:3.13-management-alpine`) | 5672 + 15672 (mgmt UI) | **Amazon MQ for RabbitMQ** `ACTIVE_STANDBY_MULTI_AZ`, `publicly_accessible = false`, **AMQPS 5671 only** (`amazon_mq.tf`) | private db |
+| 5 | `RabbitMQ` queue | 5672 local / **5671 AWS** | `cloud-design/rabbit-queue:local` (FROM `rabbitmq:3.13-management-alpine`) | 5672 + 15672 (mgmt UI) | **Amazon MQ for RabbitMQ** `SINGLE_INSTANCE`, `publicly_accessible = false`, **AMQPS 5671 only** (`amazon_mq.tf`) | private db |
 | 6 | `api-gateway` | 3000 | `cloud-design/api-gateway:local` (FROM `python:3.11-alpine`), **2 replicas** | none (behind the LB) | **ECS task** `cloud-design-prod-api-gateway` (`ecs_services.tf`) | private app |
-| — | local load balancer | 3000 (host) | `nginx:1.27-alpine`, `least_conn` — the local stand-in for the ALB | 3000 | **Application Load Balancer**, `internal = false` (`alb.tf`) | public |
+| — | local load balancer | 3000 (host) | `nginx:1.27-alpine`, `least_conn` — the local stand-in for the ALB | 3000 | **Application Load Balancer**, `internal = true`, behind API Gateway (`alb.tf`) | private app |
 
 Supporting AWS resources with no local container counterpart: API Gateway HTTP
 API, Cognito user pool + app clients, ACM certificate, Cloud Map namespace, ECR
@@ -352,11 +352,17 @@ range — see [Usage](#usage) for the script and the full table.
   **asynchronous** — a failover can lose a transaction committed but not yet
   replicated. Semi-synchronous replication is an Aurora Multi-AZ *DB cluster*
   feature, which this design does not use.
-- **Amazon MQ `ACTIVE_STANDBY_MULTI_AZ`**, not `SINGLE_INSTANCE` and not
-  `CLUSTER_MULTI_AZ` — the latter needs three AZs and the design has two.
+- **Amazon MQ `SINGLE_INSTANCE`**, a cost decision. Amazon MQ for RabbitMQ
+  offers only `SINGLE_INSTANCE` or a three-node `CLUSTER_MULTI_AZ`
+  (active/standby is an ActiveMQ mode), and the cluster triples the largest line
+  in the bill (~$115 to ~$345 a month). The trade-off: the broker lives in one AZ
+  and is briefly offline in its weekly maintenance window. While it is down,
+  `POST /api/billing` answers **503** and the client retries; orders already
+  queued are durable, persistent messages and are consumed once it is back.
+  `CLUSTER_MULTI_AZ` is the upgrade path.
 - **ECS services span both private app subnets**, so one AZ loss halves capacity
-  rather than removing it. The ALB and RDS failover are the two events that can
-  still be user-visible, and both are AWS-managed.
+  rather than removing it. A broker outage (above) and an RDS failover are the
+  events that can still be user-visible, and both are AWS-managed.
 - **Graceful shutdown is proven, not asserted.** `docker compose stop billing-app`
   exits **0** (the SIGTERM handler at `srcs/billing-app/app/consume_queue.py:247-253`
   stops the consumer through pika's thread-safe callback), not 137. The measured
@@ -532,17 +538,23 @@ claim.
 
 ### Edge and authentication
 
-- **TLS 1.3 at the ALB**: listener on `:443` with
-  `ELBSecurityPolicy-TLS13-1-2-2021-06`; listener on `:80` is **redirect-only**
-  (`status_code = "HTTP_301"` → 443), so no plaintext path is forwarded. Path
-  routing lives only on the `:443` listener, so HTTP can never bypass TLS.
-- **Certificate**: `enable_acm_certificate = true` requests a real ACM
-  certificate, **DNS-validated via Route 53** in the hosted zone you already own
-  (`aws_route53_record.acm_validation`), and publishes an A-alias to the ALB. The
-  default `false` falls back to a self-signed certificate generated by the `tls`
-  provider, so `terraform apply` succeeds on a brand-new account with no DNS
-  prerequisite. Clients warn on the self-signed path — switch the toggle on for
-  anything actually demonstrated.
+- **One public entry point, HTTPS only.** API Gateway's endpoint
+  (`https://<id>.execute-api.<region>.amazonaws.com`) is the only thing the
+  internet can reach. AWS serves it over HTTPS only, with an AWS-managed
+  certificate. The ALB is `internal = true` in the private app subnets, and its
+  security group has a single ingress rule: the API Gateway VPC Link security
+  group, on the listener port. No security group in the Terraform admits
+  `0.0.0.0/0` ingress.
+- **The API Gateway to ALB hop is plain HTTP on `:80` by default** (a cost
+  decision: no domain is needed). The hop never leaves the VPC. API Gateway HTTP
+  APIs send HTTPS to a private integration only when it has a `tls_config`, and
+  they then verify the backend certificate with no option to skip that check, so
+  a self-signed certificate cannot be used here. `enable_acm_certificate = true`
+  (with a Route 53 domain you already own) is the upgrade: it requests an ACM
+  certificate, **DNS-validated via Route 53** (`aws_route53_record.acm_validation`),
+  switches the listener to HTTPS `:443` with `ELBSecurityPolicy-TLS13-1-2-2021-06`,
+  and adds `tls_config { server_name_to_verify = alb_domain_name }` to the
+  integration.
 - **Managed authentication**: `aws_apigatewayv2_api` (HTTP API) with an
   `aws_apigatewayv2_authorizer` of type `JWT`, identity source
   `$request.header.Authorization`, issuer = the user pool endpoint, audience =
@@ -555,8 +567,8 @@ claim.
   `ANY /api/movies`, `ANY /api/movies/{proxy+}`, `ANY /api/billing` and
   `ANY /api/billing/{proxy+}`.
 - **`GET /health` is intentionally unauthenticated.** It carries no `authorizer_id`
-  (`api_gateway.tf:83-87`) so that external uptime monitors and the ALB health
-  check can call it. If you see `GET /health` return 200 without a token while
+  (`aws_apigatewayv2_route.health` in `api_gateway.tf`) so that external uptime
+  monitors can call it; the ALB health checks call the tasks directly. If you see `GET /health` return 200 without a token while
   `/api/movies` returns 401, **the authorizer is working correctly** — that is the
   designed behaviour, not a bypass. It also reveals nothing but a static
   `{"status":"healthy"}`.
@@ -571,21 +583,15 @@ claim.
   dropped because it returns tokens in the URL fragment. An optional demo user and
   a confidential demo app client sit behind `enable_demo_cognito_user`.
 - **Throttling** on the `$default` stage: 5000 burst / 2500 steady-state.
-- **ALB :443 denies unauthenticated writes (closed, not a bypass).** The
-  `:443` listener's default action is `authenticate-cognito` with
-  `on_unauthenticated_request = "deny"` against the same user pool, then
-  forward to the api-gateway target group — an internet client with no Cognito
-  session gets 401, so `POST /api/billing` straight at the ALB no longer
-  publishes an order. Two `source_ip = var.vpc_cidr` listener rules bypass that
-  second check for the in-VPC API Gateway hop only (the ALB reads the
-  `aws-cognito-identity-token` cookie, not the route-level bearer JWT, so it
-  cannot consume it): `billing_orders` prio 1 forwards
-  `/api/billing/orders[/...]` to the **billing-app** target group (`:8080`),
-  `vpc_link_hop` prio 10 forwards the rest (including unauthenticated
-  `GET /health`) to the **api-gateway** target group (`:3000`). Residual,
-  documented in `alb.tf:243-255`: any ENI inside the VPC can still reach `:443`
-  and be forwarded — closing that too means making the ALB `internal = true`
-  with API Gateway as the only public entry.
+- **Authentication happens once, at API Gateway.** The ALB has no login action
+  of its own: every request it receives came through the VPC Link, and every
+  `/api/*` route has already passed the JWT authorizer. Its one listener forwards
+  to the **api-gateway** target group (`:3000`) by default, and the
+  `billing_orders` rule (priority 1) sends `/api/billing/orders[/...]` to the
+  **billing-app** target group (`:8080`). (The previous revision had an
+  internet-facing ALB with a Cognito action and two source-IP bypass rules: two
+  public entry points, and an ALB Cognito action that could not work, because it
+  needs an app client with a client secret.)
 
 ### Data tier
 
@@ -612,8 +618,8 @@ claim.
 - **Network isolation**: `publicly_accessible = false` on both RDS instances and
   the broker; the private **db** route table has no default route; the db and mq
   security groups accept 5432 and 5671/15671 **only** from the app security group,
-  never `0.0.0.0/0`. The only `0.0.0.0/0` **ingress** rules in the whole
-  Terraform are ALB `:80` and `:443`. There is exactly one `0.0.0.0/0`
+  never `0.0.0.0/0`. There is no `0.0.0.0/0` **ingress** rule anywhere in the
+  Terraform. There is exactly one `0.0.0.0/0`
   **egress** rule — app SG `:443` to the AWS APIs (ECR, CloudWatch, Secrets
   Manager) via NAT — and the route tables' defaults are `0.0.0.0/0` by design.
 
@@ -689,7 +695,7 @@ resource anywhere in `terraform/`. They are future work, listed in [Bonus](#bonu
 | Tool | Why | Version |
 |---|---|---|
 | AWS CLI v2 | push to ECR, read outputs, `aws ecs describe-services` | ≥ 2.x |
-| Terraform | all infrastructure | **≥ 1.5.0** (`main.tf:2`), provider `aws ~> 5.50`, plus `tls ~> 4.0` and `random ~> 3.6` |
+| Terraform | all infrastructure | **≥ 1.5.0** (`main.tf:2`), provider `aws ~> 5.50`, plus `random ~> 3.6` |
 | An AWS account | — | with IAM permissions for VPC, ELB, RDS, MQ, ECS, ECR, Cognito, APIGateway, ACM, Route 53, KMS, Secrets Manager, CloudWatch, SNS, Budgets, Inspector2 |
 
 ### Optional, per path
@@ -700,8 +706,9 @@ resource anywhere in `terraform/`. They are future work, listed in [Bonus](#bonu
 - **The AWS Load Balancer Controller** with an `IngressClass` named exactly `alb`,
   **plus** an ACM certificate ARN in the same region, or `manifests/ingress.yaml`
   fails **silently** (see [Known limitations](#known-limitations--verified-vs-not)).
-- **A Route 53-hosted domain** (`alb_domain_name` + `alb_hosted_zone_id`) if you
-  want the real ACM certificate rather than the self-signed fallback.
+- **A Route 53-hosted domain** (`alb_domain_name` + `alb_hosted_zone_id`) only if
+  you want the API Gateway to ALB hop on HTTPS with an ACM certificate
+  (`enable_acm_certificate = true`). The default needs no domain.
 
 ---
 
@@ -889,18 +896,20 @@ volume: `init-db.sh` reconciles the role and `entrypoint.sh` calls
 
 ### AWS: `terraform.tfvars`
 
-`cp terraform/terraform.tfvars.example terraform/terraform.tfvars`. Three settings
+`cp terraform/terraform.tfvars.example terraform/terraform.tfvars`. Two settings
 are marked `!!` and **MUST** be reviewed before the stack is demonstrated to
 anyone:
 
 | Setting | Default | Why you must change it |
 |---|---|---|
-| **`enable_acm_certificate`** (+ `alb_domain_name`, `alb_hosted_zone_id`) | `false` | With `false` the ALB gets a **self-signed** certificate. Browsers warn, and the API Gateway VPC Link integration validates the chain. Set `true` with a Route 53 domain you already own |
 | **`alarm_email`** | `""` | `""` means the topic and alarms exist with **no** email subscriber. Placeholder domains (`example.com`, `test.*`, `invalid.*`) are rejected at plan time. Any address must be **confirmed** before it receives anything |
 | **`allowed_origins`** | `["https://app.example.com"]` | CORS allow-list. A placeholder blocks every browser request from the real frontend |
 
 Also worth reviewing, not mandatory: `monthly_budget_limit` (default **450**),
-`single_nat_gateway` (default `false` for AZ-independent egress), and
+`single_nat_gateway` (default `false` for AZ-independent egress),
+`enable_acm_certificate` (default `false`: the API Gateway to ALB hop is plain
+HTTP inside the VPC; `true` makes it HTTPS with an ACM certificate and needs a
+Route 53 domain you already own), and
 `enable_demo_cognito_user` (default `true` so `initiate-auth` works immediately —
 set `false` outside a demo, since the demo password lives in Terraform state
 either way).
@@ -1289,17 +1298,17 @@ until it is deleted.
 
 | Item | Size | ~Monthly (us-east-1, on-demand) |
 |---|---|---|
-| Amazon MQ `ACTIVE_STANDBY_MULTI_AZ` | `mq.m7g.medium` ×2 | ~$230 |
+| Amazon MQ `SINGLE_INSTANCE` | `mq.m7g.medium` ×1 | ~$115 |
 | RDS PostgreSQL Multi-AZ | `db.t4g.micro` ×2 + 20 GB gp3 | ~$53 |
 | NAT Gateways | ×2 (one per AZ) | ~$66 |
 | Application Load Balancer | 1 | ~$16 |
 | ECS Fargate | 4 tasks (1 + 1 + 2) | ~$37 |
 | KMS, ECR storage, logs, alarms | — | ~$9 |
-| **Steady state** | | **~$410/mo** |
-| **Peak** (gateway + inventory at max 3) | | **~$450/mo** |
+| **Steady state** | | **~$295/mo** |
+| **Peak** (gateway + inventory at max 3) | | **~$335/mo** |
 
-This table is the justification for `monthly_budget_limit = 450`: the 80 % actual
-notification then fires at $360 as a genuine early warning. The previous `$15`
+`monthly_budget_limit = 450` was sized for the earlier two-broker estimate
+(~$410 steady, ~$450 peak) and now sits above the peak. The previous `$15`
 default was ~20× below the real run-rate, so its alarm fired every month.
 
 ### 2. Monitoring usage and alerts
@@ -1448,12 +1457,11 @@ Optimizer, Savings Plans recommendations.
 
 ### What I would change next
 
-- **Harden the ALB ENI-in-VPC residual.** The `:443` listener already denies
-  unauthenticated internet writes (`authenticate-cognito deny` + two
-  `source_ip` VPC-CIDR bypass rules to two target groups — see
-  [Security](#security)). The remaining step is making the ALB
-  `internal = true` with API Gateway as the only public entry, so even a
-  VPC-internal ENI cannot reach it directly.
+- **HTTPS on the API Gateway to ALB hop.** Buy or reuse a Route 53 domain and
+  set `enable_acm_certificate = true`; the Terraform for it is already in place
+  (see [Security](#security)).
+- **A Multi-AZ broker.** `CLUSTER_MULTI_AZ` removes the single-AZ broker, at
+  roughly three times the broker cost.
 - **One Secret per workload.** Today the three apps load a single Secret through
   `envFrom`, so `inventory-app` holds the RabbitMQ and billing credentials and vice
   versa. Recorded as a known limitation in `manifests/secrets.yaml:93-102`.
@@ -1492,7 +1500,7 @@ Claimed against `docs/readme.md`'s bonus list. Each item says exactly what exist
 
 - [x] `README.md` — architecture diagrams, component descriptions, design rationale, prerequisites, setup, configuration, usage, verification
 - [x] `srcs/` — application source for all six components, with tests
-- [x] `terraform/` — 19 `.tf` files, 142 `resource` blocks (135 `aws_*`), 33 variables, 41 outputs, 7 `data` blocks, 0 modules
+- [x] `terraform/` — 19 `.tf` files, 134 `resource` blocks (129 `aws_*`), 33 variables, 40 outputs, 7 `data` blocks, 0 modules
 - [x] `docker-compose.yml`, `Makefile`, `.env.example`, `.dockerignore`, `.gitignore`
 - [x] `manifests/` — 29 Kubernetes objects including `kustomization.yaml`
 - [x] `ecs-tasks/` — 6 standalone task-definition documents with placeholder ARNs (the authoritative ones are in `terraform/ecs_services.tf`)
@@ -1567,22 +1575,15 @@ only because it now does.
 
 ### Real gaps in the solution
 
-- **ALB :443 residual: ENI-in-VPC reachability.** The `:443` listener
-  defaults to `authenticate-cognito` (`deny`, so unauthenticated internet
-  `POST /api/billing` gets 401), with two `source_ip = var.vpc_cidr` listener
-  rules (`billing_orders` prio 1 to the billing-app TG `:8080`,
-  `vpc_link_hop` prio 10 to the api-gateway TG `:3000`) covering only the
-  in-VPC API Gateway hop, which authenticates with a route-level bearer JWT
-  the ALB cannot consume (cookie vs header — see `alb.tf:243-255`). An ENI
-  already inside the VPC can still reach `:443` and be forwarded. Further
-  hardening, in order of preference: make the ALB `internal = true` and keep
-  the public path on API Gateway; failing that, put WAF in front; failing
-  that, restrict ALB `:443` ingress to the VPC Link security group.
+- **Single-AZ broker.** Amazon MQ runs as `SINGLE_INSTANCE` to keep the bill
+  down, so a broker or AZ outage makes `POST /api/billing` return 503 until it
+  recovers. Queued orders are durable and are not lost.
 - **One Secret for three apps** — `envFrom` gives every app every credential
   (recorded in `manifests/secrets.yaml:93-102`).
 - **`sslmode` is not set client-side**, so TLS to RDS relies on libpq's
   `prefer` default meeting a `force_ssl = 1` server.
-- **No mTLS between services.** API Gateway → ALB is TLS; ALB → `api-gateway`
+- **No mTLS between services.** API Gateway → ALB is plain HTTP by default
+  (HTTPS with `enable_acm_certificate = true`); ALB → `api-gateway`
   (`:3000`) and `api-gateway` → `inventory-app` (`:8080`) are plaintext HTTP inside
   private subnets, isolated by security groups only. A service mesh is future work.
 - **`manifests/ingress.yaml` fails silently without its prerequisites.** It needs
@@ -1591,7 +1592,7 @@ only because it now does.
   **succeeds**, no event is emitted, and `status.loadBalancer.ingress` stays empty
   forever. Check for the controller before concluding the manifests are wrong.
 - **`terraform.tfstate` is local and unprotected.** No S3 backend and no state
-  locking; the backend block is present but commented out at `main.tf:19-26`.
+  locking; the backend block is present but commented out at `main.tf:15-22`.
 - **No CI/CD.** Image push and deploy are manual.
 - **`ecs-tasks/*.json` are placeholders** (`123456789012`) and are not what
   Terraform applies.

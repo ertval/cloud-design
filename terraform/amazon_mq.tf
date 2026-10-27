@@ -66,12 +66,20 @@ resource "aws_mq_broker" "rabbitmq" {
   engine_type        = "RabbitMQ"
   engine_version     = var.mq_engine_version
   host_instance_type = var.mq_host_instance_type
-  # Multi-AZ standby (not SINGLE_INSTANCE SPOF); spans both private DB subnets.
-  # NOTE: RabbitMQ CLUSTER_MULTI_AZ needs 3 AZs; with 2 AZs use ACTIVE_STANDBY_MULTI_AZ.
-  deployment_mode = "ACTIVE_STANDBY_MULTI_AZ"
+  # FIX: this was ACTIVE_STANDBY_MULTI_AZ, which is an ActiveMQ-only mode.
+  # Amazon MQ for RabbitMQ offers exactly two modes, SINGLE_INSTANCE and
+  # CLUSTER_MULTI_AZ (three broker nodes), so CreateBroker rejected the broker.
+  # SINGLE_INSTANCE is the cost choice: a cluster triples the broker bill, and
+  # the broker is the largest line in the estimate (var.monthly_budget_limit).
+  # THE TRADE-OFF, stated plainly: the broker lives in one AZ and is briefly
+  # offline during its weekly maintenance window. While it is down,
+  # POST /api/billing answers 503 and the client has to retry; orders already
+  # queued are durable, persistent messages (queue_sender.py) and are consumed
+  # once the broker is back. CLUSTER_MULTI_AZ is the upgrade path.
+  deployment_mode = "SINGLE_INSTANCE"
 
-  # Deploy across private database subnets in both AZs
-  subnet_ids          = aws_subnet.private_db[*].id
+  # A single-instance broker takes exactly one subnet: the first private DB subnet.
+  subnet_ids          = [aws_subnet.private_db[0].id]
   security_groups     = [aws_security_group.mq.id]
   publicly_accessible = false
 

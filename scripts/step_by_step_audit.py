@@ -144,8 +144,8 @@ STEPS = [
      "grep -c '^resource \"aws_cloudwatch_log_group\"' terraform/cloudwatch.tf | xargs echo 'log groups:' && "
      "grep -c '^resource \"aws_cloudwatch_metric_alarm\"' terraform/cloudwatch.tf | xargs echo 'metric alarms:' && "
      "grep -cE '^resource \"aws_sns_topic(_policy)?\"' terraform/cloudwatch.tf | xargs echo 'sns topic+policy:'", False),
-    (11, "Security: HTTPS+redirect, Inspector v2, ECR scan-on-push, no hardcoded creds (audit.md:94)",
-     "grep -nE 'protocol *=|redirect|ssl_policy' terraform/alb.tf | head -8; echo; "
+    (11, "Security: internal ALB behind HTTPS API Gateway, Inspector v2, ECR scan-on-push, no hardcoded creds (audit.md:94)",
+     "grep -nE 'internal *=|protocol *=|ssl_policy|server_name_to_verify' terraform/alb.tf terraform/api_gateway.tf | head -8; echo; "
      "grep -rn 'aws_inspector2\\|scan_on_push' terraform/*.tf; echo; "
      "grep -rnE 'getenv\\([^)]*, *\"[^\"]*pass' srcs/ || echo 'no hardcoded password defaults in srcs/'", False),
     (11, "No credentials committed: secrets.yaml is placeholders only (audit.md:94)",
