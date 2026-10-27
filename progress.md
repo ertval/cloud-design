@@ -10,6 +10,17 @@ Sources compared:
 
 What was actually run while writing this: `terraform init -backend=false`, `terraform validate` and `terraform fmt -check` on a **temporary copy** of `terraform/` (Terraform v1.16.7, AWS provider 5.100.0). All three pass. No AWS API call was made, no container was started and nothing in the project was changed apart from this file.
 
+## Decisions taken (2026-10-27)
+
+The open choices were settled on cost, the cheapest option each time, and no file in the repository is deleted. Details and trade-offs are in `tasklist.md`, Phase 0. Where this file recommends something different, these decisions win:
+
+- 3.1 broker: `SINGLE_INSTANCE`, not `CLUSTER_MULTI_AZ`.
+- 3.2 TLS: option B, no domain; the public endpoint is HTTPS through API Gateway's own certificate.
+- 3.3 and 5.2: the ALB becomes internal and its Cognito action is removed.
+- 6.1 naming: the current names stay and the mapping to the brief's names is documented.
+- 6.2 docs: both the old and the new brief and rubric stay, the new pair is authoritative; `docs/HANDOFF.md` stays.
+- 6.4 `ecs-tasks/`: every file stays; the three app definitions are refreshed and the three non-deployed ones are labelled, not removed.
+
 ---
 
 ## 1. Summary

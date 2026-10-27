@@ -22,3 +22,12 @@ The user asked for a review of the whole repository against the new brief and au
 
 **Why**
 The user asked for an actionable task list in `tasklist.md` to go with `progress.md`. No project code, Terraform, scripts or `docs/` files were changed.
+
+## 2026-10-27 19:30 EET: Phase 0 decisions settled on cost, all files kept
+
+**What**
+- `tasklist.md`: Phase 0 rewritten with the five decisions taken: D1 no domain (free; HTTPS at API Gateway, plain HTTP inside the VPC to the ALB), D2 Amazon MQ `SINGLE_INSTANCE`, D3 internal ALB, D4 keep both the old and the new brief and rubric (new pair authoritative) plus `docs/HANDOFF.md`, D5 keep current component names and document the mapping. Added a note on further cost levers that were deliberately not applied. Dependent tasks updated to match: T01, T02, T03, T08, T24, T28 (skipped, no domain), T29, T39, T40, T45, T46, T47 (keep every `ecs-tasks/` file), T48, T49, T51 (marked done), T52, T54, T56, T57.
+- `progress.md`: added a "Decisions taken" section near the top saying which earlier recommendations these choices replace.
+
+**Why**
+The user asked for the cheapest, ideally free, option in every Phase 0 decision and for all files to be kept. No project code, Terraform, scripts or `docs/` files were changed.
