@@ -54,8 +54,9 @@ The biggest saving of all costs nothing: deploy shortly before the audit and des
   - Files: `terraform/storage.tf:143-157`
   - Done when: the policy only denies non-TLS requests.
   - Done 2026-10-27.
-- [ ] **T05** Make the pushed image tag match what ECS pulls: push `:latest` (or an immutable git-SHA tag passed to Terraform as a variable). (3.5)
+- [x] **T05** Make the pushed image tag match what ECS pulls: push `:latest` (or an immutable git-SHA tag passed to Terraform as a variable). (3.5)
   - Files: `scripts/build_push.sh:49,167`, optionally `terraform/ecs_services.tf:21` + a new variable
+  - Done 2026-10-28: both options. The local tag stays `:local` (docker-compose and `deploy-k3d.sh` use it); `--push` sends each app image as `:latest` and as the git short SHA (`-dirty-<UTC time>` suffix if `srcs/` has uncommitted changes, `IMAGE_TAG` overrides). New variable `image_tag` (default `latest`, validated) feeds `local.ecr_image_urls`. README step 5 no longer re-applies the spent `tfplan`; it pins the SHA or forces a redeploy and waits for `services-stable`.
 - [ ] **T06** Fix the Cognito demo login: compute `SECRET_HASH` and use the JSON form of `--auth-parameters` (or make the demo client public), and remove `=` and `,` from the demo password alphabet. (3.6)
   - Files: `README.md:946-961`, `terraform/cognito.tf:19` (and `:171-190` if the client becomes public)
 - [ ] **T07** Rewrite the AWS path of `deploy.sh`: ECR first, push, full apply, `aws ecs update-service --force-new-deployment` per service, `aws ecs wait services-stable`, print outputs. No `kubectl` on the AWS path. (3.7)
@@ -64,6 +65,7 @@ The biggest saving of all costs nothing: deploy shortly before the audit and des
   - Files: `scripts/destroy.sh:212-245`, `README.md:1322,1333,1511`
 - [ ] **T09** Re-run `terraform fmt -check -recursive` and `terraform validate` after Phase 1.
   - Run on 2026-10-27 after T01-T04: `fmt -check` clean, `validate` passes, and a mocked-provider `terraform test` passes for both `enable_acm_certificate` values. Re-run after T05 if it touches Terraform.
+  - Re-run on 2026-10-28 after T05: `fmt -check` clean, `validate` passes, mocked `terraform test` 5 passed (adds `image_tag` default, pinned and invalid cases).
 
 ---
 

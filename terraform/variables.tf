@@ -178,6 +178,26 @@ variable "ecs_use_fargate_spot" {
   default     = false
 }
 
+variable "image_tag" {
+  description = <<-EOT
+    ECR image tag the three ECS task definitions pull. scripts/build_push.sh
+    --push pushes every application image as :latest AND as the git short SHA
+    of its sources. "latest" works without any change, but pushing a new
+    :latest does not change the task definition, so ECS keeps the old image
+    until `aws ecs update-service --force-new-deployment`. Setting a pushed SHA
+    (terraform apply -var image_tag=<sha>) registers a new task definition
+    revision, rolls the services, and records exactly which build runs. The ECR
+    lifecycle policy keeps the 5 most recent images, so pin a recent build.
+  EOT
+  type        = string
+  default     = "latest"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$", var.image_tag))
+    error_message = "image_tag must be a valid ECR tag: 1-128 characters from A-Z a-z 0-9 _ . -, not starting with . or -."
+  }
+}
+
 # ------------------------------------------------------------------------------
 # Auto Scaling & Monitoring
 # ------------------------------------------------------------------------------

@@ -16,9 +16,12 @@ locals {
   # Image URLs come from the ECR repositories themselves (ecr.tf) rather than
   # being reconstructed by hand, so the task definitions can never point at a
   # registry path that Terraform does not manage.
+  # FIX: the tag was a hard-coded :latest while scripts/build_push.sh pushed
+  # :local, so no task could pull its image. The script now pushes :latest plus
+  # the git short SHA, and the tag here is var.image_tag (default "latest").
   ecr_image_urls = {
     for name, repo in aws_ecr_repository.app :
-    name => "${repo.repository_url}:latest"
+    name => "${repo.repository_url}:${var.image_tag}"
   }
 
   # launch_type and capacity_provider_strategy are mutually exclusive on

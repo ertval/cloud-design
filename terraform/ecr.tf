@@ -5,14 +5,19 @@
 # nothing can be pushed and every task definition fails to stabilise, so this
 # file is a hard prerequisite of ecs_services.tf.
 #
-# Push workflow (mirrors local.ecr_image_urls in ecs_services.tf and
-# scripts/build_push.sh):
+# Push workflow: `PUSH=1 bash scripts/build_push.sh` pushes every application
+# image as :latest and as the git short SHA; the task definitions pull
+# var.image_tag (default "latest", see local.ecr_image_urls in ecs_services.tf).
+# By hand, for one image:
 #   REG=$(terraform output -raw ecr_registry_url)
 #   aws ecr get-login-password --region us-east-1 \
 #     | docker login --username AWS --password-stdin "$REG"
 #   docker build -f srcs/api-gateway/Dockerfile srcs/api-gateway \
 #     -t "$REG/cloud-design/api-gateway:latest"
 #   docker push "$REG/cloud-design/api-gateway:latest"
+# MUTABLE below is what lets :latest move to each new build. A SHA tag only
+# moves if the same commit is pushed again, and then to a rebuild of the same
+# sources.
 # The Dockerfile is at srcs/<component>/Dockerfile and the build context is that
 # same directory (so srcs/<component>/.dockerignore applies) - the previous
 # revision of this comment pointed at Dockerfiles/Dockerfile.api-gateway, a path

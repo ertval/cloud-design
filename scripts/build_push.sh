@@ -6,10 +6,15 @@ set -uo pipefail
 # ==============================================================================
 # WHAT THIS DOES
 #   1. builds srcs/<component>/Dockerfile for all six components
-#   2. tags each image  cloud-design/<component>:local
+#   2. tags each image  cloud-design/<component>:local  (the tag docker-compose.yml
+#      and deploy-k3d.sh use)
 #   3. verifies the image actually exists afterwards (a build that printed no
 #      error but produced nothing is still a failure)
-#   4. with PUSH=1, logs into ECR and pushes each image
+#   4. with PUSH=1, logs into ECR and pushes each application image under TWO
+#      tags: :latest, which the ECS task definitions pull by default
+#      (var.image_tag in terraform/variables.tf), and an immutable build tag,
+#      the git short SHA of the sources, which can be pinned with
+#      `terraform apply -var image_tag=<tag>`
 #   5. prints the final `docker images` table so the real sizes are on record
 #
 # IT FAILS LOUDLY. No `|| true`, no `set -e`-style silent continuation: the first
@@ -33,6 +38,7 @@ set -uo pipefail
 #   ./scripts/build_push.sh --no-cache         # no layer cache
 #   ./scripts/build_push.sh --component billing-app   # build just one
 #   REGION=us-east-1 ACCOUNT=123456789012 ./scripts/build_push.sh --push
+#   IMAGE_TAG=v1.2.0 ./scripts/build_push.sh --push    # own build tag, not the SHA
 #
 # EXIT: 0 all built (and pushed if requested); 1 on the first hard failure.
 # ==============================================================================
@@ -47,6 +53,8 @@ REGION="${REGION:-us-east-1}"
 ACCOUNT="${ACCOUNT:-}"
 IMAGE_PREFIX="${IMAGE_PREFIX:-cloud-design}"
 TAG="${TAG:-local}"
+# Build tag pushed next to :latest. Empty = derived from git below.
+IMAGE_TAG="${IMAGE_TAG:-}"
 AWS="${AWS:-aws}"
 
 while [ "$#" -gt 0 ]; do
@@ -54,7 +62,7 @@ while [ "$#" -gt 0 ]; do
     --push)     PUSH=1 ;;
     --no-cache) NO_CACHE="--no-cache" ;;
     --component) ONLY_COMPONENT="${2:-}"; shift ;;
-    -h|--help)  sed -n '2,32p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help)  sed -n '2,43p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1 (try --help)" >&2; exit 2 ;;
   esac
   shift
@@ -94,6 +102,31 @@ if [ "${#COMPONENTS[@]}" -eq 0 ]; then
 fi
 echo "components to build (${#COMPONENTS[@]}): ${COMPONENTS[*]}"
 echo
+
+# --- ECR tags, only when a push was actually requested ---------------------
+# FIX: the push used to send <repo>:${TAG}, i.e. :local, while the ECS task
+# definitions pull :latest, so every task failed with CannotPullContainerError.
+# The local tag stays :local (docker-compose.yml and deploy-k3d.sh use it); what
+# goes to ECR is :latest plus an immutable build tag.
+# The build tag is the git short SHA. If srcs/ has uncommitted changes the image
+# is not what that commit contains, so the tag gets a -dirty-<UTC time> suffix
+# and two dirty builds never share a tag.
+PUSH_TAGS=()
+if [ "${PUSH}" = "1" ]; then
+  if [ -z "${IMAGE_TAG}" ]; then
+    IMAGE_TAG="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null)"
+    if [ -n "${IMAGE_TAG}" ] && [ -n "$(git -C "$ROOT_DIR" status --porcelain -- srcs 2>/dev/null)" ]; then
+      IMAGE_TAG="${IMAGE_TAG}-dirty-$(date -u +%Y%m%dT%H%M%SZ)"
+    fi
+    [ -n "${IMAGE_TAG}" ] || IMAGE_TAG="build-$(date -u +%Y%m%dT%H%M%SZ)"
+  fi
+  # Same rule as the image_tag validation in terraform/variables.tf.
+  printf '%s' "${IMAGE_TAG}" | grep -qE '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$' \
+    || die "IMAGE_TAG='${IMAGE_TAG}' is not a valid ECR tag (1-128 of A-Z a-z 0-9 _ . -, not starting with . or -)"
+  PUSH_TAGS=(latest)
+  [ "${IMAGE_TAG}" != "latest" ] && PUSH_TAGS+=("${IMAGE_TAG}")
+  ok "ECR tags to push: ${PUSH_TAGS[*]}"
+fi
 
 # --- ECR login, only when a push was actually requested --------------------
 ECR_REG=""
@@ -164,19 +197,22 @@ if [ "${PUSH}" = "1" ]; then
   for c in "${COMPONENTS[@]}"; do
     repo="cloud-design/${c}"
     if "${AWS}" ecr describe-repositories --repository-names "${repo}" --region "${REGION}" >/dev/null 2>&1; then
-      remote="${ECR_REG}/${repo}:${TAG}"
-      if docker tag "${IMAGE_PREFIX}/${c}:${TAG}" "${remote}"; then
-        if docker push "${remote}"; then
-          ok "pushed ${remote}"
-          PUSH_COUNT=$((PUSH_COUNT + 1))
+      # The second push only uploads a manifest: the layers are already there.
+      for t in "${PUSH_TAGS[@]}"; do
+        remote="${ECR_REG}/${repo}:${t}"
+        if docker tag "${IMAGE_PREFIX}/${c}:${TAG}" "${remote}"; then
+          if docker push "${remote}"; then
+            ok "pushed ${remote}"
+          else
+            bad "docker push FAILED for ${remote}"
+            exit 1
+          fi
         else
-          bad "docker push FAILED for ${remote}"
+          bad "docker tag FAILED for ${remote}"
           exit 1
         fi
-      else
-        bad "docker tag FAILED for ${remote}"
-        exit 1
-      fi
+      done
+      PUSH_COUNT=$((PUSH_COUNT + 1))
     else
       echo "[WARN]  ECR repository '${repo}' does not exist in ${REGION}; skipped ${c}."
       echo "        Create it with terraform (aws_ecr_repository only covers the 3 app"
@@ -203,7 +239,7 @@ echo "============================================================"
 echo " SUMMARY"
 echo "============================================================"
 echo "  built : ${BUILD_COUNT}/${#COMPONENTS[@]}"
-if [ "${PUSH}" = "1" ]; then echo "  pushed: ${PUSH_COUNT}"; fi
+if [ "${PUSH}" = "1" ]; then echo "  pushed: ${PUSH_COUNT} (tags: ${PUSH_TAGS[*]})"; fi
 echo "  failed: ${FAIL_COUNT}"
 if [ "${FAIL_COUNT}" -gt 0 ]; then
   echo
@@ -214,5 +250,14 @@ echo
 if [ "${PUSH}" = "1" ]; then echo ">>> ALL IMAGES BUILT AND PUSHED <<<"; else echo ">>> ALL IMAGES BUILT <<<"; fi
 if [ "${PUSH}" != "1" ]; then
   echo "Next: ./scripts/deploy-k3d.sh   (local cluster)   or   ./scripts/deploy.sh (AWS)"
+else
+  # Pushing a new :latest does not change any task definition, so ECS keeps
+  # running the old image until it is told to redeploy.
+  echo "Next, move the ECS services onto these images, either:"
+  echo "  pin this build (new task definition revision, ECS rolls every service):"
+  echo "    terraform -chdir=terraform apply -var image_tag=${IMAGE_TAG}"
+  echo "  or stay on :latest and force a redeploy of each service:"
+  echo "    aws ecs update-service --cluster \"\$(terraform -chdir=terraform output -raw ecs_cluster_name)\" \\"
+  echo "      --service <name from: terraform -chdir=terraform output ecs_service_names> --force-new-deployment"
 fi
 exit 0

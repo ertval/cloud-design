@@ -53,3 +53,23 @@ The user asked to start Phase 1 with the Terraform blockers, beginning with T01.
 
 **Verified**
 On a temporary copy outside the project: `terraform fmt -check -recursive` clean, `terraform validate` passes, and a `terraform test` with a mocked AWS provider passes plan runs for both `enable_acm_certificate = false` and `true` (listener protocol and port, tls_config, security group port, broker mode and subnet count, S3 policy condition, Cognito callbacks, outputs). Both audit suites were run on a copy before and after: no new failures (the static suite gives 63 passed, 0 failed with Terraform initialised). No AWS API calls were made, so a real `terraform plan` is still to be run. `docs/AUDIT_GUIDE.md` still describes the old design and was not touched.
+
+## 2026-10-28 00:03 EET: Phase 1 T05, pushed image tags now match what ECS pulls
+
+**What**
+- `scripts/build_push.sh`: local builds keep the `:local` tag; `--push` now sends each application image to ECR as `:latest` and as an immutable build tag (git short SHA, with a `-dirty-<UTC time>` suffix when `srcs/` has uncommitted changes; `IMAGE_TAG` overrides it and is validated against the ECR tag rules). The closing message says how to roll the services onto the push. `--help` now prints the whole header (it used to stop before the last usage lines).
+- `terraform/variables.tf`: new variable `image_tag` (default `latest`, regex validation); 34 variables now.
+- `terraform/ecs_services.tf`: `local.ecr_image_urls` uses `var.image_tag` instead of a hard-coded `:latest`, with a FIX comment.
+- `terraform/ecr.tf`: push-workflow comment points at `build_push.sh` and explains why the repositories stay MUTABLE.
+- `terraform/terraform.tfvars.example`: `image_tag = "latest"` with a comment.
+- `README.md`: AWS walkthrough step 5 no longer re-runs the already applied `tfplan`; it pins the SHA with `-var image_tag=...` or forces a redeploy of each service and waits for `services-stable`. Added a `jq` prerequisite row, the build_push.sh table row, and 33 -> 34 variables in two places.
+- `tasklist.md`: T05 ticked with a note; T09 note records the re-run.
+
+**Why**
+The push sent `:local` while the task definitions pulled `:latest`, so every ECS task would fail with CannotPullContainerError. Both options from the task are in place: `:latest` works with no change, and the SHA tag gives a new task definition revision and a record of which build runs. `:local` stays because docker-compose.yml and deploy-k3d.sh depend on it.
+
+**Verified**
+- Stubbed `docker`/`aws`/`terraform` dry runs in `/tmp`: pushes `latest` + `0b1188f` for the three app repos and skips the other three; `IMAGE_TAG=latest` pushes once; `IMAGE_TAG=-bad` exits 1; dirty `srcs/` gives a `-dirty-...` tag; no git gives `build-<time>`.
+- Temp Terraform copy: `fmt -check` clean, `validate` passes, mocked `terraform test` 5 passed (two edge runs from T01-T04 plus `image_tag` default, pinned and invalid).
+- Initialised temp copy of the repo: `test_cloud.sh` 63 passed, 0 failed; `run-audit-checks.sh --static` PASS=159 FAIL=0 INVALID=8.
+- No real build, push or `terraform plan` (needs AWS credentials).

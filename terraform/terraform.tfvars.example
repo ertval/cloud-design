@@ -65,6 +65,11 @@ mq_user               = "rabbit_admin"
 #         warning, which undermines the availability story. false = on-demand.
 ecs_use_fargate_spot = false
 
+# Image tag the ECS task definitions pull. scripts/build_push.sh --push pushes
+# :latest and the git short SHA; set the SHA it prints to roll the services onto
+# exactly that build (a new task definition revision on the next apply).
+image_tag = "latest"
+
 # ------------------------------------------------------------------------------
 # Autoscaling & CloudWatch
 # ------------------------------------------------------------------------------

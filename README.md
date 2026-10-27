@@ -9,7 +9,7 @@ authorizer** is the only internet-facing entrypoint (HTTPS) and reaches the ALB
 through a VPC Link; **Amazon RDS PostgreSQL Multi-AZ** and **Amazon MQ for
 RabbitMQ** (`SINGLE_INSTANCE`, AMQPS only) form a data tier with no route to the
 internet. East–west traffic is resolved privately by **AWS Cloud Map**. Everything
-is described in Terraform: 19 `.tf` files, 134 `resource` blocks, 33 variables,
+is described in Terraform: 19 `.tf` files, 134 `resource` blocks, 34 variables,
 40 outputs.
 
 Everything asserted below is either reproducible from a command in this README or
@@ -696,6 +696,7 @@ resource anywhere in `terraform/`. They are future work, listed in [Bonus](#bonu
 |---|---|---|
 | AWS CLI v2 | push to ECR, read outputs, `aws ecs describe-services` | ≥ 2.x |
 | Terraform | all infrastructure | **≥ 1.5.0** (`main.tf:2`), provider `aws ~> 5.50`, plus `random ~> 3.6` |
+| `jq` | `build_push.sh --push` reads the account ID with it; the redeploy loop in step 5 of the AWS walkthrough | any 1.6+ |
 | An AWS account | — | with IAM permissions for VPC, ELB, RDS, MQ, ECS, ECR, Cognito, APIGateway, ACM, Route 53, KMS, Secrets Manager, CloudWatch, SNS, Budgets, Inspector2 |
 
 ### Optional, per path
@@ -776,13 +777,25 @@ cd ..                       # back to the repository root
 REG=$(terraform -chdir=terraform output -raw ecr_registry_url)
 aws ecr get-login-password --region us-east-1 \
   | docker login --username AWS --password-stdin "$REG"
+#    Every image is pushed twice: as :latest (what the task definitions pull by
+#    default, var.image_tag) and as the git short SHA, which the script prints.
 PUSH=1 bash scripts/build_push.sh
 
-# 5. the authoritative task definitions and services live in terraform/. The
-#    image tags are `:latest`, so re-apply so the services redeploy onto the
-#    images you just pushed. Without this step the tasks run whatever `:latest`
-#    pointed at when the first apply created them.
-(cd terraform && terraform apply tfplan)
+# 5. move the services onto the pushed images. Step 3 created them before any
+#    image existed, so until now their tasks fail with CannotPullContainerError
+#    and ECS keeps retrying; that is expected. Do NOT re-run
+#    `terraform apply tfplan`: a saved plan can only be applied once.
+#    Either pin the SHA tag from step 4 (new task definition revision, ECS rolls
+#    every service; also set it in terraform.tfvars so a later plain apply does
+#    not switch back to :latest):
+terraform -chdir=terraform apply -var image_tag=<sha printed by step 4>
+#    or stay on :latest and force a redeploy of each service:
+CLUSTER=$(terraform -chdir=terraform output -raw ecs_cluster_name)
+SERVICES=$(terraform -chdir=terraform output -json ecs_service_names | jq -r '.[]')
+for svc in $SERVICES; do
+  aws ecs update-service --cluster "$CLUSTER" --service "$svc" --force-new-deployment >/dev/null
+done
+aws ecs wait services-stable --cluster "$CLUSTER" --services $SERVICES
 ```
 
 > The ECS task definitions in `terraform/ecs_services.tf` are authoritative.
@@ -1500,7 +1513,7 @@ Claimed against `docs/readme.md`'s bonus list. Each item says exactly what exist
 
 - [x] `README.md` — architecture diagrams, component descriptions, design rationale, prerequisites, setup, configuration, usage, verification
 - [x] `srcs/` — application source for all six components, with tests
-- [x] `terraform/` — 19 `.tf` files, 134 `resource` blocks (129 `aws_*`), 33 variables, 40 outputs, 7 `data` blocks, 0 modules
+- [x] `terraform/` — 19 `.tf` files, 134 `resource` blocks (129 `aws_*`), 34 variables, 40 outputs, 7 `data` blocks, 0 modules
 - [x] `docker-compose.yml`, `Makefile`, `.env.example`, `.dockerignore`, `.gitignore`
 - [x] `manifests/` — 29 Kubernetes objects including `kustomization.yaml`
 - [x] `ecs-tasks/` — 6 standalone task-definition documents with placeholder ARNs (the authoritative ones are in `terraform/ecs_services.tf`)
@@ -1608,7 +1621,7 @@ only because it now does.
 | `scripts/run-audit-checks.sh` | Walks all 22 rubric items in `docs/audit.md`, runs the real command for each, prints real stdout/stderr, and grades PASS / FAIL / **INVALID** / NOTE. Never hides a command | PASS=203, FAIL=0, INVALID=1, NOTES=44 |
 | `scripts/test_cloud.sh` | Static-only suite: reads files, parses manifests, grades Dockerfiles / Terraform / manifests / scripts. Deliberately separate from the live suite so a reviewer can tell reading-based proof from running-based proof | 64 PASS / 0 FAIL / 1 WARN |
 | `scripts/step_by_step_audit.py` | Sends the literal rubric commands to a terminal pane one at a time, so the examiner watches each command typed and its real output. `--list`, `--dry-run`, `--only <section>`, `--section`, `--pane` | — |
-| `scripts/build_push.sh` | Builds all six images, verifies each one exists, optionally pushes to ECR with `PUSH=1`, prints the real size table | — |
+| `scripts/build_push.sh` | Builds all six images as `:local`, verifies each one exists, optionally pushes the three application images to ECR with `PUSH=1` (as `:latest` and the git short SHA), prints the real size table | — |
 | `scripts/deploy.sh` | AWS path: `sts get-caller-identity` → build+push → `init`/`validate`/`plan`/`apply` → `kubectl apply -k manifests/` → rollout waits | — |
 | `scripts/deploy-k3d.sh` | Local k3d path: creates the cluster with `metrics-server`, builds, `k3d image import`, applies the manifests, waits for rollouts | — |
 | `scripts/destroy.sh` | Teardown that reports per resource class whether it actually happened, and names the charges that survive | — |
