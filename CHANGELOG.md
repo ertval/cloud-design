@@ -511,3 +511,125 @@ and grants it to that role. The app container starts only after it exits 0
 (`dependsOn` `SUCCESS`) and receives only its role's secret. The password is sent
 as a SCRAM verifier, so it is never in a server log.
 ```
+
+## 2026-10-28 21:21 EET: Phase 2 T19 and T20, stale budget text fixed and the monthly cost recomputed
+
+**What**
+- `terraform/cloudwatch.tf` (T19):
+  - The section 5 header comment no longer repeats the old "300 USD (~260 USD steady state)". It points to `var.monthly_budget_limit` as the one place for the default, the estimate and the threshold reasoning.
+  - The `EstimatedCharges` alarm comment claimed the description reads "... exceeds $300". It was wrong twice: the default is 450, and the `$` of `${...}` is consumed by the interpolation, so no dollar sign is rendered. The description now ends `${var.monthly_budget_limit} USD` ("... exceeds 450 USD"), and the comment says why.
+- `terraform/variables.tf` (T20): the `monthly_budget_limit` description is rewritten.
+  - It has a new itemised estimate from list prices, totalling ~$339/month (about $11 a day). Peak with every service at its maximum (3 + 3 + 6 = 12 tasks) is ~$393.
+  - It says what changed against ~$313 and why 450 stays the default. The `single_nat_gateway` description now gives the saving as ~$37/month (the gateway plus its Elastic IP).
+- `terraform/terraform.tfvars.example`: NAT comment ~$73 for two (with Elastic IPs) and ~$37 for one; the budget comment gives ~$339 steady, ~$393 peak and why 450.
+- `README.md`:
+  - the cost table, rebuilt with unit prices and 11 lines, plus a paragraph on the method and what changed, and one on why the budget stays at 450;
+  - the broker trade-off bullet (~$100 single instance against ~$300 for the cluster);
+  - the cost-effectiveness bullets (NAT ~$37, estimate ~$339);
+  - the lever table: `single_nat_gateway` ~$37, and the `monthly_budget_limit` default corrected from `300` to `450`.
+- `tasklist.md`: T19 and T20 ticked and crossed out.
+- Not changed: `progress.md`, the D2/T01 notes in `tasklist.md` and `docs/HANDOFF.md:331-332`, which record figures at the time they were written. `scripts/run-audit-checks.sh:740` ("450 USD, was 300") is still true.
+
+**Why**
+- T19: the comments still described a 300 USD budget and a 260 USD steady state, two revisions out of date.
+- T20: the estimate had been patched line by line through T01 and T10, and had never been rebuilt from real prices. Rebuilding it from the AWS Price List moved one line down and added four lines that were missing:
+  - down: Amazon MQ, $115 to $100, because RabbitMQ storage is billed on the GB actually used, not on a 200 GB volume;
+  - added: the two NAT Elastic IPs (~$7);
+  - added: Container Insights (~$27; 88 metrics, needed by the billing-app `RunningTaskCount` alarm);
+  - added: Secrets Manager (five secrets since T18) and the target-tracking alarms.
+
+  T02 itself changed no price: an internal ALB bills the same hourly rate.
+- Budget: 450 stays on purpose. The 80 % ACTUAL notification (360 USD) has to sit above the ~$339 steady state, or it fires every month, which was the original fault of the 15 USD default. The 100 % notification has to sit above the ~$393 peak. 425 would put the 80 % line at 340, on top of the steady state.
+
+**Verified**
+- Prices came from the AWS Price List files for us-east-1, downloaded to a scratch folder outside the repo and read with `jq`. The 481 MB EC2 file was streamed through `grep` for the NAT lines and not saved. The scratch folder was deleted afterwards. Line by line, at 730 hours a month:
+  - Amazon MQ `mq.m7g.medium` single instance $0.1367/h, so $99.79 (the 3-node cluster is $0.41/h, $299.30); RabbitMQ EBS $0.10 per GB-month used;
+  - RDS PostgreSQL `db.t4g.micro` Multi-AZ $0.032/h and Multi-AZ gp3 $0.23/GB-month, so 2 x (23.36 + 4.60) = $55.92;
+  - NAT $0.045/h and $0.045/GB, so $65.70; public IPv4 $0.005/h, so $7.30 for the two NAT Elastic IPs;
+  - ALB $0.0225/h + $0.008/LCU-h, so $16.43 plus LCUs;
+  - Fargate x86 $0.04048 per vCPU-h and $0.004445 per GB-h, so $9.01 per 0.25 vCPU / 0.5 GB task and $54.06 for 6;
+  - Container Insights 13 + 3 x 15 + 3 x 10 = 88 metrics at $0.30, so $26.40;
+  - smaller items: alarms $0.10, logs $0.50/GB, Secrets Manager $0.40 per secret, KMS $1 per key, Cloud Map $0.10 per resource, the namespace's Route 53 hosted zone $0.50, ECR $0.10/GB-month, Inspector $0.09 per initial scan and $0.01 per rescan, HTTP API $1 per million requests, interface endpoints $0.01/h.
+- Totals: steady $338.50, about $11.13 a day or $0.46 an hour; peak $393.16 with 12 tasks. The usage lines (LCUs, NAT data, logs, scans, requests) are estimates for demo traffic, about $8 of the total.
+- Mocked `terraform test` (scratch harness `/tmp/cd-tfcheck2`, outside the repo): 14 passed, 0 failed.
+  - The new run `budget_threshold_text` checks that the description reads "... exceeds 450 USD" and that the budget and the alarm share 450.
+  - Negative check: with the old description restored on the harness copy, the run fails (13 passed, 1 failed). The harness was restored and passes again.
+- `terraform fmt -check` and `terraform validate` clean. `test_cloud.sh` (on a scratch copy) 65 passed, 0 failed, 2 warnings. `run-audit-checks.sh --static` PASS=163 FAIL=0 INVALID=8 NOTES=51, including the "450 USD" default checks.
+- Not verified:
+  - whether the target-tracking alarms are billed and how many there are; AWS documents that Application Auto Scaling creates and manages them, and they are counted here as 2 per policy;
+  - real spend, which needs a deployment and Cost Explorer.
+
+**Sources**
+- [AWS Price List bulk API, us-east-1 offer files](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/index.json) for AmazonMQ, AmazonRDS, AmazonECS, AWSELB, AmazonVPC, AmazonEC2 (NAT lines only), AmazonCloudWatch, AWSSecretsManager, awskms, AmazonApiGateway, AmazonInspectorV2, AmazonECR, AWSCloudMap and AmazonS3, plus the AmazonRoute53 `aws-other` file for hosted zones; publication dates 2026-09-11 to 2026-10-26. All unit prices above come from these files.
+- [Amazon CloudWatch pricing](https://aws.amazon.com/cloudwatch/pricing/): the Container Insights example for ECS on Fargate without enhanced observability. It counts 13 metrics per cluster, 15 per service and 10 per unique task name at $0.30, and says running more tasks does not add metrics. Free tier: 3 dashboards, 10 standard alarms.
+- [Amazon ECS Container Insights metrics](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Container-Insights-metrics-ECS.html): the metric names and their ClusterName / ServiceName / TaskDefinitionFamily dimensions.
+- [Amazon MQ pricing](https://aws.amazon.com/amazon-mq/pricing/): "you pay for the average amount of storage you use per month"; RabbitMQ brokers use EBS; the m7g example bills storage used.
+- [Application Auto Scaling, target tracking](https://docs.aws.amazon.com/autoscaling/application/userguide/application-auto-scaling-target-tracking.html) and [How target tracking works](https://docs.aws.amazon.com/autoscaling/application/userguide/target-tracking-scaling-policy-overview.html): Application Auto Scaling creates and manages the alarms. Neither page gives their number or their price.
+- [AWS PrivateLink pricing](https://aws.amazon.com/privatelink/pricing/): an endpoint is billed "for each hour that your VPC endpoint remains provisioned in each Availability Zone".
+
+Pending docs text (read-only, not applied). All in `docs/AUDIT_GUIDE.md`. The cost figures there predate T01; the VPC endpoint claims are wrong at this traffic, because five interface endpoints in two AZs cost about what the two NATs and their Elastic IPs do (~$73). Other stale items in the same passages (for example the broker mode at line 2538) are left for the docs refresh.
+
+1. Lines 223-224, replace from `absolute dollars` to the end of line 224 with:
+
+```
+absolute dollars, and this architecture has a real floor cost, roughly $339/month
+steady state (MQ ~$100 of it; breakdown in `var.monthly_budget_limit`). Cloud wins here because
+```
+
+2. Line 389, replace with:
+
+```
+2. **`single_nat_gateway` toggle.** Two NAT Gateways cost roughly \$37/month each with their Elastic IPs.
+```
+
+3. Lines 1015-1018 (the "Honest weakness" paragraph), replace with:
+
+```
+**Honest weakness to concede first:** NAT Gateways and their Elastic IPs are
+roughly $73/month of the ~$339 steady state (MQ ~$100 of it), and the design keeps
+two of them on purpose. VPC endpoints would not make it cheaper at this traffic:
+the private tier would need five interface endpoints (ECR API, ECR Docker,
+CloudWatch Logs, Secrets Manager, SSM Messages for ECS Exec) at $0.01 an hour
+each in each AZ, about $73/month in two AZs. They are an isolation improvement
+for later, not a cost saving, and they do not exist yet.
+```
+
+4. Lines 1205-1212 (the **Say:** paragraph after the `450 USD` output), replace with:
+
+```
+**Say:** "The line-item estimate is written into the variable's own description, so
+the number and its justification cannot drift apart. Steady state is about \$339 a
+month: the broker is about \$100 of it, the two NAT Gateways with their Elastic IPs
+about \$73, and Container Insights about \$27, which stays on because an alarm reads
+it. Two things I deliberately did *not* cheapen: `multi_az = true` on both databases
+and one NAT Gateway per AZ, because the rubric grades availability. The broker is
+`SINGLE_INSTANCE`, the one place I chose cost over availability; `CLUSTER_MULTI_AZ`
+would cost about \$200 a month more. `ecs_use_fargate_spot` would save up to ~70 %
+of compute and defaults to `false` for the same reason."
+```
+
+5. Line 2265, the **VPC endpoints** row, replace the third cell with:
+
+```
+Not a cost saving at this traffic: five interface endpoints in two AZs (~\$73/month) cost about what the two NAT Gateways with their Elastic IPs do. An isolation improvement for later. |
+```
+
+6. Lines 2543-2550 (the answer to question 6), replace with:
+
+```
+> Because \$15 was wrong. The real steady state for this design is about \$339/month (MQ ~\$100 of it),
+> so a \$15 budget fired every single month and taught an auditor nothing: the alarm
+> becomes noise and then gets ignored. The line-item breakdown is written into
+> `var.monthly_budget_limit`'s own description so the number and its justification
+> cannot drift apart, and there is a `validation` block refusing anything below 50.
+> With 450, the 80 % ACTUAL notification fires at \$360, just above the steady state,
+> as a genuine early warning, and the 100 % FORECASTED notification sits above the
+> ~\$393 peak with every service at its maximum. 425 would put the 80 % line on top
+> of the steady state.
+```
+
+7. Line 2696, replace with:
+
+```
+| No VPC endpoints | Not a cost gap at this traffic: five interface endpoints in two AZs (~\$73/month) cost about what the two NAT Gateways with their Elastic IPs do. An isolation improvement for later. |
+```

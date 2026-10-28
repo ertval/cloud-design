@@ -358,7 +358,7 @@ range — see [Usage](#usage) for the script and the full table.
 - **Amazon MQ `SINGLE_INSTANCE`**, a cost decision. Amazon MQ for RabbitMQ
   offers only `SINGLE_INSTANCE` or a three-node `CLUSTER_MULTI_AZ`
   (active/standby is an ActiveMQ mode), and the cluster triples the largest line
-  in the bill (~$115 to ~$345 a month). The trade-off: the broker lives in one AZ
+  in the bill (~$100 to ~$300 a month). The trade-off: the broker lives in one AZ
   and is briefly offline in its weekly maintenance window. While it is down,
   `POST /api/billing` answers **503** and the client retries; orders already
   queued are durable, persistent messages and are consumed once it is back.
@@ -394,15 +394,15 @@ verified by an API Gateway **JWT authorizer** attached to every `/api/*` route.
 - **Right-sized defaults**: `db.t4g.micro` (Graviton, ARM) and `mq.m7g.medium`,
   256 CPU / 512 MB per task (0.25 vCPU / 0.5 GB).
 - **`single_nat_gateway = false` by default, on purpose.** One NAT saves roughly
-  **$33/month** but removes AZ independence for *all* private egress (ECR pulls,
-  CloudWatch, Secrets Manager), so an AZ failure takes the whole application
-  down. That is a bad trade against a graded Availability pillar, so it is opt-in
-  for a disposable sandbox.
+  **$37/month** (the gateway and its Elastic IP) but removes AZ independence for
+  *all* private egress (ECR pulls, CloudWatch, Secrets Manager), so an AZ failure
+  takes the whole application down. That is a bad trade against a graded
+  Availability pillar, so it is opt-in for a disposable sandbox.
 - **`ecs_use_fargate_spot = false` by default.** FARGATE_SPOT is up to ~70 %
   cheaper but tasks can be reclaimed with a two-minute warning, which would
   undermine the same pillar. Opt-in.
 - **A budget that can actually fire**: `monthly_budget_limit = 450` USD with an
-  itemised `~$313/month` steady-state estimate in `variables.tf`. The previous
+  itemised `~$339/month` steady-state estimate in `variables.tf`. The previous
   `$15` default was ~20× below the real run-rate, so its alarm fired every month
   and taught an auditor nothing.
 - **Full detail in [Cost management](#cost-management).**
@@ -1424,20 +1424,38 @@ capacity. Fargate bills per task-second (256 CPU / 512 MB per task = 0.25 vCPU /
 an ALB costs ~$16/month whether or not it serves a byte, and an RDS instance bills
 until it is deleted.
 
-| Item | Size | ~Monthly (us-east-1, on-demand) |
+| Item | Size and unit price | ~Monthly |
 |---|---|---|
-| Amazon MQ `SINGLE_INSTANCE` | `mq.m7g.medium` ×1 | ~$115 |
-| RDS PostgreSQL Multi-AZ | `db.t4g.micro` ×2 + 20 GB gp3 | ~$53 |
-| NAT Gateways | ×2 (one per AZ) | ~$66 |
-| Application Load Balancer | 1 | ~$16 |
-| ECS Fargate | 6 tasks (2 + 2 + 2), ~$9 each | ~$54 |
-| KMS, ECR storage, logs, alarms | — | ~$9 |
-| **Steady state** | | **~$313/mo** |
-| **Peak** (gateway + inventory at max 3, 8 tasks) | | **~$331/mo** |
+| Amazon MQ `SINGLE_INSTANCE` | `mq.m7g.medium` ×1 at $0.1367/h; storage is billed on the GB used | ~$100 |
+| RDS PostgreSQL Multi-AZ | `db.t4g.micro` ×2 at $0.032/h, 20 GB gp3 each at $0.23/GB-month | ~$56 |
+| NAT Gateways | ×2 (one per AZ) at $0.045/h, plus $0.045/GB processed | ~$66 |
+| Public IPv4 addresses | ×2, the NAT Elastic IPs, at $0.005/h | ~$7 |
+| Application Load Balancer | 1 (internal) at $0.0225/h, plus LCUs | ~$17 |
+| ECS Fargate | 6 tasks (2 + 2 + 2) of 0.25 vCPU / 0.5 GB, ~$9.01 each | ~$54 |
+| Container Insights | 88 metrics (13 cluster + 3 × 15 service + 3 × 10 task family) at $0.30 | ~$27 |
+| CloudWatch alarms and logs | 13 alarms plus those of the 3 target-tracking policies at $0.10; logs at $0.50/GB | ~$3 |
+| Secrets Manager, KMS, Cloud Map | 5 secrets at $0.40, 1 key at $1, registered tasks at $0.10, the namespace's hosted zone at $0.50 | ~$4 |
+| ECR and Inspector | image storage at $0.10/GB-month, $0.09 per initial image scan | ~$2 |
+| Usage at demo traffic | NAT data, API Gateway ($1 per million requests), S3, data transfer | ~$3 |
+| **Steady state** | about $11 a day, or $0.46 an hour | **~$339/mo** |
+| **Peak** (every service at its maximum, 3 + 3 + 6 = 12 tasks, all month) | | **~$393/mo** |
 
-`monthly_budget_limit = 450` was sized for the earlier two-broker estimate
-(~$410 steady, ~$450 peak) and now sits above the peak. The previous `$15`
-default was ~20× below the real run-rate, so its alarm fired every month.
+The unit prices are us-east-1 on-demand list prices from the AWS Price List API
+(October 2026), at 730 hours a month. Free tiers are not subtracted, and this is
+an estimate, not a quote. Against the earlier ~$313, the broker line fell
+(RabbitMQ storage is billed on the GB used, not on the volume size), and four
+lines that were missing are now in: the NAT Elastic IPs, Container Insights,
+Secrets Manager and the target-tracking alarms. Container Insights is the largest
+of them and stays on deliberately, because the billing-app `RunningTaskCount`
+alarm reads it.
+
+`monthly_budget_limit = 450` stays. The budget's 80 % actual notification
+(360 USD) sits just above the steady state, so it fires on a real overrun rather
+than every month. The 100 % forecasted notification and the `EstimatedCharges`
+alarm (450 USD) sit above the all-maximum peak; 425 would put the 80 % line on
+top of the steady state. Both cover the whole account, not only this stack. The
+previous `$15` default was ~20× below the real run-rate, so its alarm fired every
+month.
 
 ### 2. Monitoring usage and alerts
 
@@ -1481,11 +1499,11 @@ nothing had been destroyed.
 
 | Lever | Default | Effect if you change it |
 |---|---|---|
-| `single_nat_gateway` | **`false`** | `true` saves ~**$33/mo** but every private task loses its second NAT: an AZ failure or NAT maintenance window takes the whole application down. Only for a short-lived sandbox |
+| `single_nat_gateway` | **`false`** | `true` saves ~**$37/mo** (the gateway and its Elastic IP) but every private task loses its second NAT: an AZ failure or NAT maintenance window takes the whole application down. Only for a short-lived sandbox |
 | `ecs_use_fargate_spot` | **`false`** | `true` is up to ~70 % cheaper but tasks can be reclaimed with 2 minutes' warning. The request path already runs 2 tasks per service, which an interruption needs, but a reclaimed task still drops its in-flight requests |
 | `db_instance_class` | `db.t4g.micro` | Graviton ARM; `db.t4g.small` is the next step if the CPU alarm fires |
 | `log_retention_days` | `30` | logs are a real line item; 7 is defensible for a demo |
-| `monthly_budget_limit` | `300` | validation rejects < 50 |
+| `monthly_budget_limit` | `450` | validation rejects < 50; see the reasoning under the cost table |
 
 ### 5. Cost-management tooling used
 

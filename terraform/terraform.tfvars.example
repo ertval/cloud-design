@@ -22,8 +22,8 @@ public_subnet_cidrs      = ["10.0.1.0/24", "10.0.2.0/24"]
 private_app_subnet_cidrs = ["10.0.10.0/24", "10.0.11.0/24"]
 private_db_subnet_cidrs  = ["10.0.20.0/24", "10.0.21.0/24"]
 
-# false = one NAT Gateway per AZ (~$66/mo, AZ-independent egress).
-# true  = a single shared NAT Gateway (~$33/mo) - cheaper, but every private task
+# false = one NAT Gateway per AZ (~$73/mo with their Elastic IPs, AZ-independent egress).
+# true  = a single shared NAT Gateway (~$37/mo) - cheaper, but every private task
 #         loses its second NAT when an AZ fails. Only for a disposable sandbox.
 single_nat_gateway = false
 
@@ -86,8 +86,9 @@ log_retention_days = 30
 # !! anything.
 alarm_email = ""
 
-# ~$313/month steady state (single-instance broker, 2 tasks per service); see the itemised
-# estimate on var.monthly_budget_limit.
+# ~$339/month steady state (single-instance broker, 2 tasks per service), ~$393 with
+# every service at its auto-scaling maximum; 450 keeps the 80 % notification (360)
+# above the steady state. See the itemised estimate on var.monthly_budget_limit.
 monthly_budget_limit = 450
 
 # ------------------------------------------------------------------------------

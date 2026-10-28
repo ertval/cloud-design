@@ -62,13 +62,14 @@ variable "private_db_subnet_cidrs" {
 variable "single_nat_gateway" {
   description = <<-EOT
     Set to true to deploy ONE NAT Gateway shared by both private app subnets,
-    saving ~$33/month (a NAT Gateway is ~$32.85/month + data processing). The
-    trade-off is real and is the reason the default is false: with a single NAT
-    the private tier loses AZ independence for all outbound traffic (pulling
-    images from ECR, CloudWatch Logs, Secrets Manager), so an AZ failure or an
-    NAT maintenance window takes the whole application down. Keep this false for
-    any environment you intend to call highly available, and set it true only
-    for a short-lived, disposable dev sandbox.
+    saving ~$37/month (a NAT Gateway is ~$32.85/month + data processing, and its
+    Elastic IP is a public IPv4 address at ~$3.65/month). The trade-off is real
+    and is the reason the default is false: with a single NAT the private tier
+    loses AZ independence for all outbound traffic (pulling images from ECR,
+    CloudWatch Logs, Secrets Manager), so an AZ failure or an NAT maintenance
+    window takes the whole application down. Keep this false for any environment
+    you intend to call highly available, and set it true only for a short-lived,
+    disposable dev sandbox.
   EOT
   type        = bool
   default     = false
@@ -270,27 +271,49 @@ variable "monthly_budget_limit" {
   description = <<-EOT
     Monthly budget in USD. The previous default of 15 USD was ~20x below the real
     run-rate, so the budget alarm fired every single month and proved useless.
-    Steady-state estimate for this design (us-east-1, on-demand Fargate):
+    Steady-state estimate for this design with the single-instance broker and 2
+    tasks per service (us-east-1 on-demand list prices from the AWS Price List
+    API, October 2026; 730 hours a month):
 
-      Amazon MQ SINGLE_INSTANCE mq.m7g.medium x1 + 200GB EBS .............  ~$115
-      RDS PostgreSQL db.t4g.micro Multi-AZ x2 + storage ..................  ~$53
-      NAT Gateways x2 .....................................................  ~$66
-      Application Load Balancer ..........................................  ~$16
-      ECS Fargate 6 x (0.25 vCPU / 0.5 GB), 2 per service .................  ~$54
-      KMS keys, ECR storage + Inspector scans, CloudWatch logs/alarms ......  ~$9
-      --------------------------------------------------------------------
-      TOTAL ..............................................................  ~$313/mo
+      Amazon MQ SINGLE_INSTANCE mq.m7g.medium x1, $0.1367/h ...............  ~$100
+      RDS PostgreSQL db.t4g.micro Multi-AZ x2, $0.032/h + 20 GB gp3 .......  ~$56
+      NAT Gateways x2, $0.045/h ...........................................  ~$66
+      Public IPv4 x2 (the NAT Elastic IPs), $0.005/h ......................  ~$7
+      Application Load Balancer, $0.0225/h + LCUs .........................  ~$17
+      ECS Fargate 6 x (0.25 vCPU / 0.5 GB), ~$9.01 each ...................  ~$54
+      Container Insights, 88 metrics at $0.30 .............................  ~$27
+      CloudWatch alarms (13 + target tracking's), logs ....................  ~$3
+      Secrets Manager x5, KMS key, Cloud Map + hosted zone ................  ~$4
+      ECR storage, Inspector image scans ..................................  ~$2
+      Usage at demo traffic: NAT data, API Gateway, S3 ....................  ~$3
+      -----------------------------------------------------------------------
+      TOTAL ...............................................................  ~$339/mo
+      (about $11 a day, or $0.46 an hour)
 
-    The MQ line is the one that moved: mq.t3.micro was ~$79 but AWS withdrew it
-    for new brokers (see var.mq_host_instance_type), and mq.m7g.medium is roughly
-    double the instance hours plus a 200 GB EBS volume at $0.10/GB-month. It is
-    one broker, not two: Amazon MQ for RabbitMQ has no active/standby mode (see
-    amazon_mq.tf), and the three-node cluster would add ~$230.
-    Peak (api-gateway + inventory-app auto-scaled to their max of 3, i.e. 8 tasks
-    instead of 6) is ~$331/mo. The 450 USD default was sized for the earlier
-    two-broker estimate (~$410 steady, ~$450 peak) and now sits above the peak.
-    This is an estimate built from published unit prices, not a quote - re-check
-    it against the AWS Pricing Calculator before demoing.
+    Against the earlier ~$313: the broker's storage is billed on the GB actually
+    used, not on the volume size, so a demo queue costs cents rather than $20; and
+    four lines were missing: the two NAT Elastic IPs, Container Insights, Secrets
+    Manager and the alarms Application Auto Scaling creates for the three
+    target-tracking policies (counted here as two each, at $0.10). Container
+    Insights (standard, which the billing-app RunningTaskCount alarm needs) is
+    charged as 13 metrics per cluster, 15 per service and 10 per task family,
+    whatever the task count. Free tiers (CloudWatch's 10 free alarms, for example)
+    are not subtracted. mq.t3.micro was ~$79 but AWS withdrew it for new brokers
+    (see var.mq_host_instance_type). It is one broker, not three: the three-node
+    CLUSTER_MULTI_AZ costs $0.41/h, ~$200/mo more (see amazon_mq.tf).
+
+    Peak, with every service at its auto-scaling maximum (3 + 3 + 6 = 12 tasks)
+    for a whole month: ~$393/mo.
+
+    Why 450 stays the default: the budget's 80 % ACTUAL notification (360 USD)
+    sits just above the steady state, so it fires on a real overrun rather than
+    every month, and the 100 % FORECASTED notification and the EstimatedCharges
+    alarm (450 USD) sit above the all-maximum peak. 425 would put the 80 % line
+    at 340 USD, on top of the steady state. The budget and EstimatedCharges both
+    cover the whole account, not only this stack.
+
+    This is an estimate built from published unit prices, not a quote. After a
+    day of running, compare it with Cost Explorer.
   EOT
   type        = number
   default     = 450

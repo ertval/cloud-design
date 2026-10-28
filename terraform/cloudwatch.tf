@@ -565,9 +565,11 @@ resource "aws_cloudwatch_dashboard" "main" {
 # ------------------------------------------------------------------------------
 # 5. AWS Budgets & CloudWatch Billing Alarms (Actionable Cost Management Plan)
 # ------------------------------------------------------------------------------
-# See var.monthly_budget_limit for the line-item estimate behind the default of
-# 300 USD (~260 USD steady state). The previous default of 15 USD was ~20x below
-# the real run-rate, so this alarm fired every single month and taught an auditor
+# The default limit, the line-item estimate behind it and the reasoning for the
+# thresholds below all live in one place, var.monthly_budget_limit, so they
+# cannot drift apart again (this comment used to repeat an old 300 USD default
+# and a 260 USD steady state). The previous default of 15 USD was ~20x below the
+# real run-rate, so this alarm fired every single month and taught an auditor
 # nothing.
 
 resource "aws_budgets_budget" "monthly" {
@@ -611,8 +613,10 @@ resource "aws_cloudwatch_metric_alarm" "billing_estimated_charges" {
   # FIX: the original used "$${var.monthly_budget_limit}". The doubled dollar
   # escapes the interpolation, so the alarm description rendered the literal
   # string "${var.monthly_budget_limit}" and never mentioned a number. A single
-  # "$" interpolates normally, so this now reads "... exceeds $300".
-  alarm_description = "Proactive alarm triggered when estimated monthly AWS infrastructure spend exceeds ${var.monthly_budget_limit}"
+  # "$" interpolates normally, and the interpolation consumes it, so no dollar
+  # sign is left in the text; the unit is therefore spelled out after the number,
+  # and with the default this reads "... exceeds 450 USD".
+  alarm_description = "Proactive alarm triggered when estimated monthly AWS infrastructure spend exceeds ${var.monthly_budget_limit} USD"
   alarm_actions     = [aws_sns_topic.alerts.arn]
 
   dimensions = {
