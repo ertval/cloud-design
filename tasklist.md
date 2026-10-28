@@ -76,11 +76,11 @@ The biggest saving of all costs nothing: deploy shortly before the audit and des
   - Files: `terraform/ecs_services.tf:224,286`, `terraform/autoscaling.tf:28,58`, `terraform/variables.tf`, `README.md`
 - [x] ~~**T11** Decide on `billing-app` `desired_count` drift: add `ignore_changes = [desired_count]` or document why not. (5.1)~~
   - Files: `terraform/ecs_services.tf:345-396`
-- [ ] **T12** Fix the "ALB Target Health" dashboard widget: add the `TargetGroup` dimension, one line per target group. (5.3)
+- [x] ~~**T12** Fix the "ALB Target Health" dashboard widget: add the `TargetGroup` dimension, one line per target group. (5.3)~~
   - Files: `terraform/cloudwatch.tf:407-408`
-- [ ] **T13** Add a CloudWatch Logs Insights widget (errors per service, recent 5xx) to the dashboard. The first three dashboards per account are free. (5.3)
+- [x] ~~**T13** Add a CloudWatch Logs Insights widget (errors per service, recent 5xx) to the dashboard. The first three dashboards per account are free. (5.3)~~
   - Files: `terraform/cloudwatch.tf`
-- [ ] **T14** Add alarms for the queue consumer: `billing-app` running task count below 2, and `MessageCount` staying high. (5.3)
+- [x] ~~**T14** Add alarms for the queue consumer: `billing-app` running task count below 2, and `MessageCount` staying high. (5.3)~~
   - Files: `terraform/cloudwatch.tf`
 - [ ] **T15** Enable ALB access logs to the S3 bucket, with a bucket policy statement for ELB log delivery (after T04). Storage cost is pennies at demo volume. (5.3)
   - Files: `terraform/alb.tf`, `terraform/storage.tf`, `README.md` (the bucket now has a real use)

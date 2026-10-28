@@ -316,6 +316,68 @@ resource "aws_cloudwatch_metric_alarm" "rds_billing_low_storage" {
   tags = local.common_tags
 }
 
+# Alarm: billing-app running fewer consumer tasks than its minimum
+# billing-app is the only RabbitMQ consumer, and none of the alarms above can
+# see it: the ALB alarms watch only the api-gateway target group, and it has no
+# CPU alarm. RunningTaskCount comes from Container Insights, which is already
+# enabled on the cluster (orchestration.tf), so this needs no new metric.
+# treat_missing_data = "breaching": with no running task there may be no data
+# point at all, and silence must not read as healthy. The flip side is a short
+# ALARM on the very first apply, until the first tasks report.
+resource "aws_cloudwatch_metric_alarm" "billing_app_running_tasks" {
+  alarm_name          = "${local.name_prefix}-billing-app-consumers-below-min"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 3
+  metric_name         = "RunningTaskCount"
+  namespace           = "ECS/ContainerInsights"
+  period              = 60
+  statistic           = "Minimum"
+  threshold           = var.billing_app_min_capacity
+  treat_missing_data  = "breaching"
+  alarm_description   = "billing-app (the only queue consumer) has run fewer than ${var.billing_app_min_capacity} tasks for 3 minutes; orders queue up but are not written"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+
+  dimensions = {
+    ClusterName = aws_ecs_cluster.main.name
+    ServiceName = aws_ecs_service.billing_app.name
+  }
+
+  tags = local.common_tags
+}
+
+# Alarm: the billing queue stays deep
+# Broker-level MessageCount (ready + unacknowledged), the same metric the
+# billing-app autoscaling policy tracks. Target tracking aims to hold it near
+# billing_queue_depth_target, so a backlog that stays above TWICE that for 5
+# minutes means added consumers are not catching up (or are not consuming at
+# all). To see it fire in a drill, stop the consumers and queue more than
+# 2 x billing_queue_depth_target orders. Missing data is not treated as a
+# backlog: no data means no broker metrics, which this alarm cannot judge.
+# Broker level, not per queue: the Queue and VirtualHost dimensions exist on
+# RabbitMQ 3.x but not on 4.x brokers, and var.mq_engine_version leaves room for
+# that upgrade.
+resource "aws_cloudwatch_metric_alarm" "billing_queue_backlog" {
+  alarm_name          = "${local.name_prefix}-billing-queue-backlog"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 5
+  metric_name         = "MessageCount"
+  namespace           = "AWS/AmazonMQ"
+  period              = 60
+  statistic           = "Minimum"
+  threshold           = var.billing_queue_depth_target * 2
+  treat_missing_data  = "notBreaching"
+  alarm_description   = "Broker MessageCount above ${var.billing_queue_depth_target * 2} (2 x the autoscaling target) for 5 minutes: the billing consumers are not keeping up"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+
+  dimensions = {
+    Broker = aws_mq_broker.rabbitmq.broker_name
+  }
+
+  tags = local.common_tags
+}
+
 # 4. Centralized CloudWatch Operational Dashboard
 resource "aws_cloudwatch_dashboard" "main" {
   dashboard_name = "${local.name_prefix}-observability"
@@ -403,15 +465,24 @@ resource "aws_cloudwatch_dashboard" "main" {
         width  = 12
         height = 6
         properties = {
+          # FIX: these two metrics were queried with the LoadBalancer dimension
+          # alone, which the ALB never publishes for them: HealthyHostCount and
+          # UnHealthyHostCount exist only per target group (TargetGroup +
+          # LoadBalancer, optionally + AvailabilityZone). The widget could never
+          # show data. Now one line per target group and state. Minimum for
+          # healthy shows any dip; Maximum for unhealthy shows any failure.
           metrics = [
-            ["AWS/ApplicationELB", "UnHealthyHostCount", "LoadBalancer", aws_lb.main.arn_suffix, { stat = "Maximum", label = "Unhealthy Targets" }],
-            [".", "HealthyHostCount", ".", ".", { stat = "Maximum", label = "Healthy Targets" }]
+            ["AWS/ApplicationELB", "HealthyHostCount", "TargetGroup", aws_lb_target_group.apigw.arn_suffix, "LoadBalancer", aws_lb.main.arn_suffix, { stat = "Minimum", label = "api-gateway healthy" }],
+            [".", "UnHealthyHostCount", ".", ".", ".", ".", { stat = "Maximum", label = "api-gateway unhealthy", color = "#d62728" }],
+            ["AWS/ApplicationELB", "HealthyHostCount", "TargetGroup", aws_lb_target_group.billing.arn_suffix, "LoadBalancer", aws_lb.main.arn_suffix, { stat = "Minimum", label = "billing-app healthy" }],
+            [".", "UnHealthyHostCount", ".", ".", ".", ".", { stat = "Maximum", label = "billing-app unhealthy", color = "#ff7f0e" }]
           ]
           view    = "timeSeries"
           stacked = false
           region  = local.region
-          title   = "ALB Target Health (api-gateway)"
+          title   = "ALB Target Health (per target group)"
           period  = 60
+          yAxis   = { left = { min = 0 } }
         }
       },
       {
@@ -431,6 +502,60 @@ resource "aws_cloudwatch_dashboard" "main" {
           region  = local.region
           title   = "ECS Fargate Service CPU Utilization (autoscaling input)"
           period  = 60
+        }
+      },
+      # Logs Insights widgets: the dashboard was metrics-only, so "logging
+      # dashboards" was not literally true. Each widget runs its query over the
+      # dashboard's time range when the dashboard is opened or refreshed, billed
+      # at the Logs Insights rate per GB scanned (fractions of a cent at demo
+      # volume, nothing while nobody looks at it).
+      {
+        type   = "log"
+        x      = 0
+        y      = 18
+        width  = 12
+        height = 6
+        properties = {
+          # All three apps log "<time> [LEVEL] [service] message" (the format in
+          # each srcs/*/app/__init__.py), so an [ERROR] or [CRITICAL] tag marks
+          # an error line. The service name is the last part of the log group
+          # name (@log), which every event carries, so lines from other loggers
+          # are still counted under the right service.
+          query = join("", [
+            "SOURCE '${aws_cloudwatch_log_group.api_gateway_app.name}' | ",
+            "SOURCE '${aws_cloudwatch_log_group.inventory_app.name}' | ",
+            "SOURCE '${aws_cloudwatch_log_group.billing_app.name}' | ",
+            "filter @message like /\\[(ERROR|CRITICAL)\\]/\n",
+            "| parse @log /(?<service>[^\\/]+)$/\n",
+            "| stats count(*) as errors by service\n",
+            "| sort errors desc",
+          ])
+          region = local.region
+          title  = "Application errors per service ([ERROR] / [CRITICAL] log lines)"
+          view   = "table"
+        }
+      },
+      {
+        type   = "log"
+        x      = 12
+        y      = 18
+        width  = 12
+        height = 6
+        properties = {
+          # The API Gateway access log is JSON (access_log_settings in
+          # api_gateway.tf), so Logs Insights discovers status, routeKey and
+          # integrationErrorMessage as fields. status is logged as a string,
+          # hence the regex instead of a numeric comparison.
+          query = join("", [
+            "SOURCE '${aws_cloudwatch_log_group.api_gw.name}' | ",
+            "filter status like /^5/\n",
+            "| fields @timestamp, status, routeKey, integrationErrorMessage, requestId\n",
+            "| sort @timestamp desc\n",
+            "| limit 20",
+          ])
+          region = local.region
+          title  = "Recent 5xx responses at API Gateway (access log)"
+          view   = "table"
         }
       }
     ]

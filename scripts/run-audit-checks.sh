@@ -2180,8 +2180,9 @@ else
   note "no explicit 'zero modules' statement was found in docs/AUDIT_GUIDE.md to cross-check against terraform/'s ${TF_MODULE_BLOCKS} \`module\` blocks; not scored, and not asserted either way"
 fi
 TF_ALARM_COUNT="$(fcount '^resource "aws_cloudwatch_metric_alarm"' "${TF_DIR}/cloudwatch.tf")"
-TF_WIDGET_COUNT="$(fcount 'type[[:space:]]*=[[:space:]]*"metric"' "${TF_DIR}/cloudwatch.tf")"
-note "Also measured by this run: ${TF_ALARM_COUNT:-?} CloudWatch metric alarms and ${TF_WIDGET_COUNT:-?} dashboard widgets. Terraform .tf FILES are not modules - this project has ${TF_MODULE_BLOCKS} 'module' blocks, and conflating the two was one of the errors this project already had to correct. This script deliberately does not edit docs/."
+TF_WIDGET_COUNT="$(fcount -E 'type[[:space:]]*=[[:space:]]*"metric"' "${TF_DIR}/cloudwatch.tf")"
+TF_LOG_WIDGET_COUNT="$(fcount -E 'type[[:space:]]*=[[:space:]]*"log"' "${TF_DIR}/cloudwatch.tf")"
+note "Also measured by this run: ${TF_ALARM_COUNT:-?} CloudWatch metric alarms and ${TF_WIDGET_COUNT:-?} metric + ${TF_LOG_WIDGET_COUNT:-?} Logs Insights dashboard widgets. Terraform .tf FILES are not modules - this project has ${TF_MODULE_BLOCKS} 'module' blocks, and conflating the two was one of the errors this project already had to correct. This script deliberately does not edit docs/."
 fi
 
 # =============================================================================

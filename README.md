@@ -68,7 +68,7 @@ flowchart TB
         end
 
         subgraph Ops["Observability and security (managed)"]
-            CW["CloudWatch: 4 log groups,<br/>11 alarms, 6-widget dashboard"]
+            CW["CloudWatch: 4 log groups,<br/>13 alarms, 8-widget dashboard"]
             SNS["SNS topic + topic policy<br/>AWS Budget + alarms"]
             ECR["Amazon ECR<br/>3 repos, scan-on-push,<br/>keep last 5"]
             Insp["Amazon Inspector v2<br/>CRITICAL/HIGH filter"]
@@ -443,9 +443,10 @@ and no Container Insights log pipeline in this project.
 ECS Container Insights **is** enabled on the cluster
 (`orchestration.tf:21-24`), which covers cluster-level *metrics* — that is a
 different thing from the `/aws/containerinsights/.../application` *log* pipeline,
-which this project does not create.
+which this project does not create. The `billing-app-consumers-below-min` alarm
+uses one of those metrics, `ECS/ContainerInsights` `RunningTaskCount`.
 
-### Alarms — all 11
+### Alarms (all 13)
 
 | Alarm | Metric | Condition | Window |
 |---|---|---|---|
@@ -459,6 +460,8 @@ which this project does not create.
 | `rds-inventory-low-storage` | `FreeStorageSpace` | < 5 GiB | 2 × 300 s |
 | `rds-billing-high-cpu` | `AWS/RDS CPUUtilization` | > 80 % | 3 × 120 s |
 | `rds-billing-low-storage` | `FreeStorageSpace` | < 5 GiB | 2 × 300 s |
+| `billing-app-consumers-below-min` | `ECS/ContainerInsights RunningTaskCount` (billing-app) | < `billing_app_min_capacity` (2), missing data = breaching | 3 × 60 s |
+| `billing-queue-backlog` | `AWS/AmazonMQ MessageCount` (broker) | > 2 × `billing_queue_depth_target` (100) | 5 × 60 s |
 | `estimated-charges-limit` | `AWS/Billing EstimatedCharges` | > `monthly_budget_limit` | 1 × 6 h |
 
 The two CPU alarms deliberately use the *same* 60 % threshold as the autoscaler,
@@ -467,14 +470,40 @@ because a target group with zero healthy targets produces **no** target 5xx —
 the absence of errors is the symptom. There is **no** "database connections >
 80 %" alarm; connection count is a dashboard widget, not an alarm.
 
+The last two alarms watch the queue consumer, which none of the others can see:
+the ALB alarms cover only the api-gateway target group, and billing-app has no
+CPU alarm because it scales on queue depth. `billing-app-consumers-below-min`
+treats missing data as breaching, because a service with no running task may
+report nothing, so expect one short ALARM right after the first apply, before
+the first tasks report. `billing-queue-backlog` uses the same broker-level
+`MessageCount` the autoscaler tracks: the autoscaler aims to hold it near 50, so
+more than 100 for 5 minutes means added consumers are not catching up. A
+one-message drill does not trip it; queue more than 100 orders with the
+consumers stopped to see it fire.
+
 ### Dashboard
 
-One dashboard, `cloud-design-prod-observability`, **6 metric widgets**:
-API Gateway request/4xx/5xx counts; ALB request volume + target response
-latency; RDS CPU **and** `DatabaseConnections` for both instances; RabbitMQ
-`MessageCount` (queue depth); ALB healthy vs unhealthy target count; ECS CPU per
-service. Widget 6 is the autoscaler's input metric, so "why did it scale out?"
-is answerable from the same screen.
+One dashboard, `cloud-design-prod-observability`, **8 widgets**: 6 metric
+widgets and 2 CloudWatch Logs Insights widgets.
+
+1. API Gateway request/4xx/5xx counts.
+2. ALB request volume + target response latency.
+3. RDS CPU **and** `DatabaseConnections` for both instances.
+4. RabbitMQ `MessageCount` (queue depth).
+5. ALB healthy vs unhealthy targets, one line each per target group
+   (api-gateway and billing-app). `HealthyHostCount` and `UnHealthyHostCount`
+   are only published per target group, so the `TargetGroup` dimension is
+   required; without it the widget stays empty.
+6. ECS CPU per service, the autoscaler's input metric, so "why did it scale
+   out?" is answerable from the same screen.
+7. Logs Insights: count of `[ERROR]` / `[CRITICAL]` lines per service across
+   the three application log groups.
+8. Logs Insights: the 20 most recent 5xx responses from the API Gateway access
+   log, with route, status, `integrationErrorMessage` and `requestId`.
+
+The two log widgets run their query each time the dashboard is opened or
+refreshed, billed at the Logs Insights rate per GB scanned; at demo log volume
+that is a fraction of a cent, and nothing while nobody looks at the dashboard.
 
 ### Notifications and budget
 
@@ -1084,7 +1113,8 @@ aws sns list-topics
 
 Useful reading order: dashboard widget 6 (ECS CPU) answers "did it scale?";
 widget 1 (API Gateway 4xx/5xx) answers "were requests rejected or failed?";
-widget 4 (queue depth) answers "is the consumer keeping up?".
+widget 4 (queue depth) answers "is the consumer keeping up?"; widget 8 shows
+which requests failed, and widget 7 which service logged the errors.
 
 ### Load test — procedure and measured result
 
@@ -1394,7 +1424,7 @@ nothing had been destroyed.
 ### 5. Cost-management tooling used
 
 AWS Budgets, the CloudWatch `EstimatedCharges` metric, the CloudWatch dashboard,
-SNS topic + email subscription, the 11 alarms, `terraform output
+SNS topic + email subscription, the 13 alarms, `terraform output
 monthly_budget_limit_usd`, and `scripts/destroy.sh`. Not used, and honestly
 labelled as future work: Cost and Usage Report / CUR 2.0 into Athena, Compute
 Optimizer, Savings Plans recommendations.
@@ -1516,7 +1546,7 @@ Claimed against `docs/readme.md`'s bonus list. Each item says exactly what exist
 | Bonus item | Status | Evidence |
 |---|---|---|
 | **Use your own `crud-master` / `play-with-containers` / `orchestrator` solutions** | **Done** | The application sources in `srcs/` are that lineage (Flask blueprints, the proxy pattern, the queue-backed billing worker, the `orchestrator` Kubernetes manifests). Every file carries the reasoning for its own design decisions |
-| **Alerting** | **Done** | 11 CloudWatch alarms → SNS topic with a topic policy → email; AWS Budgets at 80 % actual / 100 % forecast |
+| **Alerting** | **Done** | 13 CloudWatch alarms → SNS topic with a topic policy → email; AWS Budgets at 80 % actual / 100 % forecast |
 | **AWS Inspector for vulnerability scanning** | **Done** | `terraform/inspector2.tf`: Inspector v2 enabler for ECR + a CRITICAL/HIGH filter with `action = "NONE"` (reported, not suppressed) |
 | **ECR with scan-on-push** | **Done** | `terraform/ecr.tf`: 3 repos, `scan_on_push = true`, AES256, lifecycle policy keeping the last 5 images, and an explicit account-local repository policy |
 | **AWS Cloud Map service discovery** | **Done** | `terraform/service_discovery.tf`: private DNS namespace, `MULTIVALUE` routing, `health_check_custom_config`, registered by all three ECS services. One ALB, **no second load balancer** for east–west |

@@ -160,3 +160,17 @@ With one task each, the internal ALB had a single target to "balance" and one AZ
 - `run-audit-checks.sh --static` on an initialised copy: PASS=163 FAIL=0 INVALID=8 (159 before: +3 for the billing target now parsed, +1 for the drift check). With `api-gateway` put back to 1 and the `billing-app` `ignore_changes` removed, both new checks FAIL as intended.
 - `test_cloud.sh`: 63 passed, 0 failed (reports min=2 max=3).
 - Not run against AWS.
+
+## 2026-10-28 13:41 EET: T12-T14 dashboard target health per target group, Logs Insights widgets, queue consumer alarms
+
+**What**
+- `terraform/cloudwatch.tf`: the "ALB Target Health" widget now queries `HealthyHostCount` (Minimum) and `UnHealthyHostCount` (Maximum) with `TargetGroup` + `LoadBalancer`, one line each for the api-gateway and billing-app target groups (it used `LoadBalancer` alone, a dimension set the ALB never publishes for these metrics, so it could never show data). Two Logs Insights widgets added at y=18: `[ERROR]`/`[CRITICAL]` line count per service across the three app log groups (service taken from `@log`), and the 20 most recent API Gateway 5xx from the JSON access log. Two alarms added, both to the SNS topic with alarm and OK actions: `billing-app-consumers-below-min` (`ECS/ContainerInsights` `RunningTaskCount` < `var.billing_app_min_capacity`, 3 x 60 s, missing data breaching) and `billing-queue-backlog` (broker `AWS/AmazonMQ` `MessageCount` > 2 x `var.billing_queue_depth_target`, 5 x 60 s, missing data not breaching).
+- `scripts/run-audit-checks.sh`: the closing note now counts metric and Logs Insights widgets separately (it counted only `type = "metric"`).
+- `README.md`: architecture diagram (13 alarms, 8-widget dashboard), Container Insights note, alarm table and heading (all 13) with the two new rows and an explanation, dashboard section listing all 8 widgets, reading order, cost-tooling and alerting rows (13 alarms).
+- `tasklist.md`: T12, T13, T14 ticked and crossed out.
+
+**Why**
+Phase 2 monitoring group. The backlog alarm threshold is twice the autoscaling target, so it fires only when added consumers are not catching up; a one-message drill does not trip it (documented in README). Broker-level `MessageCount` is used instead of per-queue dimensions because RabbitMQ 4.x brokers no longer publish the `Queue` and `VirtualHost` dimensions.
+
+**Verified**
+`terraform fmt -check`, `terraform validate`; mock `terraform test` 9 passed (new runs `consumer_alarms` and `dashboard_widgets` decode the dashboard JSON); negative check with the old widget restored made `dashboard_widgets` fail. `scripts/test_cloud.sh` 63 passed; `scripts/run-audit-checks.sh --static` PASS=163 FAIL=0 (13 alarms, 8 widgets). No AWS calls; the Logs Insights queries were not run against real logs. Freed space on the full `/tmp` RAM disk by deleting only my own earlier scratch copies (`/tmp/cd-t05` to `/tmp/cd-t10`).
