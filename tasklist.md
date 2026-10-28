@@ -84,7 +84,7 @@ The biggest saving of all costs nothing: deploy shortly before the audit and des
   - Files: `terraform/cloudwatch.tf`
 - [x] ~~**T15** Enable ALB access logs to the S3 bucket, with a bucket policy statement for ELB log delivery (after T04). Storage cost is pennies at demo volume. (5.3)~~
   - Files: `terraform/alb.tf`, `terraform/storage.tf`, `README.md` (the bucket now has a real use)
-- [ ] **T16** Optional: make `billing-app` readiness reflect the consumer connection, not only the database. (5.3)
+- [x] ~~**T16** Optional: make `billing-app` readiness reflect the consumer connection, not only the database. (5.3)~~
   - Files: `srcs/billing-app/app/__init__.py`, `srcs/billing-app/app/consume_queue.py`
 - [ ] **T17** Add `sslmode=require` to both database URLs (`query={"sslmode": "require"}` in `URL.create`); keep the local stack working (local Postgres has no TLS, so make it an env-driven default such as `DB_SSLMODE`). (5.4)
   - Files: `srcs/inventory-app/app/__init__.py:148`, `srcs/billing-app/app/__init__.py:224`, `terraform/ecs_services.tf`, `.env.example`

@@ -23,15 +23,13 @@
 #                 (srcs/billing-app/app/__init__.py:51-64) and binds no socket
 #                 until it returns, so without the startupProbe the t=20s
 #                 liveness probe SIGKILLs a pod that was about to succeed.
-#   readinessProbe GET /ready   database-aware; 503 when PostgreSQL is
-#                 unreachable, so the pod leaves the endpoints instead of
-#                 serving 500s. /ready is ported from
-#                 orchestrator/Dockerfiles/inventory-app/app/__init__.py.
-#                 Same landing-order caveat as inventory-app.yaml: the route
-#                 does not exist in srcs/billing-app/app/__init__.py yet, so
-#                 until it lands this probe returns 404 and the pod is
-#                 NotReady. Deliberate -- a loud 404 beats a /health readiness
-#                 probe that silently hides a broken database.
+#   readinessProbe GET /ready   database- and consumer-aware; 503 when
+#                 PostgreSQL is unreachable or the queue consumer is not
+#                 registered with the broker, so a pod that consumes nothing
+#                 shows 0/1 READY instead of looking healthy. During a broker
+#                 outage every billing pod is therefore NotReady, which also
+#                 holds OrderedReady scale-outs until the broker is back; no
+#                 pod restarts, because liveness stays on /health.
 #   livenessProbe  GET /health  restart-only; must stay DB-independent so that a
 #                 database outage does not trigger a restart storm that cannot
 #                 fix the outage.

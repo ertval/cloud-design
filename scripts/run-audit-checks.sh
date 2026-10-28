@@ -952,6 +952,11 @@ if [ "${COMPOSE_STACK_UP}" -eq 1 ]; then
     assert_contains "the /health body reports healthy" "${GH}" "healthy"
     assert_eq "GET /ready on inventory-app (host 8081) returns 200" "200" "$(http_code GET "http://localhost:8081/ready")"
     assert_eq "GET /ready on billing-app (host 8082) returns 200" "200" "$(http_code GET "http://localhost:8082/ready")"
+    # billing-app's /ready also covers its queue consumer, so a 200 here means
+    # the broker has the consumer registered, not only that PostgreSQL answers.
+    RB="$(curl -s -m 10 "http://localhost:8082/ready" 2>&1)"
+    show "curl -s http://localhost:8082/ready" "${RB}"
+    assert_contains "billing-app /ready reports its queue consumer as connected to the broker" "${RB}" '"consumer": *"connected"'
     MV="$(curl -s -m 10 "${LB_URL}/api/movies/" 2>&1)"
     show "curl -s ${LB_URL}/api/movies/" "${MV}"
     if [[ "${MV}" == *'"movies"'* ]]; then

@@ -60,7 +60,8 @@ RUN python3 -c "import flask, waitress, pika, sqlalchemy, psycopg2" && \
 EXPOSE 8080
 
 # /ready is used rather than /health because this service owns database state:
-# it must only be reported healthy once SELECT 1 succeeds.
+# it must only be reported healthy once SELECT 1 succeeds and its queue
+# consumer is registered with the broker.
 HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=6 \
     CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=4)" || exit 1
 

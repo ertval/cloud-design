@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 # \"billing-database\"") and the database name. The exception goes to the log,
 # which is where an operator needs it.
 DATABASE_UNAVAILABLE_MESSAGE = "The billing database is currently unavailable"
+# Same idea for the broker: fixed text, the broker hostname stays in the log.
+CONSUMER_UNAVAILABLE_MESSAGE = "The billing queue consumer is not connected to the message broker"
 
 
 def _require_env(name: str) -> str:
@@ -51,7 +53,14 @@ def _env_or_default(name: str, default: str) -> str:
     return value.strip()
 
 
-def create_app(stop_event=None):
+def create_app(stop_event=None, consumer_connected=None):
+    """Build the Flask app; returns (app, session_factory).
+
+    `consumer_connected` is the threading.Event the queue consumer sets while it
+    is registered with the broker (server.py passes the same Event to
+    start_consuming()). None means no consumer runs in this process, and /ready
+    then checks the database only.
+    """
     app = Flask(__name__)
 
     # Secrets MUST come from env; host/port/db-name keep safe non-secret defaults.
@@ -129,7 +138,15 @@ def create_app(stop_event=None):
     #   /ready   -> "should this container receive traffic?"  This one checks
     #               the database, so a container that cannot reach it is pulled
     #               out of the load balancer's target group instead of being
-    #               restarted.
+    #               restarted. It also requires the queue consumer to be
+    #               registered with the broker: consuming the billing queue is
+    #               this service's main job, and before this a task that had
+    #               lost the broker still answered 200 while consuming nothing.
+    #
+    # Who reads which: the image HEALTHCHECK, the compose healthcheck and the
+    # k8s readinessProbe use /ready. On ECS the container health check and the
+    # ALB use /health on purpose (terraform/ecs_services.tf, alb.tf): a failing
+    # ECS check replaces the task, and new tasks cannot fix a broker outage.
     @app.route("/health", methods=["GET"])
     def health():
         # Liveness is unauthenticated and therefore public: DB-independent and
@@ -139,22 +156,27 @@ def create_app(stop_event=None):
 
     @app.route("/ready", methods=["GET"])
     def ready():
+        body = {"status": "ready", "database": "reachable"}
+        if consumer_connected is not None:
+            body["consumer"] = "connected" if consumer_connected.is_set() else "disconnected"
         try:
             session = session_factory()
             try:
                 session.execute(text("SELECT 1"))
             finally:
                 session.close()
-            return jsonify({"status": "ready", "database": "reachable"}), 200
         except Exception as ready_err:
             # The driver message names the internal host, so it is logged and not
             # returned. A client only learns that this instance is not ready.
             logger.error(f"Readiness probe failed: {ready_err!r}")
-            return jsonify({
-                "status": "not-ready",
-                "database": "unreachable",
-                "error": DATABASE_UNAVAILABLE_MESSAGE,
-            }), 503
+            body.update(status="not-ready", database="unreachable", error=DATABASE_UNAVAILABLE_MESSAGE)
+            return jsonify(body), 503
+        if body.get("consumer") == "disconnected":
+            # Not logged here: the consumer loop already logs every failed
+            # reconnect, and this probe runs every few seconds.
+            body.update(status="not-ready", error=CONSUMER_UNAVAILABLE_MESSAGE)
+            return jsonify(body), 503
+        return jsonify(body), 200
 
     @app.route("/orders", methods=["GET"])
     @app.route("/api/billing/orders", methods=["GET"])

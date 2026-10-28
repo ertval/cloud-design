@@ -16,7 +16,10 @@ What these tests pin:
     ever live without one;
   * the ack/nack policy is unchanged: a committed order is acked, a failed
     insert is nacked with requeue=True after the redelivery backoff, a poison
-    payload is acked and discarded, and an escaping exception still nacks.
+    payload is acked and discarded, and an escaping exception still nacks;
+  * the `connected_event` that /ready reads is set only while the consumer is
+    registered with the broker, and is cleared the moment the connection drops
+    or the consumer stops.
 """
 
 import importlib.util
@@ -97,9 +100,10 @@ class FakeMethod:
 class FakeChannel:
     """Records broker calls; `start_consuming()` blocks like the AMQP read does."""
 
-    def __init__(self, state, hook_after_consume=None):
+    def __init__(self, state, hook_after_consume=None, consume_errors=None):
         self.state = state
         self.hook_after_consume = hook_after_consume
+        self.consume_errors = consume_errors
         self.acks = []
         self.nacks = []
         self.prefetch = None
@@ -122,6 +126,10 @@ class FakeChannel:
 
     def start_consuming(self):
         self.state["start_consuming_calls"] += 1
+        if self.consume_errors:
+            # The broker dropping the connection mid-consume: pika raises out of
+            # the blocking read.
+            raise self.consume_errors.pop(0)
         self.consuming.set()
         # This is the socket read that must be woken by stop_consuming().
         self.stopped.wait(10)
@@ -138,10 +146,11 @@ class FakeChannel:
 
 
 class FakeConnection:
-    def __init__(self, state, hook_after_consume=None, channel_error=None):
+    def __init__(self, state, hook_after_consume=None, channel_error=None, consume_errors=None):
         self.state = state
         self.hook_after_consume = hook_after_consume
         self.channel_error = channel_error
+        self.consume_errors = consume_errors
         self.is_open = True
         self.closed = False
         self.channel_instance = None
@@ -149,7 +158,7 @@ class FakeConnection:
     def channel(self):
         if self.channel_error is not None:
             raise self.channel_error
-        self.channel_instance = FakeChannel(self.state, self.hook_after_consume)
+        self.channel_instance = FakeChannel(self.state, self.hook_after_consume, self.consume_errors)
         return self.channel_instance
 
     def add_callback_threadsafe(self, callback):
@@ -214,6 +223,9 @@ def _build_consume_queue(new_state):
             state,
             hook_after_consume=new_state.get("hook_after_consume"),
             channel_error=new_state.get("channel_error"),
+            # One shared list: each start_consuming() call pops the next error,
+            # so a test can fail the first connection and let the next succeed.
+            consume_errors=new_state.get("consume_errors"),
         )
         state["connections"].append(conn)
         return conn
@@ -428,6 +440,71 @@ class AckPolicyTest(unittest.TestCase):
         self.assertEqual(channel.acks, [1], "an unpersistable message must be discarded")
         self.assertEqual(channel.nacks, [], "an unpersistable message must not be requeued forever")
         self.assertEqual(self.state["added"], [])
+
+
+class ConsumerConnectedEventTest(unittest.TestCase):
+    """/ready reads this Event, so it must follow the broker registration exactly."""
+
+    def setUp(self):
+        self.stop_event = threading.Event()
+        self.connected = threading.Event()
+        for name, value in (("RABBITMQ_USER", "u"), ("RABBITMQ_PASSWORD", "p")):
+            os.environ[name] = value
+        os.environ["RABBITMQ_HOST"] = "broker.invalid"
+        os.environ["RABBITMQ_PORT"] = "5672"
+        os.environ["RABBITMQ_TLS"] = ""
+
+    def _start(self, module, state):
+        worker = threading.Thread(
+            target=module.start_consuming,
+            args=(lambda: FakeSession(state), self.stop_event, self.connected),
+            daemon=True,
+            name="ConsumerUnderTest",
+        )
+        worker.start()
+        return worker
+
+    def test_set_while_consuming_and_cleared_on_shutdown(self):
+        module, state = _build_consume_queue({})
+        worker = self._start(module, state)
+        _wait_for(lambda: state["start_consuming_calls"] == 1, "the consumer to enter start_consuming()")
+        self.assertTrue(self.connected.is_set(), "a registered consumer must report connected")
+
+        self.stop_event.set()
+        worker.join(10)
+
+        self.assertFalse(worker.is_alive(), "consumer did not stop after stop_event was set")
+        self.assertFalse(self.connected.is_set(), "a stopped consumer must not report connected")
+
+    def test_cleared_before_the_retry_sleep_when_the_broker_drops_the_connection(self):
+        """A lost broker must show in /ready at once, not after the 3 s retry pause."""
+        errors = []
+        module, state = _build_consume_queue({"consume_errors": errors})
+        errors.append(module.pika.exceptions.AMQPConnectionError("connection lost"))
+        seen_during_retry_sleep = []
+        module.time = types.SimpleNamespace(
+            sleep=lambda _seconds: seen_during_retry_sleep.append(self.connected.is_set())
+        )
+
+        worker = self._start(module, state)
+        _wait_for(lambda: state["start_consuming_calls"] == 2, "the consumer to reconnect")
+        self.assertEqual(seen_during_retry_sleep, [False], "the Event stayed set while the consumer was down")
+        self.assertTrue(self.connected.is_set(), "the reconnected consumer must report connected again")
+
+        self.stop_event.set()
+        worker.join(10)
+
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(self.connected.is_set())
+
+    def test_never_set_when_shutdown_wins_the_race(self):
+        module, state = _build_consume_queue({"hook_after_consume": self.stop_event.set})
+        worker = self._start(module, state)
+        worker.join(5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(state["start_consuming_calls"], 0)
+        self.assertFalse(self.connected.is_set())
 
 
 if __name__ == "__main__":

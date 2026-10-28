@@ -324,3 +324,39 @@ The user asked for the T12-T14 docs text to be recorded in the changelog the sam
 
 **Verified**
 Read the current lines 550-553, 1124-1126, 1790, 2739-2741 and 2766-2767 (read only); `grep` over `docs/` found no other line with the old alarm or widget counts. Counts checked against the Terraform at HEAD (05187af): 22 `resource` blocks in `cloudwatch.tf`, 13 `aws_cloudwatch_metric_alarm` (all in `cloudwatch.tf`) with 13 `alarm_actions`, 6 metric plus 2 log widgets, 4 log groups, 34 variables, 6 resources in `autoscaling.tf`.
+
+## 2026-10-28 19:07 EET: Phase 2 T16, billing-app /ready also requires the queue consumer
+
+**What**
+- `srcs/billing-app/app/consume_queue.py`: `start_consuming()` takes an optional `connected_event`. It is set once `basic_consume()` has returned (pika waits there for the broker's ConsumeOk) and cleared in a `finally` around `start_consuming()`, so it drops the moment the connection is lost or the consumer stops, before the 3 s retry pause.
+- `srcs/billing-app/app/__init__.py`: `create_app()` takes an optional `consumer_connected` Event. `/ready` adds `"consumer": "connected"` or `"disconnected"` and returns 503 with a fixed message (`CONSUMER_UNAVAILABLE_MESSAGE`, no broker hostname) when the consumer is not registered. The database check and its 503 body are unchanged; without an Event, readiness is the database alone, as before. Comments say which probes read `/ready` and why ECS stays on `/health`.
+- `srcs/billing-app/server.py`: creates the Event and passes it to both.
+- `srcs/billing-app/tests/test_shutdown.py`: the fake channel can raise from `start_consuming()`; new class `ConsumerConnectedEventTest` (3 tests).
+- `srcs/billing-app/tests/test_readiness.py`: new, dependency-free like the other suites (Flask, SQLAlchemy and `app.orders` stubbed), 5 tests of the `/ready` answers.
+- `srcs/billing-app/Dockerfile`, `manifests/billing-app.yaml`: the HEALTHCHECK and readinessProbe comments describe the new check; the manifest's stale note that the `/ready` route did not exist yet is gone.
+- `terraform/ecs_services.tf`: comment only, on why billing-app's ECS health check stays on `/health`.
+- `scripts/run-audit-checks.sh`: the live compose section shows the billing-app `/ready` body and asserts `"consumer":"connected"`.
+- `README.md`: defect 5 (liveness vs readiness) describes the consumer check, with the line reference corrected to `srcs/billing-app/app/__init__.py:132-179`; new "Real gaps" bullet: on ECS nothing probes `/ready`, and a `ConsumerCount` alarm would be the direct AWS signal (not added).
+- `tasklist.md`: T16 ticked and crossed out.
+
+**Why**
+T16: `/health` and `/ready` both answered 200 while the consumer thread had lost the broker, so a task consumed nothing and looked healthy. Readiness, not liveness, carries the check, because restarting a consumer cannot fix a broker outage; for the same reason the ECS health check and the ALB stay on `/health`. The new signal therefore shows in `docker ps` (unhealthy), the compose healthcheck and `kubectl get pods` (0/1 READY); on AWS a lost broker still shows only in the logs and the backlog alarm.
+
+**Verified**
+- `make test-py`: 60 tests OK (billing-app 32 to 40, inventory-app 20). Negative check on a scratch copy (consumer check removed from `/ready`, Event cleared only after the retry sleep): 3 of the new tests fail.
+- Live on local Docker with the real code, pika, Flask, PostgreSQL 17 and RabbitMQ 3.13 (scratch compose project `cd-t16`, own image tags, no host ports): broker up, `/ready` 200 `{"consumer":"connected","database":"reachable","status":"ready"}`; broker stopped, 503 `"consumer":"disconnected"` within 2 s, container `unhealthy` when checked 70 s later, `/health` still 200, 0 restarts; broker started, 200 again after 44 s (mostly broker start-up) and container `healthy`.
+- Cleanup: everything that run created was removed, namely the containers (including the pinned names `cloud-design-rabbit-queue` and `cloud-design-billing-database`), volumes, network, the `cd-t16/*` images and the two base images it pulled (`postgres:17-alpine`, `rabbitmq:3.13-management-alpine`). The Docker build cache was left. Image count is back to 17; the user's other containers were not touched.
+- Terraform `fmt -check`, `validate`, mocked `terraform test` 11 passed. `test_cloud.sh` 63 passed (same 2 warnings); `run-audit-checks.sh --static` PASS=163 FAIL=0 INVALID=8 NOTES=51, its `make test-py` step now reporting 60 tests. The new audit assertion was checked against the real connected and disconnected bodies, not in a full live audit run.
+- Not run: k3d (no kubectl here) and ECS.
+
+**Sources**
+- [pika 1.3.2, `pika/adapters/blocking_connection.py`](https://raw.githubusercontent.com/pika/pika/1.3.2/pika/adapters/blocking_connection.py): `BlockingChannel.basic_consume()` waits in `_flush_output(ok_result.is_ready)` for Basic.ConsumeOk, the basis for setting the Event right after it.
+- [Scheduling the maintenance window for an Amazon MQ broker](https://docs.aws.amazon.com/amazon-mq/latest/developer-guide/maintaining-brokers.html): maintenance can last up to two hours and only the highly available deployment modes minimize the downtime; the reason given in `ecs_services.tf`.
+- [Available CloudWatch metrics for Amazon MQ for RabbitMQ brokers](https://docs.aws.amazon.com/amazon-mq/latest/developer-guide/rabbitmq-logging-monitoring.html): `ConsumerCount` is a broker-level metric with the `Broker` dimension (README gap bullet).
+
+Pending docs text (read-only, not applied). No docs line became wrong; this one addition is optional. `docs/AUDIT_GUIDE.md:1329`, replace the line with these two:
+
+```
+and `/ready` is the endpoint that checks `SELECT 1` (on `billing-app` it also checks
+that the queue consumer is registered with the broker), unlike `/health`, which is
+```

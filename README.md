@@ -1514,8 +1514,12 @@ Optimizer, Savings Plans recommendations.
    `/health` answers "is this process alive?" and touches nothing external;
    `/ready` answers "should this receive traffic?", checks the database, and
    returns 503 (`srcs/inventory-app/app/__init__.py:73-89`,
-   `srcs/billing-app/app/__init__.py:91-115`). The gateway's `/health` is
-   deliberately DB-independent for the same reason.
+   `srcs/billing-app/app/__init__.py:132-179`). The gateway's `/health` is
+   deliberately DB-independent for the same reason. billing-app's `/ready` also
+   requires its queue consumer to be registered with the broker, so a task that
+   has lost RabbitMQ reports `{"consumer":"disconnected"}` with 503 instead of
+   looking healthy while consuming nothing; `/health` still answers 200, so
+   nothing restarts it.
 
 6. **A cold PostgreSQL start outlasted the connect budget.** A fresh cluster was
    measured needing ~145 s before it accepted connections, while the app budgeted
@@ -1681,6 +1685,12 @@ only because it now does.
 - **Single-AZ broker.** Amazon MQ runs as `SINGLE_INSTANCE` to keep the bill
   down, so a broker or AZ outage makes `POST /api/billing` return 503 until it
   recovers. Queued orders are durable and are not lost.
+- **On ECS nothing probes billing-app's `/ready`.** The ECS health check and the
+  ALB use `/health` on purpose: a failing ECS check replaces the task, and new
+  consumers cannot fix a broker outage. So on AWS a task that has lost the broker
+  shows only in its logs and, once orders pile up, in the `billing-queue-backlog`
+  alarm. An alarm on the broker's `ConsumerCount` (`AWS/AmazonMQ`, dimension
+  `Broker`) would be the direct signal; it is not added.
 - **One Secret for three apps** — `envFrom` gives every app every credential
   (recorded in `manifests/secrets.yaml:93-102`).
 - **`sslmode` is not set client-side**, so TLS to RDS relies on libpq's

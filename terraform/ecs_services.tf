@@ -37,6 +37,11 @@ locals {
   # urllib probe works without adding curl/wget to the Dockerfiles (owned by
   # another team). These feed Cloud Map's health_check_custom_config so an
   # unhealthy task stops being returned by VPC DNS.
+  # billing-app stays on /health although its /ready also checks the queue
+  # consumer: a failing ECS health check replaces the task, and replacing
+  # consumers cannot fix a broker outage (a single-instance broker can also be
+  # down during its weekly maintenance window). A lost broker shows in the task
+  # logs and in the billing-queue-backlog alarm instead.
   health_checks = {
     api-gateway   = "python -c \"import urllib.request as u; u.urlopen('http://127.0.0.1:3000/health', timeout=3)\""
     inventory-app = "python -c \"import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health', timeout=3)\""

@@ -316,12 +316,17 @@ class _ShutdownWatchdog:
             logger.debug(f"Could not schedule stop_consuming: {e}")
 
 
-def start_consuming(db_session_factory, stop_event=None):
+def start_consuming(db_session_factory, stop_event=None, connected_event=None):
     """Consume billing orders from RabbitMQ until `stop_event` is set.
 
     The consumer runs as PID 1's worker thread. On SIGTERM the process must stop
     cleanly: leaving `stop_event` unset means the loop never terminates, Docker
     waits out its 10 s grace period and SIGKILLs the container (exit 137).
+
+    `connected_event`, when given, is set while the broker has this consumer
+    registered on the queue and cleared as soon as it is not (connection lost,
+    channel closed, shutdown). /ready reads it (app/__init__.py), so a task that
+    has lost the broker no longer reports itself ready while consuming nothing.
     """
     if stop_event is None:
         stop_event = threading.Event()
@@ -496,7 +501,17 @@ def start_consuming(db_session_factory, stop_event=None):
                 logger.info("Shutdown requested before start_consuming(); leaving the loop.")
                 break
 
-            channel.start_consuming()
+            # basic_consume() above returns only after the broker's ConsumeOk,
+            # so the consumer is registered from here on. The event is cleared
+            # the moment start_consuming() returns or raises, before the retry
+            # sleep below, so /ready turns 503 without that 3 s delay.
+            if connected_event is not None:
+                connected_event.set()
+            try:
+                channel.start_consuming()
+            finally:
+                if connected_event is not None:
+                    connected_event.clear()
 
         except (pika.exceptions.AMQPConnectionError, pika.exceptions.AMQPChannelError) as amqp_err:
             if stop_event.is_set():

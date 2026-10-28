@@ -40,7 +40,10 @@ if __name__ == "__main__":
     shutdown_event = threading.Event()
     _install_shutdown_handler(shutdown_event)
 
-    app, session_factory = create_app(stop_event=shutdown_event)
+    # Set by the consumer thread while the broker has it registered on the
+    # queue; /ready reports 503 while it is clear.
+    consumer_connected = threading.Event()
+    app, session_factory = create_app(stop_event=shutdown_event, consumer_connected=consumer_connected)
     if app is None:
         # create_app() abandoned the database wait because a signal arrived.
         # Exiting 0 (not 137, and not a traceback) is what makes
@@ -59,7 +62,7 @@ if __name__ == "__main__":
     consumer_stop = threading.Event()
     consumer_thread = threading.Thread(
         target=start_consuming,
-        args=(session_factory, consumer_stop),
+        args=(session_factory, consumer_stop, consumer_connected),
         daemon=True,
         name="BillingQueueConsumer"
     )
