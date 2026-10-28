@@ -360,3 +360,46 @@ Pending docs text (read-only, not applied). No docs line became wrong; this one 
 and `/ready` is the endpoint that checks `SELECT 1` (on `billing-app` it also checks
 that the queue consumer is registered with the broker), unlike `/health`, which is
 ```
+
+## 2026-10-28 19:51 EET: Phase 2 T17, sslmode=require on both database URLs
+
+**What**
+- `srcs/inventory-app/app/__init__.py`, `srcs/billing-app/app/__init__.py`: new `_db_sslmode()` reads `DB_SSLMODE` (default `require`; case and spaces ignored; an unknown value logs a warning and falls back to `require`, never to a weaker mode). `create_app()` logs the mode and passes it as `query={"sslmode": ...}` in `URL.create`, which SQLAlchemy hands to libpq.
+- `terraform/ecs_services.tf`: `DB_SSLMODE = "require"` in the inventory-app and billing-app task definitions (also the code default; set so the task definition shows it). `terraform/rds.tf`: the client-side comment now describes this instead of calling it open application work.
+- `docker-compose.yml` (`DB_SSLMODE: ${DB_SSLMODE:-prefer}` for both apps), `.env.example` (`DB_SSLMODE=prefer` with a comment), `manifests/configmap.yaml` (`DB_SSLMODE: "prefer"`): the local PostgreSQL containers have no TLS, so the local stacks keep `prefer`, libpq's own default and what the apps used until now.
+- `ecs-tasks/inventory-app-task.json`, `ecs-tasks/billing-app-task.json`: the same `DB_SSLMODE = require` entry, so the placeholders match Terraform.
+- `srcs/inventory-app/tests/test_db_sslmode.py`, `srcs/billing-app/tests/test_db_sslmode.py`: new, dependency-free (stubbed Flask and SQLAlchemy), 5 tests each on the `query` the real `create_app()` passes to `URL.create`.
+- `scripts/test_cloud.sh`: new check next to the `rds.force_ssl` one: both task definitions set `DB_SSLMODE = require` and both apps pass sslmode into `URL.create`.
+- `README.md`: the in-transit bullet, both environment-variable tables (`DB_SSLMODE` rows), the "what I would change" item (now `verify-full` with the RDS CA bundle) and the "Real gaps" bullet (now: TLS always, server certificate not verified).
+- `tasklist.md`: T17 ticked and crossed out.
+
+**Why**
+T17: TLS to RDS relied on libpq's `prefer` default meeting a `force_ssl = 1` server. With `require` the client never offers plaintext either, so the control holds at both ends. The default lives in the code (fail closed if the variable is missing), and only the local stacks opt down to `prefer`. `require` encrypts but does not check the server certificate; `verify-full` would need the RDS CA bundle in the images and is left as the next step.
+
+**Verified**
+- `make test-py`: 70 tests OK (inventory-app 20 to 25, billing-app 40 to 45). Negative check on a scratch copy (the `query=` line removed from both apps): 5 errors in each suite, and the new `test_cloud.sh` check fails.
+- Mocked `terraform test` (scratch harness `/tmp/cd-tfcheck2`, outside the repo): new run `db_sslmode_require` decodes both container definitions at plan time (computed RDS, secret and broker values overridden in the run) and finds `DB_SSLMODE = require`; 12 passed. With the billing entry removed it fails. A mocked `apply` run was tried first and failed with "Provider produced inconsistent final plan", so the plan-time form was used. `fmt -check` clean, `validate` passes.
+- Live on local Docker with the real app images and libpq, against two `postgres:17-alpine` containers (one with `ssl=on` and a throwaway self-signed certificate, one plaintext; all named `cd-t17-*`, no host ports):
+  - inventory-app, `DB_SSLMODE` unset, TLS server: `/ready` 200; `pg_stat_ssl` shows both pooled sessions `ssl=true TLSv1.3`.
+  - inventory-app and billing-app, unset, plaintext server: "server does not support SSL, but SSL was required"; billing-app exited 1 after its retries.
+  - inventory-app, `prefer`, plaintext server: `/ready` 200, `ssl=false` (unchanged local behaviour).
+  - inventory-app, `bogus`: warning, falls back to `require` and refuses the plaintext server.
+  - billing-app, unset, TLS server: session `ssl=true TLSv1.3`; with `prefer` against the plaintext server, `ssl=false`. Its `/ready` was 503 in both because no broker ran (the T16 consumer check), with the database sessions up.
+- `docker compose config` resolves `DB_SSLMODE=prefer` for both apps, with or without the `.env` line, and gives api-gateway none.
+- Cleanup: the two app images, the two PostgreSQL containers with their anonymous volumes (`docker rm -v`), the network, the pulled `postgres:17-alpine` image and the scratch folders were removed; image count back to 17. A combined cleanup command that included `docker volume prune` was blocked by the permission check before it ran; it would have touched other projects' unused volumes, so it was replaced by `docker rm -v` on the two containers only.
+- `test_cloud.sh` 64 passed, 0 failed (63 plus the new check; same 2 warnings); `run-audit-checks.sh --static` PASS=163 FAIL=0 INVALID=8 NOTES=51.
+- Not run: against RDS, and on k3d (no kubectl here).
+
+**Sources**
+- [PostgreSQL documentation, libpq SSL Support](https://www.postgresql.org/docs/current/libpq-ssl.html): the six sslmode values; `require` protects against eavesdropping but not MITM; `prefer` only encrypts if the server supports it; `require` acts like `verify-ca` only if a root CA file exists.
+
+Pending docs text (read-only, not applied). `docs/AUDIT_GUIDE.md:1497-1503`, the **Say:** paragraph that calls `?sslmode=require` future application work. Replace those seven lines with:
+
+```
+**Say:** "Encryption in transit at the data tier is enforced at both ends.
+`rds.force_ssl = 1` makes PostgreSQL refuse a plaintext session outright, and both
+apps connect with `sslmode=require` (`DB_SSLMODE`, set in the ECS task
+definitions), so the client never offers plaintext either. `require` encrypts but
+does not verify the server certificate; `verify-full` with the RDS CA bundle is the
+next step."
+```

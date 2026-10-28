@@ -667,10 +667,12 @@ claim.
 - **In transit**: parameter group `cloud-design-prod-postgres16-ssl` sets
   **`rds.force_ssl = 1`**, so the server **rejects** a plaintext session
   outright — a misconfigured client fails closed instead of silently downgrading.
-  The clients build `postgresql+psycopg2://…` without `sslmode`; libpq defaults to
-  `sslmode=prefer`, which still negotiates TLS against a force-SSL server. Adding
-  `?sslmode=require` client-side would make the requirement explicit — that is
-  application work, not Terraform, and is listed in Known limitations.
+  The clients build `postgresql+psycopg2://…?sslmode=require`: both apps read
+  `DB_SSLMODE` (default `require`, also set in the ECS task definitions), so a
+  session is TLS or it does not open, from the client side as well. `require`
+  encrypts but does not check the server certificate; `verify-full` would also
+  need the RDS CA bundle in the images (Known limitations). The compose and k3d
+  stacks set `DB_SSLMODE=prefer`, because their PostgreSQL containers have no TLS.
 - **AMQPS only**: Amazon MQ for RabbitMQ exposes no plaintext listener.
   Terraform injects `RABBITMQ_PORT = 5671`, and the security groups open
   **5671** egress *and* ingress (the previous revision opened the broker ingress
@@ -969,6 +971,7 @@ Optional overrides (safe defaults live in the code):
 |---|---|---|
 | `RABBITMQ_QUEUE` | `billing_queue` | queue name |
 | `DB_CONNECT_MAX_RETRIES` / `DB_CONNECT_RETRY_DELAY` | `180` / `2` | bounded DB-connect budget (360 s) |
+| `DB_SSLMODE` | `require` | libpq sslmode for both apps; compose and k3d set `prefer` (their PostgreSQL has no TLS), ECS sets `require` |
 | `REDELIVERY_BACKOFF_SECONDS` | `5` | throttle before nack+requeue |
 | `RABBITMQ_SOCKET_TIMEOUT` / `RABBITMQ_PUBLISH_MAX_RETRIES` / `RABBITMQ_RETRY_DELAY` | `3` / `2` / `1` | bounded publish budget so a dead broker fails fast |
 | `RABBITMQ_TLS` | unset | force TLS on/off regardless of port |
@@ -1017,6 +1020,7 @@ application image run unchanged in all three.
 | `RABBITMQ_HOST` / `_PORT` / `_QUEUE` | ConfigMap | `queue_sender.py:245-249`, `consume_queue.py:256-260` |
 | `RABBITMQ_USER` / `_PASSWORD` | **Secret** | both, via `_require_env()` which raises rather than defaulting |
 | `DB_CONNECT_MAX_RETRIES` / `DB_CONNECT_RETRY_DELAY` | code default / `.env` | both apps' reconnect loop |
+| `DB_SSLMODE` | code default `require` / ConfigMap and `.env` `prefer` / ECS `require` | both apps' `_db_sslmode()`, passed as `sslmode` in `URL.create` |
 | `RABBITMQ_TLS` / `_CA_FILE` / `_TLS_VERIFY` | `.env` / ECS (port 5671 implies TLS) | both AMQP clients |
 | `REDELIVERY_BACKOFF_SECONDS` | `.env` | `consume_queue.py:237` |
 
@@ -1571,8 +1575,8 @@ Optimizer, Savings Plans recommendations.
 - **One Secret per workload.** Today the three apps load a single Secret through
   `envFrom`, so `inventory-app` holds the RabbitMQ and billing credentials and vice
   versa. Recorded as a known limitation in `manifests/secrets.yaml:93-102`.
-- **`?sslmode=require`** on the application DSNs so `rds.force_ssl = 1` is
-  explicit at the client instead of implied by a libpq default.
+- **`sslmode=verify-full`** with the RDS CA bundle in the images, so the apps
+  also check the database certificate (`require` encrypts without checking it).
 - **A CI pipeline** (GitHub Actions → ECR → ECS rolling deploy) so image pushes are
   not a manual step, plus **Aurora PostgreSQL Serverless v2** instead of two
   `db.t4g.micro` instances when the cost of standing by a standby matters more
@@ -1693,8 +1697,10 @@ only because it now does.
   `Broker`) would be the direct signal; it is not added.
 - **One Secret for three apps** — `envFrom` gives every app every credential
   (recorded in `manifests/secrets.yaml:93-102`).
-- **`sslmode` is not set client-side**, so TLS to RDS relies on libpq's
-  `prefer` default meeting a `force_ssl = 1` server.
+- **The database certificate is not verified.** The apps connect with
+  `sslmode=require`, so every session to RDS is TLS, but `require` does not check
+  the server certificate, so it does not stop an attacker who can intercept
+  traffic inside the VPC. `verify-full` with the RDS CA bundle would.
 - **No mTLS between services.** API Gateway → ALB is plain HTTP by default
   (HTTPS with `enable_acm_certificate = true`); ALB → `api-gateway`
   (`:3000`) and `api-gateway` → `inventory-app` (`:8080`) are plaintext HTTP inside

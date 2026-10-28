@@ -134,7 +134,11 @@ resource "aws_ecs_task_definition" "inventory_app" {
         # never resolve or authenticate against the RDS instance.
         { name = "INVENTORY_DB_HOST", value = aws_db_instance.inventory.address },
         { name = "INVENTORY_DB_PORT", value = tostring(aws_db_instance.inventory.port) },
-        { name = "INVENTORY_DB_NAME", value = "inventory_db" }
+        { name = "INVENTORY_DB_NAME", value = "inventory_db" },
+        # TLS or no connection, from the client side too (RDS enforces it with
+        # rds.force_ssl, rds.tf). Also the code default; set here so the task
+        # definition shows it.
+        { name = "DB_SSLMODE", value = "require" }
       ]
       secrets = [
         # FIX: INVENTORY_DB_USER moved out of plaintext `environment` into the
@@ -189,6 +193,7 @@ resource "aws_ecs_task_definition" "billing_app" {
         { name = "BILLING_DB_HOST", value = aws_db_instance.billing.address },
         { name = "BILLING_DB_PORT", value = tostring(aws_db_instance.billing.port) },
         { name = "BILLING_DB_NAME", value = "billing_db" },
+        { name = "DB_SSLMODE", value = "require" },
         { name = "RABBITMQ_HOST", value = local.mq_amqps_host },
         { name = "RABBITMQ_PORT", value = "5671" },
         { name = "RABBITMQ_QUEUE", value = "billing_queue" }

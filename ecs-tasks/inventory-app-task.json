@@ -22,7 +22,8 @@
         { "name": "APP_PORT", "value": "8080" },
         { "name": "INVENTORY_DB_HOST", "value": "cloud-design-prod-inventory-db.c1234567890.us-east-1.rds.amazonaws.com" },
         { "name": "INVENTORY_DB_PORT", "value": "5432" },
-        { "name": "INVENTORY_DB_NAME", "value": "inventory_db" }
+        { "name": "INVENTORY_DB_NAME", "value": "inventory_db" },
+        { "name": "DB_SSLMODE", "value": "require" }
       ],
       "secrets": [
         {

@@ -86,7 +86,7 @@ The biggest saving of all costs nothing: deploy shortly before the audit and des
   - Files: `terraform/alb.tf`, `terraform/storage.tf`, `README.md` (the bucket now has a real use)
 - [x] ~~**T16** Optional: make `billing-app` readiness reflect the consumer connection, not only the database. (5.3)~~
   - Files: `srcs/billing-app/app/__init__.py`, `srcs/billing-app/app/consume_queue.py`
-- [ ] **T17** Add `sslmode=require` to both database URLs (`query={"sslmode": "require"}` in `URL.create`); keep the local stack working (local Postgres has no TLS, so make it an env-driven default such as `DB_SSLMODE`). (5.4)
+- [x] ~~**T17** Add `sslmode=require` to both database URLs (`query={"sslmode": "require"}` in `URL.create`); keep the local stack working (local Postgres has no TLS, so make it an env-driven default such as `DB_SSLMODE`). (5.4)~~
   - Files: `srcs/inventory-app/app/__init__.py:148`, `srcs/billing-app/app/__init__.py:224`, `terraform/ecs_services.tf`, `.env.example`
 - [ ] **T18** Optional: per-app least-privilege database roles instead of the RDS master user. (5.4)
 - [ ] **T19** Fix the stale budget text (300 USD / 260 USD) in `terraform/cloudwatch.tf:443-446,489`. (5.3)

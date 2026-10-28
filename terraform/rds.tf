@@ -46,12 +46,12 @@ resource "aws_kms_key" "rds" {
 # misconfigured client fails closed rather than silently downgrading.
 #
 # Client side: the apps build their DSN as
-#   postgresql+psycopg2://user:pass@host:5432/db
-# with no sslmode parameter. psycopg2 is a libpq wrapper and libpq DEFAULTS to
-# `sslmode=prefer`, so the client will still negotiate TLS against a
-# force_ssl=1 server. The recommended hardening (owned by the application team,
-# not by this Terraform) is to append `?sslmode=require` to that DSN so the
-# requirement is explicit at the client rather than implied by a default.
+#   postgresql+psycopg2://user:pass@host:5432/db?sslmode=<DB_SSLMODE>
+# and the ECS task definitions set DB_SSLMODE = "require" (ecs_services.tf),
+# which is also the code default. So the requirement is explicit at both ends:
+# the server refuses plaintext and the client never offers it. require
+# encrypts but does not verify the server certificate; verify-full would also
+# need the RDS CA bundle in the images.
 resource "aws_db_parameter_group" "postgres" {
   name        = "${local.name_prefix}-postgres16-ssl"
   family      = "postgres16"

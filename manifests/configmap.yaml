@@ -51,6 +51,10 @@ data:
   BILLING_DB_HOST: "billing-database-service"
   BILLING_DB_PORT: "5432"
   BILLING_DB_NAME: "billing_db"
+  # --- consumed by both apps' _db_sslmode() (app/__init__.py) ------------
+  #     The code defaults to require; the in-cluster PostgreSQL has no TLS,
+  #     so this cluster uses prefer, libpq's own default.
+  DB_SSLMODE: "prefer"
   # --- consumed by api-gateway/app/queue_sender.py:48-52 and by
   #     billing-app/app/consume_queue.py:64-68 ---------------------------
   RABBITMQ_HOST: "rabbitmq-service"

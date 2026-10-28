@@ -52,6 +52,28 @@ def _env_or_default(name: str, default: str) -> str:
     return value.strip()
 
 
+# The libpq sslmode values (PostgreSQL docs, "SSL Support" in libpq).
+_SSLMODES = frozenset({"disable", "allow", "prefer", "require", "verify-ca", "verify-full"})
+
+
+def _db_sslmode() -> str:
+    """sslmode for the database connection: DB_SSLMODE, default "require".
+
+    require means the session is TLS or it fails, so the client can never fall
+    back to plaintext; RDS enforces the same from the server side
+    (rds.force_ssl = 1, terraform/rds.tf). It encrypts but does not verify the
+    server certificate; verify-full would also need the RDS CA bundle in the
+    image. The local stacks set DB_SSLMODE=prefer (docker-compose.yml,
+    manifests/configmap.yaml) because their PostgreSQL containers have no TLS.
+    An unknown value falls back to require, never to a weaker mode.
+    """
+    sslmode = _env_or_default("DB_SSLMODE", "require").lower()
+    if sslmode not in _SSLMODES:
+        logger.warning(f"Invalid DB_SSLMODE={sslmode!r}; falling back to 'require'.")
+        return "require"
+    return sslmode
+
+
 def create_app(stop_event=None):
     """Build the Flask app.
 
@@ -72,9 +94,12 @@ def create_app(stop_event=None):
         logger.warning("Invalid INVENTORY_DB_PORT; falling back to 5432.")
         db_port = 5432
     db_name = _env_or_default("INVENTORY_DB_NAME", "inventory_db")
+    db_sslmode = _db_sslmode()
+    logger.info(f"Inventory database connections use sslmode={db_sslmode}.")
 
     # URL.create() percent-encodes the password; f-string interpolation would
-    # break on any password containing @ : / ? # or %.
+    # break on any password containing @ : / ? # or %. `query` becomes the
+    # libpq connection parameter sslmode.
     app.config["SQLALCHEMY_DATABASE_URI"] = URL.create(
         "postgresql+psycopg2",
         username=db_user,
@@ -82,6 +107,7 @@ def create_app(stop_event=None):
         host=db_host,
         port=db_port,
         database=db_name,
+        query={"sslmode": db_sslmode},
     )
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 

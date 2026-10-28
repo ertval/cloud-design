@@ -176,6 +176,9 @@ services:
       INVENTORY_DB_NAME: ${INVENTORY_DB_NAME:-inventory_db}
       INVENTORY_DB_USER: ${INVENTORY_DB_USER:?set INVENTORY_DB_USER in .env - see .env.example}
       INVENTORY_DB_PASSWORD: ${INVENTORY_DB_PASSWORD:?set INVENTORY_DB_PASSWORD in .env - see .env.example}
+      # The apps default to sslmode=require; the local PostgreSQL has no TLS,
+      # so this stack uses prefer (libpq's own default). AWS sets require.
+      DB_SSLMODE: ${DB_SSLMODE:-prefer}
       # Cold-start budget: 180 x 2s = 360s, comfortably above what a fresh
       # PostgreSQL cluster needed before it accepted connections. Too small a
       # budget turns a slow database into a restart loop.
@@ -212,6 +215,7 @@ services:
       BILLING_DB_NAME: ${BILLING_DB_NAME:-billing_db}
       BILLING_DB_USER: ${BILLING_DB_USER:?set BILLING_DB_USER in .env - see .env.example}
       BILLING_DB_PASSWORD: ${BILLING_DB_PASSWORD:?set BILLING_DB_PASSWORD in .env - see .env.example}
+      DB_SSLMODE: ${DB_SSLMODE:-prefer}
       DB_CONNECT_MAX_RETRIES: ${DB_CONNECT_MAX_RETRIES:-180}
       DB_CONNECT_RETRY_DELAY: ${DB_CONNECT_RETRY_DELAY:-2}
       RABBITMQ_HOST: rabbit-queue

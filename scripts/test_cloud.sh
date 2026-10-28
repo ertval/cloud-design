@@ -191,6 +191,21 @@ else
     fail "only ${FSSL_USERS:-0}/2 aws_db_instance blocks adopt the force_ssl parameter group"
 fi
 
+# ---- encryption IN TRANSIT, client side: sslmode ----------------------------
+# force_ssl is the server half. The client half is DB_SSLMODE = "require" in
+# both app task definitions AND the sslmode query both apps put on their
+# database URL; with only the first, nothing would read the variable.
+SSLM_TF="$(grep -cE '\{[[:space:]]*name[[:space:]]*=[[:space:]]*"DB_SSLMODE",[[:space:]]*value[[:space:]]*=[[:space:]]*"require"[[:space:]]*\}' "$ROOT_DIR/terraform/ecs_services.tf" 2>/dev/null)"
+SSLM_APPS="$(grep -lE 'query=\{"sslmode": *db_sslmode\}' "$ROOT_DIR/srcs/inventory-app/app/__init__.py" "$ROOT_DIR/srcs/billing-app/app/__init__.py" 2>/dev/null | wc -l | tr -d ' ')"
+echo "  ---- sslmode (client side of encryption in transit) ----"
+echo "  ECS task definitions with DB_SSLMODE = require : ${SSLM_TF:-0}"
+echo "  apps passing sslmode into URL.create           : ${SSLM_APPS:-0}"
+if [ "${SSLM_TF:-0}" -ge 2 ] 2>/dev/null && [ "${SSLM_APPS:-0}" -eq 2 ] 2>/dev/null; then
+    pass "both app task definitions set DB_SSLMODE = require and both apps put it on the database URL, so the client refuses plaintext as well as the server"
+else
+    fail "client-side sslmode incomplete: ${SSLM_TF:-0}/2 task definitions set DB_SSLMODE = require, ${SSLM_APPS:-0}/2 apps pass sslmode into URL.create"
+fi
+
 if grep -qE 'resource .aws_cognito_user_pool.' "$ROOT_DIR/terraform/cognito.tf"; then
     pass "AWS Cognito User Pool configured for managed endpoint authentication"
 else
