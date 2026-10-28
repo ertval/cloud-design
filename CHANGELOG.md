@@ -110,3 +110,34 @@ The old script pushed before the ECR repositories existed (so every image was sk
 - `build_push.sh` alone still prints its hint; with `NEXT_HINT=0` it does not.
 - Initialised temp copy of the repo: `test_cloud.sh` 63 passed, 0 failed; `run-audit-checks.sh --static` PASS=159 FAIL=0 INVALID=8.
 - Not run against AWS (needs credentials and creates billable resources).
+
+## 2026-10-28 11:18 EET: Phase 1 T08, destroy.sh --kms limited to this project's key; T09 closing check
+
+**What**
+- `scripts/destroy.sh`: `--kms` no longer loops over `aws kms list-keys` scheduling every key in the region. Before `terraform destroy` it records the key IDs of `aws_kms_key` resources in Terraform state, plus `var.aws_region`, `var.project_name` and `var.environment`. After a successful destroy it checks those keys: PendingDeletion is reported with its deletion date; a key still Enabled or Disabled is scheduled (7 days). With nothing in state, it reads every key in the region but only matches customer-managed keys carrying all three project tags (`Project`, `Environment`, `ManagedBy = Terraform`). A match is scheduled only after an interactive yes; under `--yes` it is listed with the command, not scheduled. No other key is changed. If the destroy did not run, or the aws CLI, jq or the Terraform values are missing, it only prints the manual commands. Every call uses the Terraform region. The bogus `get-key-randomness` line is gone; the header, `--help` range, closing summary and the KMS verify command (tag-filtered) are corrected. New helper `ask()` returns on "no" instead of exiting.
+- `README.md`: cleanup block, "Survives" table row and the teardown paragraph now say a key pending deletion is not billed, and describe what `--kms` really does (the old text said it "cancels that window").
+- `tasklist.md`: T08 and T09 ticked and crossed out.
+
+**Why**
+`--kms` could schedule the deletion of other projects' keys in the same account, which makes their data unrecoverable after 7 days. And the stated reason for the flag was wrong: AWS KMS pricing says "There is no charge for customer managed KMS keys that you manage and are scheduled for deletion", and `terraform destroy` already schedules this project's key with the 7-day minimum. The flag is now a check plus a safety net for a key the destroy missed.
+
+**Verified**
+- Stubbed `terraform`/`aws` in `/tmp` (copy of the script, so the repo's `terraform/` was not touched), with five fake keys (another project's key, an AWS-managed key, a project key pending deletion, an orphaned project key, a key with only some project tags):
+  - key in state, PendingDeletion: 0 schedule calls; key in state, Enabled: only that key scheduled;
+  - empty state with `--yes`: 0 schedule calls, orphan listed with its command; interactive "y": only the orphan scheduled; "n": none;
+  - the AWS-managed key's tags were never read, and all 34 aws calls used the Terraform region;
+  - failed destroy: exit 1 with 0 KMS calls; no terraform: 0 aws calls, manual commands printed; without `--kms`: 0 KMS calls.
+- T09: no Terraform file changed since the T06 commit; `fmt -check` clean, `validate` passes, mocked `terraform test` 6 passed.
+- Initialised temp copy of the repo: `test_cloud.sh` 63 passed, 0 failed; `run-audit-checks.sh --static` PASS=159 FAIL=0 INVALID=8.
+- Not run against AWS.
+
+## 2026-10-28 11:27 EET: destroy.sh confirmation now really asks for the account ID
+
+**What**
+- `scripts/destroy.sh`: new `confirm_account()`. Before `terraform destroy` it shows the account, identity ARN and region (from `var.aws_region`), and requires the account ID typed back exactly; anything else (including `y`) aborts with exit 2 and nothing destroyed. `terraform init` now runs before the prompt (it changes nothing in AWS) so the region can be read. If `sts get-caller-identity` fails it stops with nothing destroyed; if the aws CLI is not installed it falls back to a y/N prompt that says the account cannot be shown. `--yes` still skips the prompt; no TTY still exits 2. The `--kms` block reuses the region read here.
+
+**Why**
+The user asked to fix the mismatch noted after T08: the prompt said "Type the AWS account id to proceed?" but accepted only y/N, so it never checked which account was about to be emptied.
+
+**Verified**
+Stubbed `terraform`/`aws` on a copy of the script, prompts answered through `script` (a real TTY): right ID destroys; wrong ID and `y` abort with exit 2 and no destroy; no aws CLI gives the y/N fallback; failing `sts` exits 1 with no destroy; `--yes` destroys with no sts call; no TTY exits 2 with no destroy; `--kms` still works after the right ID. `test_cloud.sh` 63 passed, 0 failed; `run-audit-checks.sh --static` PASS=159 FAIL=0 INVALID=8.

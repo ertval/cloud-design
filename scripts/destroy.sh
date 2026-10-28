@@ -14,13 +14,15 @@ set -uo pipefail
 #   * makes no cost claim it cannot verify;
 #   * reports, per resource class, whether teardown actually happened;
 #   * calls out the costs that SURVIVE `terraform destroy` and tells you the
-#     command that stops each one (see the KMS 7-day window below).
+#     command that stops each one.
 #
 # WHAT ACTUALLY SURVIVES A TERRAFORM DESTROY
-#   1. KMS keys: pending_deletion, still billed, for 7-14 days, unless you call
-#      ScheduleKeyDeletion with a PendingWindowInDays of 7 (the minimum AWS
-#      allows) -- or wait it out. terraform/aws_kms_key supports
-#      deletion_window_in_days = 7 on the resource itself.
+#   1. KMS key: NOT a cost survivor. `terraform destroy` schedules it for
+#      deletion with deletion_window_in_days = 7 (the minimum AWS allows), and
+#      KMS pricing says a key scheduled for deletion is not charged. The only
+#      key that keeps costing $1/month is one the destroy missed (a failed run,
+#      or a key orphaned by lost state). --kms checks exactly that, for this
+#      project's key only.
 #   2. RDS snapshots: BOTH instances here set skip_final_snapshot = true, so
 #      terraform destroys them with no snapshot. Any manual snapshots you took
 #      are billed until you delete them.
@@ -35,7 +37,8 @@ set -uo pipefail
 #   ./scripts/destroy.sh --k3d            # also delete the local k3d cluster
 #   ./scripts/destroy.sh --local          # also stop the local compose stack
 #   ./scripts/destroy.sh --local-only     # stop compose only, touch nothing else
-#   ./scripts/destroy.sh --kms            # also schedule KMS key deletion
+#   ./scripts/destroy.sh --kms            # also check THIS project's KMS key
+#                                         # is pending deletion (never other keys)
 #   ./scripts/destroy.sh --yes            # do not prompt (non-interactive)
 #
 # EXIT: 0 on success, 1 on a hard failure, 2 on refusal.
@@ -58,7 +61,7 @@ while [ "$#" -gt 0 ]; do
     --local-only) DO_LOCAL=1; LOCAL_ONLY=1 ;;
     --kms)        DO_KMS=1 ;;
     --yes|-y)     ASSUME_YES=1 ;;
-    -h|--help)    sed -n '2,38p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help)    sed -n '2,44p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1 (try --help)" >&2; exit 2 ;;
   esac
   shift
@@ -80,6 +83,42 @@ confirm() { # confirm <question>
   printf '%s [y/N] ' "$1"
   read -r a </dev/tty 2>/dev/null || { echo; echo "no TTY: re-run with --yes"; exit 2; }
   case "$a" in y|Y|yes|YES) return 0 ;; *) echo "aborted"; exit 2 ;; esac
+}
+
+ask() { # ask <question>: like confirm, but "no" (or no TTY) returns 1 instead of exiting
+  printf '%s [y/N] ' "$1"
+  read -r a </dev/tty 2>/dev/null || { echo; return 1; }
+  case "$a" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
+# FIX: the destroy prompt used to say "Type the AWS account id to proceed?" but
+# accepted only y/N, so it never checked which account was about to be emptied.
+# It now shows the account, identity and region and requires the account id typed
+# back exactly; anything else aborts with nothing destroyed. The aws CLI and
+# terraform read the same credential chain (AWS_PROFILE, env, config), so this is
+# the account terraform will act on. --yes skips the prompt, as before.
+confirm_account() { # confirm_account <region>
+  [ "${ASSUME_YES}" -eq 1 ] && return 0
+  if ! command -v aws >/dev/null 2>&1; then
+    echo "  [!]    the aws CLI is not installed, so the target account cannot be shown."
+    confirm "  Destroy every Terraform-managed resource in region ${1:-<unknown>} anyway?"
+    return 0
+  fi
+  local who acct arn typed
+  who="$(aws sts get-caller-identity --region "${1:-us-east-1}" \
+    --query '[Account,Arn]' --output text 2>&1)" \
+    || die "aws sts get-caller-identity failed, so the target account is unknown; nothing was destroyed:
+${who}"
+  read -r acct arn <<<"${who}"
+  echo "  account : ${acct}"
+  echo "  identity: ${arn}"
+  echo "  region  : ${1:-<unknown>}"
+  printf '  Type the account id shown above to destroy everything Terraform manages there (anything else aborts): '
+  read -r typed </dev/tty 2>/dev/null || { echo; echo "no TTY: re-run with --yes"; exit 2; }
+  if [ "${typed}" != "${acct}" ]; then
+    echo "aborted: '${typed}' is not ${acct}. Nothing was destroyed."
+    exit 2
+  fi
 }
 
 echo "============================================================"
@@ -181,14 +220,34 @@ fi
 # -----------------------------------------------------------------------------
 step "Terraform destroy"
 TF_DESTROYED="no"
+# Filled in before the destroy when --kms is set; see the KMS step below.
+KMS_READY=0; TF_REGION=""; TF_PROJECT=""; TF_ENV=""; STATE_KEY_IDS=""
 if command -v terraform >/dev/null 2>&1; then
   echo "  [ok]   terraform found: $(terraform version 2>/dev/null | head -1)"
-  echo "  [!]    This deletes BILLABLE resources in the configured account/region."
-  confirm "  Type the AWS account id to proceed? (see terraform output, or press Ctrl-C to abort)"
+  # init first: it changes nothing in AWS, and reading the region needs it.
   if terraform -chdir="$TF_DIR" init -input=false >/dev/null 2>&1; then
     echo "  [ok]   providers initialised"
   else
     die "terraform init failed; nothing was destroyed"
+  fi
+  # The region is the provider's (var.aws_region), not the aws CLI default.
+  tfc() { echo "$1" | terraform -chdir="$TF_DIR" console 2>/dev/null | tr -d '"[:space:]'; }
+  TF_REGION="$(tfc var.aws_region)"
+  echo "  [!]    This deletes BILLABLE resources in the account below."
+  confirm_account "${TF_REGION}"
+  if [ "${DO_KMS}" -eq 1 ]; then
+    # Read what identifies this project's key NOW: after the destroy the state no
+    # longer lists it.
+    TF_PROJECT="$(tfc var.project_name)"; TF_ENV="$(tfc var.environment)"
+    if command -v jq >/dev/null 2>&1 && [ -n "${TF_REGION}" ] && [ -n "${TF_PROJECT}" ] && [ -n "${TF_ENV}" ]; then
+      STATE_KEY_IDS="$(terraform -chdir="$TF_DIR" show -json 2>/dev/null \
+        | jq -r '.values.root_module.resources[]? | select(.type == "aws_kms_key") | .values.key_id')"
+      KMS_READY=1
+      echo "  [ok]   --kms: region ${TF_REGION}; keys in Terraform state: $(echo ${STATE_KEY_IDS:-none})"
+    else
+      echo "  [WARN] --kms: could not read the region and project from Terraform, or jq is"
+      echo "         missing; the KMS step will only print the commands to run by hand."
+    fi
   fi
   if terraform -chdir="$TF_DIR" destroy -auto-approve; then
     TF_DESTROYED="yes"
@@ -212,37 +271,115 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# KMS: the cost that genuinely survives a destroy.
+# KMS: this project's key, and only this project's key.
 # -----------------------------------------------------------------------------
+# FIX: this used to loop over `aws kms list-keys` with no filter and schedule
+# deletion of EVERY customer managed key in the region, including keys of other
+# projects in the same account, whose data becomes unrecoverable once the 7 days
+# pass. It also claimed a key pending deletion is still billed; KMS pricing says
+# it is not. What it does now:
+#   * keys Terraform had in state before the destroy: the destroy has already
+#     scheduled them, so check that, and schedule one only if it is somehow
+#     still Enabled or Disabled.
+#   * nothing in state (lost state, or a second run after a destroy): look for
+#     customer managed keys that carry ALL of this project's tags (Project,
+#     Environment and ManagedBy = Terraform, from local.common_tags). Every
+#     other key is only read (describe-key, list-resource-tags), never changed.
+#     A match pending deletion is reported; any other match is scheduled only
+#     after an interactive yes. Under --yes it is listed, not scheduled: a tag
+#     match alone is not proof enough to destroy data unattended.
+kms_state() { # prints: KeyState DeletionDate KeyManager (empty if the key is gone)
+  aws kms describe-key --region "${TF_REGION}" --key-id "$1" \
+    --query 'KeyMetadata.[KeyState,DeletionDate,KeyManager]' --output text 2>/dev/null
+}
+kms_schedule() { # prints the deletion date
+  aws kms schedule-key-deletion --region "${TF_REGION}" --key-id "$1" \
+    --pending-window-in-days 7 --query DeletionDate --output text
+}
+kms_manual() {
+  echo "         To check by hand (replace the defaults if terraform.tfvars changes them):"
+  echo "             aws resourcegroupstaggingapi get-resources --region <aws_region> \\"
+  echo "               --resource-type-filters kms:key \\"
+  echo "               --tag-filters Key=Project,Values=${TF_PROJECT:-cloud-design} Key=Environment,Values=${TF_ENV:-prod} \\"
+  echo "               --query 'ResourceTagMappingList[].ResourceARN'"
+  echo "             aws kms describe-key --key-id <arn> --query 'KeyMetadata.[KeyState,DeletionDate]'"
+  echo "         and only for a key from that list that is not PendingDeletion:"
+  echo "             aws kms schedule-key-deletion --key-id <arn> --pending-window-in-days 7"
+}
+
 if [ "${DO_KMS}" -eq 1 ]; then
-  step "Scheduling KMS key deletion"
-  if ! command -v aws >/dev/null 2>&1; then
-    echo "  [FATAL] aws CLI not installed; KMS keys are STILL PENDING DELETION and still billed." >&2
-    echo "          Run this where the aws CLI is available:" >&2
-    echo "              aws kms list-keys --query 'Keys[].KeyId'" >&2
-    echo "              aws kms schedule-key-deletion --key-id <id> --pending-window-in-days 7" >&2
+  step "KMS: this project's key only"
+  if [ "${TF_DESTROYED}" != "yes" ]; then
+    echo "  [--]   not checked: terraform destroy did not run. Scheduling the key of a"
+    echo "         stack that still exists would make its RDS data and secrets unreadable."
+    kms_manual
+  elif ! command -v aws >/dev/null 2>&1 || [ "${KMS_READY}" -ne 1 ]; then
+    echo "  [--]   not checked: the aws CLI, jq or the Terraform values are missing."
+    kms_manual
+  elif [ -n "${STATE_KEY_IDS}" ]; then
+    for k in ${STATE_KEY_IDS}; do
+      read -r st dd km <<<"$(kms_state "$k")"
+      case "${st:-}" in
+        PendingDeletion)
+          echo "  [ok]   ${k}: PendingDeletion (scheduled by terraform destroy), deleted on ${dd}; not billed while pending" ;;
+        Enabled|Disabled)
+          echo "  [..]   ${k}: still ${st} after the destroy; scheduling deletion (7 days)"
+          if dd="$(kms_schedule "$k")"; then
+            echo "  [ok]   ${k}: deleted on ${dd}"
+          else
+            echo "  [WARN] could not schedule ${k}; it keeps costing \$1/month until it is"
+          fi ;;
+        "")
+          echo "  [--]   ${k}: not found, already deleted" ;;
+        *)
+          echo "  [WARN] ${k}: state ${st}; left alone" ;;
+      esac
+    done
   else
-    KEY_IDS="$(aws kms list-keys --query 'Keys[].KeyId' --output text 2>/dev/null)"
-    if [ -z "${KEY_IDS}" ] || [ "${KEY_IDS}" = "None" ]; then
-      echo "  [--]   no KMS keys in this account"
-    else
-      for k in ${KEY_IDS}; do
-        STATE="$(aws kms describe-key --key-id "$k" --query 'KeyMetadata.EnabledState' --output text 2>/dev/null)"
-        if [ "${STATE}" = "PendingDeletion" ]; then
-          W="$(aws kms get-key-randomness --key-id "$k" >/dev/null 2>&1; echo "7")"
-          echo "  [ok]   key ${k} is already PendingDeletion; waiting out its window"
-        else
-          echo "  [..]   scheduling deletion for key ${k}"
-          aws kms schedule-key-deletion --key-id "$k" --pending-window-in-days 7 \
-            && echo "  [ok]   key ${k} pending deletion for 7 days" \
-            || echo "  [WARN] could not schedule deletion for ${k}"
-        fi
-      done
+    echo "  no key in Terraform state; looking for customer managed keys tagged"
+    echo "  Project=${TF_PROJECT} Environment=${TF_ENV} ManagedBy=Terraform in ${TF_REGION}"
+    if ! ALL_KEYS="$(aws kms list-keys --region "${TF_REGION}" --query 'Keys[].KeyId' --output text 2>&1)"; then
+      echo "  [WARN] aws kms list-keys failed: ${ALL_KEYS}"
+      kms_manual
+      ALL_KEYS=""
     fi
+    SCANNED=0; MATCHED=0
+    for k in ${ALL_KEYS}; do
+      [ "$k" = "None" ] && continue
+      SCANNED=$((SCANNED + 1))
+      read -r st dd km <<<"$(kms_state "$k")"
+      [ "${km:-}" = "CUSTOMER" ] || continue
+      TAGS="$(aws kms list-resource-tags --region "${TF_REGION}" --key-id "$k" --output json 2>/dev/null)" || continue
+      printf '%s' "${TAGS}" | jq -e --arg p "${TF_PROJECT}" --arg e "${TF_ENV}" \
+        '([.Tags[]? | {(.TagKey): .TagValue}] | add // {}) as $t
+         | $t.Project == $p and $t.Environment == $e and $t.ManagedBy == "Terraform"' >/dev/null || continue
+      MATCHED=$((MATCHED + 1))
+      case "${st:-}" in
+        PendingDeletion)
+          echo "  [ok]   ${k}: PendingDeletion, deleted on ${dd}; not billed while pending" ;;
+        Enabled|Disabled)
+          if [ "${ASSUME_YES}" -eq 1 ]; then
+            echo "  [!]    ${k} carries this project's tags and is ${st}. NOT scheduled under --yes."
+            echo "         If no stack uses it any more:"
+            echo "             aws kms schedule-key-deletion --region ${TF_REGION} --key-id ${k} --pending-window-in-days 7"
+          elif ask "  ${k} carries this project's tags and is ${st}. Schedule its deletion (7 days)?"; then
+            if dd="$(kms_schedule "$k")"; then
+              echo "  [ok]   ${k}: deleted on ${dd}"
+            else
+              echo "  [WARN] could not schedule ${k}"
+            fi
+          else
+            echo "  [--]   ${k} left as it is"
+          fi ;;
+        *)
+          echo "  [WARN] ${k}: state ${st}; left alone" ;;
+      esac
+    done
+    echo "  [--]   ${SCANNED} key(s) in ${TF_REGION} read, ${MATCHED} carry this project's tags; no other key was changed"
   fi
 else
   echo
-  echo "  [--]   KMS keys were NOT scheduled for deletion (pass --kms to do it)."
+  echo "  [--]   --kms not set: this project's KMS key was not checked."
 fi
 
 # -----------------------------------------------------------------------------
@@ -266,11 +403,10 @@ echo "     usage already incurred this month is still billed. That is normal."
 echo "   - whether anything outside this repository is billing you."
 echo
 echo " Costs that can survive the above, and the command that stops each:"
-echo "   KMS keys       : pending_deletion for 7 days after destroy, still billed."
-echo "                    Stop earlier with:  aws kms schedule-key-deletion \\"
-echo "                                                --key-id <id> --pending-window-in-days 7"
-echo "                    (the minimum AWS allows). terraform can also set"
-echo "                    deletion_window_in_days = 7 on aws_kms_key."
+echo "   KMS key        : terraform destroy schedules it for deletion in 7 days (the"
+echo "                    minimum AWS allows); a key pending deletion is not billed."
+echo "                    Only a key the destroy missed keeps costing \$1/month."
+echo "                    --kms checks this project's key (and no other)."
 echo "   RDS snapshots  : both instances use skip_final_snapshot = true, so terraform"
 echo "                    takes none. Manual snapshots you created are NOT deleted:"
 echo "                        aws rds delete-db-snapshot --db-snapshot-identifier <id>"
@@ -285,5 +421,6 @@ echo "   aws rds describe-db-instances --query 'DBInstances[].{Id:DBInstanceIden
 echo "   aws mq describe-brokers         --query 'BrokerSummaries[].{Id:BrokerId,State:BrokerState}'"
 echo "   aws elbv2 describe-load-balancers --query 'LoadBalancers[].DNSName'"
 echo "   aws ecr describe-repositories     --query 'repositories[].repositoryName'"
-echo "   aws kms list-keys                 --query 'Keys[].KeyId'"
+echo "   aws resourcegroupstaggingapi get-resources --resource-type-filters kms:key \\"
+echo "     --tag-filters Key=Project,Values=${TF_PROJECT:-cloud-design} --query 'ResourceTagMappingList[].ResourceARN'"
 exit 0

@@ -1359,7 +1359,7 @@ default was ~20× below the real run-rate, so its alarm fired every month.
 
 ```bash
 ./scripts/destroy.sh            # kubectl delete -k manifests/ + terraform destroy -auto-approve
-./scripts/destroy.sh --kms      # ... and schedule KMS key deletion (see below)
+./scripts/destroy.sh --kms      # ... and check this project's KMS key is pending deletion (see below)
 make down                       # local: stop and remove containers, keep volumes
 make down-v                     # local: also delete the named data volumes
 ```
@@ -1370,7 +1370,7 @@ class whether teardown actually happened and names the charges that **survive**
 
 | Survives | Why | How to stop it |
 |---|---|---|
-| KMS keys | `PendingDeletion`, still billed, for the `deletion_window_in_days = 7` window | `./scripts/destroy.sh --kms`, or `aws kms schedule-key-deletion` |
+| KMS key | **not** a cost survivor when the destroy succeeds: `terraform destroy` schedules it for deletion with `deletion_window_in_days = 7` (the minimum), and a key pending deletion is not billed. Only a key the destroy missed (failed run, lost state) keeps costing $1/month | `./scripts/destroy.sh --kms` checks this project's key and schedules it if needed. It finds the key by Terraform state, or by all three project tags, and never changes any other key |
 | Manual RDS snapshots | both instances use `skip_final_snapshot = true`, so Terraform takes none — but snapshots you created by hand are not deleted | `aws rds delete-db-snapshot --db-snapshot-identifier <id>` |
 | CloudWatch | log groups and alarms are destroyed, but the elapsed part of the month is still charged | wait for the month to roll over |
 | ECR | **not** a survivor here: the repositories use `force_delete = true` plus the 5-image lifecycle policy | verify with `aws ecr describe-repositories` |
@@ -1545,10 +1545,11 @@ Claimed against `docs/readme.md`'s bonus list. Each item says exactly what exist
 make down-v                   # local: removes containers AND the data volumes
 ```
 
-KMS keys survive `terraform destroy` in `PendingDeletion` for the 7-day
-`deletion_window_in_days` set on the key, and keep billing until then;
-`./scripts/destroy.sh --kms` cancels that window and the script prints the exact
-`aws kms schedule-key-deletion` command either way. Nothing in this project runs
+`terraform destroy` leaves the KMS key in `PendingDeletion` for the 7-day
+`deletion_window_in_days` set on the key; AWS does not bill a key pending
+deletion. `./scripts/destroy.sh --kms` checks that this project's key really is
+pending deletion and schedules it if a failed run or lost state left it active;
+keys of other projects are never touched. Nothing in this project runs
 continuously once the containers are stopped — there is no node fleet and no
 always-on worker to forget about.
 

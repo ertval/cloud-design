@@ -62,9 +62,9 @@ The biggest saving of all costs nothing: deploy shortly before the audit and des
   - Done 2026-10-28: the demo client keeps its secret. README computes `SECRET_HASH` with `openssl` and builds the JSON `--auth-parameters` with `jq`; `=` dropped from `override_special` (`,` was never in it). Checked locally: AWS CLI 2.38.2 rejects `--secret`, splits a `,` in shorthand into a list (an `=` survives), and the exact README block gets a token from a local mock Cognito that verifies the hash. Also fixed the `-raw`/`-json` note and the demo-client comment in `cognito.tf`.
 - [x] ~~**T07** Rewrite the AWS path of `deploy.sh`: ECR first, push, full apply, `aws ecs update-service --force-new-deployment` per service, `aws ecs wait services-stable`, print outputs. No `kubectl` on the AWS path. (3.7)~~
   - Files: `scripts/deploy.sh`
-- [ ] **T08** Make `destroy.sh --kms` touch only this project's key (by Terraform output or tag), or make the option a no-op that prints the command. The script file stays. (3.8)
+- [x] ~~**T08** Make `destroy.sh --kms` touch only this project's key (by Terraform output or tag), or make the option a no-op that prints the command. The script file stays. (3.8)~~
   - Files: `scripts/destroy.sh:212-245`, `README.md:1322,1333,1511`
-- [ ] **T09** Re-run `terraform fmt -check -recursive` and `terraform validate` after Phase 1.
+- [x] ~~**T09** Re-run `terraform fmt -check -recursive` and `terraform validate` after Phase 1.~~
   - Run on 2026-10-27 after T01-T04: `fmt -check` clean, `validate` passes, and a mocked-provider `terraform test` passes for both `enable_acm_certificate` values. Re-run after T05 if it touches Terraform.
   - Re-run on 2026-10-28 after T05: `fmt -check` clean, `validate` passes, mocked `terraform test` 5 passed (adds `image_tag` default, pinned and invalid cases).
 
