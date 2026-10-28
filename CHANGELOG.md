@@ -15,6 +15,14 @@ The user asked for a review of the whole repository against the new brief and au
 **Verified**
 `terraform init -backend=false`, `terraform validate` and `terraform fmt -check` passed on a temporary copy of `terraform/` outside the project (Terraform v1.16.7, AWS provider 5.100.0). The MQ deployment-mode and API Gateway TLS findings were checked against AWS documentation. No AWS API calls were made.
 
+**Sources**
+- [Deployment options for Amazon MQ for RabbitMQ brokers](https://docs.aws.amazon.com/amazon-mq/latest/developer-guide/rabbitmq-broker-architecture.html): RabbitMQ brokers are single-instance or cluster only, so `ACTIVE_STANDBY_MULTI_AZ` does not apply.
+- [Amazon MQ for RabbitMQ broker instance types](https://docs.aws.amazon.com/amazon-mq/latest/developer-guide/rmq-broker-instance-types.html) (search result): `mq.m7g.medium` is listed for both single-instance and cluster deployments.
+- [Amazon API Gateway v2 API reference: Integrations](https://docs.aws.amazon.com/apigatewayv2/latest/api-reference/apis-apiid-integrations.html): an HTTP API private integration's `TlsConfig` has only `serverNameToVerify`, with no option to skip certificate verification.
+- [AWS re:Post Knowledge Center: Cognito user pool for ALB authentication](https://repost.aws/knowledge-center/cognito-user-pool-alb-authentication): the app client used by the ALB needs a client secret.
+- [AWS re:Post: ALB with a Cognito app client that has no secret](https://www.repost.aws/zh-Hans/questions/QUK-JMwnAjQ2GGyvShw7Rm6g/unable-to-configure-application-load-balancer-using-cognito-client-app-which-has-no-secret) (community answer): same point; a secret cannot be added to an existing client.
+- [AWS CloudFormation: ECS Service ServiceRegistry](https://docs.aws.eu/AWSCloudFormation/latest/TemplateReference/aws-properties-ecs-service-serviceregistry.html) (search result): port rules for `service_registries`. It did not settle the A-record case, so `progress.md` words that finding as "if ECS rejects it".
+
 ## 2026-10-27 19:23 EET: Task list derived from the gap analysis
 
 **What**
@@ -53,6 +61,11 @@ The user asked to start Phase 1 with the Terraform blockers, beginning with T01.
 
 **Verified**
 On a temporary copy outside the project: `terraform fmt -check -recursive` clean, `terraform validate` passes, and a `terraform test` with a mocked AWS provider passes plan runs for both `enable_acm_certificate = false` and `true` (listener protocol and port, tls_config, security group port, broker mode and subnet count, S3 policy condition, Cognito callbacks, outputs). Both audit suites were run on a copy before and after: no new failures (the static suite gives 63 passed, 0 failed with Terraform initialised). No AWS API calls were made, so a real `terraform plan` is still to be run. `docs/AUDIT_GUIDE.md` still describes the old design and was not touched.
+
+**Sources** (checked during the gap analysis)
+- [Deployment options for Amazon MQ for RabbitMQ brokers](https://docs.aws.amazon.com/amazon-mq/latest/developer-guide/rabbitmq-broker-architecture.html): basis for `SINGLE_INSTANCE`.
+- [Amazon API Gateway v2 API reference: Integrations](https://docs.aws.amazon.com/apigatewayv2/latest/api-reference/apis-apiid-integrations.html): basis for dropping the self-signed certificate and for the `tls_config` on the ACM path.
+- [AWS re:Post Knowledge Center: Cognito user pool for ALB authentication](https://repost.aws/knowledge-center/cognito-user-pool-alb-authentication): basis for removing the ALB Cognito action, which used a client without a secret.
 
 ## 2026-10-28 00:03 EET: Phase 1 T05, pushed image tags now match what ECS pulls
 
@@ -131,6 +144,10 @@ The old script pushed before the ECR repositories existed (so every image was sk
 - Initialised temp copy of the repo: `test_cloud.sh` 63 passed, 0 failed; `run-audit-checks.sh --static` PASS=159 FAIL=0 INVALID=8.
 - Not run against AWS.
 
+**Sources**
+- [AWS KMS pricing](https://aws.amazon.com/kms/pricing/): the quoted sentence that keys scheduled for deletion are not charged.
+- [AWS KMS Developer Guide: Delete an AWS KMS key](https://docs.aws.amazon.com/kms/latest/developerguide/deleting-keys.html): the 7 to 30 day waiting period and the PendingDeletion key state.
+
 ## 2026-10-28 11:27 EET: destroy.sh confirmation now really asks for the account ID
 
 **What**
@@ -161,6 +178,9 @@ With one task each, the internal ALB had a single target to "balance" and one AZ
 - `test_cloud.sh`: 63 passed, 0 failed (reports min=2 max=3).
 - Not run against AWS.
 
+**Sources**
+- [Application Auto Scaling API: RegisterScalableTarget](https://docs.aws.amazon.com/autoscaling/application/APIReference/API_RegisterScalableTarget.html): capacity below the new minimum is raised to it, which is how a running stack reaches 2 tasks without a `desired_count` change.
+
 ## 2026-10-28 13:41 EET: T12-T14 dashboard target health per target group, Logs Insights widgets, queue consumer alarms
 
 **What**
@@ -174,3 +194,18 @@ Phase 2 monitoring group. The backlog alarm threshold is twice the autoscaling t
 
 **Verified**
 `terraform fmt -check`, `terraform validate`; mock `terraform test` 9 passed (new runs `consumer_alarms` and `dashboard_widgets` decode the dashboard JSON); negative check with the old widget restored made `dashboard_widgets` fail. `scripts/test_cloud.sh` 63 passed; `scripts/run-audit-checks.sh --static` PASS=163 FAIL=0 (13 alarms, 8 widgets). No AWS calls; the Logs Insights queries were not run against real logs. Freed space on the full `/tmp` RAM disk by deleting only my own earlier scratch copies (`/tmp/cd-t05` to `/tmp/cd-t10`).
+
+**Sources**
+- [CloudWatch metrics for your Application Load Balancer](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-cloudwatch-metrics.html): `HealthyHostCount` and `UnHealthyHostCount` are published only with `TargetGroup` + `LoadBalancer` (optionally + `AvailabilityZone`).
+- [Amazon ECS Container Insights metrics](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Container-Insights-metrics-ECS.html): `RunningTaskCount` in `ECS/ContainerInsights` with `ServiceName` + `ClusterName`.
+- [Available CloudWatch metrics for Amazon MQ for RabbitMQ brokers](https://docs.aws.amazon.com/amazon-mq/latest/developer-guide/rabbitmq-logging-monitoring.html): broker-level `MessageCount` with the `Broker` dimension; RabbitMQ 4.x brokers no longer have the `Queue` and `VirtualHost` dimensions.
+- [CloudWatch Dashboard Body Structure and Syntax](https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/CloudWatch-Dashboard-Body-Structure.html): `log` widget properties (`query` starting with `SOURCE`, `region`, `view`) and the `"."` shorthand in metric rows.
+- [CloudWatch Logs Insights query syntax: parse](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/CWL_QuerySyntax-Parse.html): `parse` takes any field, such as `@log`, and supports regex named capture groups.
+
+## 2026-10-28 14:19 EET: Sources added to earlier changelog entries
+
+**What**
+- `CHANGELOG.md`: a **Sources** section (linked page plus what it supported) added to the entries for the gap analysis, T01-T04, T08, T10/T11 and T12-T14. Nothing else in those entries changed (27 lines inserted, none removed). The other entries (task list, Phase 0, T05, T06, T07, the destroy prompt fix) got none, because no outside source was consulted for them.
+
+**Why**
+The user asked for the sources behind each change to be recorded in the changelog, including earlier tasks, and allowed earlier entries to be edited this one time, only to add the sources. The list comes from the web lookups recorded in this session's transcript, not from memory.
