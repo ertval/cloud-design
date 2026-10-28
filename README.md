@@ -791,6 +791,50 @@ resource anywhere in `terraform/`. They are future work, listed in [Bonus](#bonu
 | `jq`, `openssl` | `build_push.sh --push` reads the account ID with `jq`; the redeploy loop in step 5 of the AWS walkthrough; the Cognito demo login (`SECRET_HASH` and the JSON auth parameters) | `jq` 1.6+, any `openssl` |
 | An AWS account | — | with IAM permissions for VPC, ELB, RDS, MQ, ECS, ECR, Cognito, APIGateway, ACM, Route 53, KMS, Secrets Manager, CloudWatch, SNS, Budgets, Inspector2 |
 
+### Shared AWS account: one project at a time
+
+This project is deployed into the same AWS account and region (`us-east-1`) as
+another project, `code-keeper`. **Never deploy, test or audit the two at the same
+time**: deploy this stack only while `code-keeper` is torn down, and destroy it
+before `code-keeper` is deployed again.
+
+The two Terraform states are separate (this project's is local in `terraform/`,
+`code-keeper`'s is remote), so neither project's `terraform destroy` can delete
+the other's resources. These things are shared, though:
+
+- **Regional settings this stack manages.** `aws_inspector2_enabler` switches
+  Inspector ECR scanning on and off for the whole account and region, and
+  `aws_api_gateway_account` sets the region's single API Gateway CloudWatch role.
+  If both projects manage one of them, each apply or destroy overwrites the
+  other's setting.
+- **Quotas.** Elastic IPs (5 per region by default; `code-keeper`'s GitLab
+  instances hold 2 and this stack's NAT Gateways take 2) and VPCs (5 per region
+  by default).
+- **One bill.** The AWS Budget and the `EstimatedCharges` alarm (`cloudwatch.tf`)
+  cover the whole account, so the other project's spend would set them off or
+  hide an overrun here, and this project's cost could no longer be read from one
+  number. The account's existing 50 USD budget will alert within a few days of
+  this stack running; that is expected.
+- **Permissions.** The IAM user behind the `cloud-design` profile is an
+  administrator of the whole account, so nothing in IAM stops a command from
+  touching `code-keeper`. The separation is the Terraform state, the
+  `cloud-design-prod-*` names and the `Project = cloud-design` tag.
+
+Before every AWS session, and as the first command of an audit:
+
+```bash
+export AWS_PROFILE=cloud-design     # this project's own IAM user, never the code-keeper profile
+aws sts get-caller-identity         # the ARN must name this project's IAM user
+```
+
+When showing resources to an auditor, filter them to this project (the
+`cloud-design-prod` prefix or the `Project = cloud-design` tag).
+
+Checked on 2026-10-28 with read-only calls under the `cloud-design` profile:
+`code-keeper` runs no services in `us-east-1` (its two EC2 instances are stopped),
+Inspector is off, no API Gateway CloudWatch role is set, and 2 of the 5 Elastic
+IPs are in use.
+
 ### Optional, per path
 
 - **`kubectl` ≥ 1.28** (embeds kustomize v5, needed for `sortOptions`) plus
@@ -850,7 +894,9 @@ The stack it produces:
 ### Path B — AWS deployment
 
 ```bash
-# 1. prove who you are before spending money
+# 1. prove who you are before spending money; the account is shared, see
+#    "Shared AWS account: one project at a time" under Prerequisites
+export AWS_PROFILE=cloud-design
 aws sts get-caller-identity
 
 # 2. review the variables that MUST be changed (see Configuration)

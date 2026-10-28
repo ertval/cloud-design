@@ -633,3 +633,27 @@ Not a cost saving at this traffic: five interface endpoints in two AZs (~\$73/mo
 ```
 | No VPC endpoints | Not a cost gap at this traffic: five interface endpoints in two AZs (~\$73/month) cost about what the two NAT Gateways with their Elastic IPs do. An isolation improvement for later. |
 ```
+
+## 2026-10-28 22:07 EET: README note, the shared AWS account and one project at a time
+
+**What**
+- `README.md`:
+  - new subsection "Shared AWS account: one project at a time" under Prerequisites, after the path B table. It says this project shares the AWS account and `us-east-1` with `code-keeper`, that the two must never be deployed, tested or audited at the same time, and why:
+    - the regional Inspector and API Gateway account settings this stack manages;
+    - the Elastic IP and VPC quotas;
+    - one bill and the account-wide budget and `EstimatedCharges` alarm;
+    - an administrator IAM user, so separation rests on the Terraform state, the `cloud-design-prod-*` names and the `Project` tag.
+
+    It also gives the `export AWS_PROFILE=cloud-design` / `aws sts get-caller-identity` check, and the state found on 2026-10-28.
+  - Path B step 1 now exports `AWS_PROFILE=cloud-design` and points to that subsection.
+
+**Why**
+The user asked for the README to say that the two projects should not be tested at the same time. `code-keeper` will not be redeployed around the audit, so the region stays `us-east-1`. The account ID and the IAM user names are left out of the README on purpose.
+
+**Verified**
+- No em or en dashes in the added lines, and neither the account ID nor an IAM user name appears in them.
+- `test_cloud.sh` (scratch copy) 65 passed, 0 failed. `run-audit-checks.sh --static` PASS=163 FAIL=0 INVALID=8 NOTES=51.
+- The facts in the note come from read-only AWS CLI calls earlier in this session, under the `cloud-design` profile. They found: both profiles in the same account and region; Inspector disabled; no API Gateway CloudWatch role set; 2 of 5 Elastic IPs used, by `code-keeper`'s two stopped EC2 instances; an existing 50 USD budget; no active ECS clusters, NAT gateways, load balancers, RDS instances or MQ brokers.
+
+**Sources**
+- None beyond the AWS account itself: the facts come from the read-only AWS CLI checks listed under Verified.
