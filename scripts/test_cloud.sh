@@ -206,6 +206,25 @@ else
     fail "client-side sslmode incomplete: ${SSLM_TF:-0}/2 task definitions set DB_SSLMODE = require, ${SSLM_APPS:-0}/2 apps pass sslmode into URL.create"
 fi
 
+# ---- least-privilege database roles ------------------------------------------
+# The apps must connect as their own roles, not as the RDS master: their DB
+# credentials come from the *_app_db secrets, none from the master secrets, and
+# each app container waits for the db-role-init container that creates its role.
+LP_ECS="$ROOT_DIR/terraform/ecs_services.tf"
+LP_APP="$(grep -cE '\{ *name *= *"(INVENTORY|BILLING)_DB_(USER|PASSWORD)", *valueFrom *= *"\$\{aws_secretsmanager_secret\.(inventory|billing)_app_db\.arn\}' "$LP_ECS" 2>/dev/null)"
+LP_MASTER="$(grep -cE '\{ *name *= *"(INVENTORY|BILLING)_DB_(USER|PASSWORD)", *valueFrom *= *"\$\{aws_secretsmanager_secret\.(inventory|billing)_db\.arn\}' "$LP_ECS" 2>/dev/null)"
+LP_WAIT="$(grep -cE 'dependsOn *= *\[\{ *containerName *= *"db-role-init", *condition *= *"SUCCESS" *\}\]' "$LP_ECS" 2>/dev/null)"
+echo "  ---- least-privilege database roles ----"
+echo "  app DB credentials from the app role secrets : ${LP_APP:-0} (of 4)"
+echo "  app DB credentials from the master secrets   : ${LP_MASTER:-0}"
+echo "  app containers waiting for db-role-init      : ${LP_WAIT:-0} (of 2)"
+if [ "${LP_APP:-0}" -eq 4 ] 2>/dev/null && [ "${LP_MASTER:-0}" -eq 0 ] 2>/dev/null && [ "${LP_WAIT:-0}" -eq 2 ] 2>/dev/null \
+    && [ -f "$ROOT_DIR/terraform/files/db_role_init.py" ]; then
+    pass "inventory-app and billing-app connect as their own database roles: credentials from the *_app_db secrets, none from the master secrets, and each app container starts only after db-role-init exits 0"
+else
+    fail "least-privilege database roles incomplete: ${LP_APP:-0}/4 app credentials from app role secrets, ${LP_MASTER:-0} from master secrets, ${LP_WAIT:-0}/2 app containers wait for db-role-init"
+fi
+
 if grep -qE 'resource .aws_cognito_user_pool.' "$ROOT_DIR/terraform/cognito.tf"; then
     pass "AWS Cognito User Pool configured for managed endpoint authentication"
 else

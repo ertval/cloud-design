@@ -47,6 +47,60 @@ locals {
     inventory-app = "python -c \"import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health', timeout=3)\""
     billing-app   = "python -c \"import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health', timeout=3)\""
   }
+
+  # db-role-init: the first container of the inventory-app and billing-app
+  # tasks. It creates or updates the app's own least-privilege PostgreSQL role
+  # (files/db_role_init.py; the role model is described next to
+  # local.db_app_users in rds.tf) and exits. It runs from the app's own image,
+  # which already has psycopg2, so no extra image is pulled. The app container
+  # starts only after it exits 0 (dependsOn SUCCESS), and only this container
+  # receives the master secret; the app container gets the app role's secret.
+  db_role_init_script = file("${path.module}/files/db_role_init.py")
+  db_role_init_containers = {
+    for app, db in {
+      inventory-app = {
+        address       = aws_db_instance.inventory.address
+        port          = aws_db_instance.inventory.port
+        database      = "inventory_db"
+        master_secret = aws_secretsmanager_secret.inventory_db.arn
+        app_secret    = aws_secretsmanager_secret.inventory_app_db.arn
+        log_group     = aws_cloudwatch_log_group.inventory_app.name
+      }
+      billing-app = {
+        address       = aws_db_instance.billing.address
+        port          = aws_db_instance.billing.port
+        database      = "billing_db"
+        master_secret = aws_secretsmanager_secret.billing_db.arn
+        app_secret    = aws_secretsmanager_secret.billing_app_db.arn
+        log_group     = aws_cloudwatch_log_group.billing_app.name
+      }
+    } :
+    app => {
+      name      = "db-role-init"
+      image     = local.ecr_image_urls[app]
+      essential = false
+      command   = ["python3", "-c", local.db_role_init_script]
+      environment = [
+        { name = "DB_HOST", value = db.address },
+        { name = "DB_PORT", value = tostring(db.port) },
+        { name = "DB_NAME", value = db.database }
+      ]
+      secrets = [
+        { name = "MASTER_DB_USER", valueFrom = "${db.master_secret}:username::" },
+        { name = "MASTER_DB_PASSWORD", valueFrom = "${db.master_secret}:password::" },
+        { name = "APP_DB_USER", valueFrom = "${db.app_secret}:username::" },
+        { name = "APP_DB_PASSWORD", valueFrom = "${db.app_secret}:password::" }
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = db.log_group
+          awslogs-region        = local.region
+          awslogs-stream-prefix = "db-role-init"
+        }
+      }
+    }
+  }
 }
 
 resource "aws_ecs_task_definition" "api_gateway" {
@@ -120,10 +174,12 @@ resource "aws_ecs_task_definition" "inventory_app" {
   task_role_arn            = aws_iam_role.ecs_task.arn
 
   container_definitions = jsonencode([
+    local.db_role_init_containers["inventory-app"],
     {
       name      = "inventory-app"
       image     = local.ecr_image_urls["inventory-app"]
       essential = true
+      dependsOn = [{ containerName = "db-role-init", condition = "SUCCESS" }]
       portMappings = [
         { containerPort = 8080, hostPort = 8080, protocol = "tcp" }
       ]
@@ -144,8 +200,10 @@ resource "aws_ecs_task_definition" "inventory_app" {
         # FIX: INVENTORY_DB_USER moved out of plaintext `environment` into the
         # `username` key of the secret that already carried it (rds.tf) - see the
         # RABBITMQ_USER note in the api-gateway task definition for why.
-        { name = "INVENTORY_DB_USER", valueFrom = "${aws_secretsmanager_secret.inventory_db.arn}:username::" },
-        { name = "INVENTORY_DB_PASSWORD", valueFrom = "${aws_secretsmanager_secret.inventory_db.arn}:password::" }
+        # The app role's secret, not the master secret: inventory_app can only
+        # use its own tables (db-role-init above).
+        { name = "INVENTORY_DB_USER", valueFrom = "${aws_secretsmanager_secret.inventory_app_db.arn}:username::" },
+        { name = "INVENTORY_DB_PASSWORD", valueFrom = "${aws_secretsmanager_secret.inventory_app_db.arn}:password::" }
       ]
       healthCheck = {
         command     = ["CMD-SHELL", local.health_checks["inventory-app"]]
@@ -165,6 +223,13 @@ resource "aws_ecs_task_definition" "inventory_app" {
     }
   ])
 
+  # Both containers read these secrets' values at launch, so the values must
+  # exist before ECS can start a task from this definition.
+  depends_on = [
+    aws_secretsmanager_secret_version.inventory_db,
+    aws_secretsmanager_secret_version.inventory_app_db,
+  ]
+
   tags = local.common_tags
 }
 
@@ -181,10 +246,12 @@ resource "aws_ecs_task_definition" "billing_app" {
   task_role_arn            = aws_iam_role.ecs_task.arn
 
   container_definitions = jsonencode([
+    local.db_role_init_containers["billing-app"],
     {
       name      = "billing-app"
       image     = local.ecr_image_urls["billing-app"]
       essential = true
+      dependsOn = [{ containerName = "db-role-init", condition = "SUCCESS" }]
       portMappings = [
         { containerPort = 8080, hostPort = 8080, protocol = "tcp" }
       ]
@@ -201,9 +268,10 @@ resource "aws_ecs_task_definition" "billing_app" {
       secrets = [
         # FIX: BILLING_DB_USER and RABBITMQ_USER moved out of plaintext
         # `environment` into the `username` key of the secrets that already
-        # carried them (rds.tf, amazon_mq.tf).
-        { name = "BILLING_DB_USER", valueFrom = "${aws_secretsmanager_secret.billing_db.arn}:username::" },
-        { name = "BILLING_DB_PASSWORD", valueFrom = "${aws_secretsmanager_secret.billing_db.arn}:password::" },
+        # carried them (rds.tf, amazon_mq.tf). The database pair comes from the
+        # app role's secret, not the master secret (db-role-init above).
+        { name = "BILLING_DB_USER", valueFrom = "${aws_secretsmanager_secret.billing_app_db.arn}:username::" },
+        { name = "BILLING_DB_PASSWORD", valueFrom = "${aws_secretsmanager_secret.billing_app_db.arn}:password::" },
         { name = "RABBITMQ_USER", valueFrom = "${aws_secretsmanager_secret.mq_credentials.arn}:username::" },
         { name = "RABBITMQ_PASSWORD", valueFrom = "${aws_secretsmanager_secret.mq_credentials.arn}:password::" }
       ]
@@ -224,6 +292,12 @@ resource "aws_ecs_task_definition" "billing_app" {
       }
     }
   ])
+
+  # See the inventory-app task definition: the secret values must exist first.
+  depends_on = [
+    aws_secretsmanager_secret_version.billing_db,
+    aws_secretsmanager_secret_version.billing_app_db,
+  ]
 
   tags = local.common_tags
 }

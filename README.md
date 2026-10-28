@@ -9,7 +9,7 @@ authorizer** is the only internet-facing entrypoint (HTTPS) and reaches the ALB
 through a VPC Link; **Amazon RDS PostgreSQL Multi-AZ** and **Amazon MQ for
 RabbitMQ** (`SINGLE_INSTANCE`, AMQPS only) form a data tier with no route to the
 internet. East–west traffic is resolved privately by **AWS Cloud Map**. Everything
-is described in Terraform: 19 `.tf` files, 136 `resource` blocks, 34 variables,
+is described in Terraform: 19 `.tf` files, 142 `resource` blocks, 34 variables,
 40 outputs.
 
 Everything asserted below is either reproducible from a command in this README or
@@ -109,7 +109,7 @@ flowchart TB
         APIGW2["API Gateway HTTP API<br/>HTTPS, Cognito JWT<br/>VPC Link to ALB :80"]
         R53["Route 53<br/>ACM DNS validation (optional)"]
         KMS["KMS key (rotation on)"]
-        SM["Secrets Manager<br/>3 secrets"]
+        SM["Secrets Manager<br/>5 secrets"]
     end
 
     subgraph VPC["VPC 10.0.0.0/16"]
@@ -263,7 +263,7 @@ is listed as both a StatefulSet and an RDS instance.
 
 Supporting AWS resources with no local container counterpart: API Gateway HTTP
 API, Cognito user pool + app clients, ACM certificate, Cloud Map namespace, ECR
-(3 repos), Inspector v2, KMS key, Secrets Manager (3 secrets), CloudWatch log
+(3 repos), Inspector v2, KMS key, Secrets Manager (5 secrets), CloudWatch log
 groups/alarms/dashboard, SNS topic, AWS Budget, an S3 bucket for the ALB access
 logs (`storage.tf`), VPC/subnets/NAT/security groups and their rules, IAM roles
 and policies for ECS.
@@ -673,6 +673,25 @@ claim.
   encrypts but does not check the server certificate; `verify-full` would also
   need the RDS CA bundle in the images (Known limitations). The compose and k3d
   stacks set `DB_SSLMODE=prefer`, because their PostgreSQL containers have no TLS.
+- **Least-privilege database roles**: the apps do not connect as the RDS master
+  user (`dbadmin`). Each connects as its own role on its own RDS instance,
+  `inventory_app` or `billing_app`, which can log in and create and use tables in
+  the `public` schema of its database, and nothing else: no superuser,
+  `CREATEDB`, `CREATEROLE` or role memberships, so it cannot create roles or
+  databases or act as the master. `CONNECT` on the app database is revoked from
+  `PUBLIC` and granted to the role. (Like any role, it can still open a session
+  on the instance's default `postgres` database, where `PUBLIC` keeps `CONNECT`.)
+  The roles are created by a `db-role-init` container that runs first in every
+  inventory-app and billing-app task, from the app's own image, and exits
+  (`terraform/files/db_role_init.py`). The app container starts only after it
+  exits 0 (`dependsOn` `SUCCESS`). Only that container receives the master
+  secret, and the app container gets its role's secret. The run is idempotent and
+  serialised by an advisory lock, so tasks starting together are safe. The
+  password is sent as a SCRAM verifier, so it never appears in a server log.
+  Tables the master created on a stack deployed before this change are handed
+  over to the app role. Locally, `srcs/*-database/init-db.sh` already creates
+  login roles with the same names (`.env.example`), there as the owners of their
+  databases.
 - **AMQPS only**: Amazon MQ for RabbitMQ exposes no plaintext listener.
   Terraform injects `RABBITMQ_PORT = 5671`, and the security groups open
   **5671** egress *and* ingress (the previous revision opened the broker ingress
@@ -694,9 +713,13 @@ claim.
 
 ### Secrets
 
-- **AWS**: three `aws_secretsmanager_secret` resources (inventory DB, billing DB,
-  Amazon MQ) holding the generated passwords, encrypted with the same KMS key;
-  ECS task definitions reference them through `valueFrom = "<arn>:password::"`.
+- **AWS**: five `aws_secretsmanager_secret` resources holding the generated
+  passwords, encrypted with the same KMS key: the master credentials of each RDS
+  instance, one least-privilege application role per database (`inventory_app`,
+  `billing_app`) and Amazon MQ. ECS task definitions reference them through
+  `valueFrom = "<arn>:password::"`. The app containers get only their
+  application role's secret; the master secrets go only to the short-lived
+  `db-role-init` container (see "Least-privilege database roles" below).
 - **Local**: `.env` is git-ignored (`.gitignore` line `.env`) and holds
   placeholders. `docker-compose.yml` uses `${VAR:?…}` for all 8 credentials, so a
   missing value fails the *compose* command with a named message instead of
@@ -1610,7 +1633,7 @@ Claimed against `docs/readme.md`'s bonus list. Each item says exactly what exist
 
 - [x] `README.md` — architecture diagrams, component descriptions, design rationale, prerequisites, setup, configuration, usage, verification
 - [x] `srcs/` — application source for all six components, with tests
-- [x] `terraform/` — 19 `.tf` files, 136 `resource` blocks (131 `aws_*`), 34 variables, 40 outputs, 7 `data` blocks, 0 modules
+- [x] `terraform/` — 19 `.tf` files, 142 `resource` blocks (135 `aws_*`), 34 variables, 40 outputs, 7 `data` blocks, 0 modules
 - [x] `docker-compose.yml`, `Makefile`, `.env.example`, `.dockerignore`, `.gitignore`
 - [x] `manifests/` — 29 Kubernetes objects including `kustomization.yaml`
 - [x] `ecs-tasks/` — 6 standalone task-definition documents with placeholder ARNs (the authoritative ones are in `terraform/ecs_services.tf`)
@@ -1725,7 +1748,7 @@ only because it now does.
 | Tool | What it does | Live result |
 |---|---|---|
 | `scripts/run-audit-checks.sh` | Walks all 22 rubric items in `docs/audit.md`, runs the real command for each, prints real stdout/stderr, and grades PASS / FAIL / **INVALID** / NOTE. Never hides a command | PASS=203, FAIL=0, INVALID=1, NOTES=44 |
-| `scripts/test_cloud.sh` | Static-only suite: reads files, parses manifests, grades Dockerfiles / Terraform / manifests / scripts. Deliberately separate from the live suite so a reviewer can tell reading-based proof from running-based proof | 64 PASS / 0 FAIL / 1 WARN |
+| `scripts/test_cloud.sh` | Static-only suite: reads files, parses manifests, grades Dockerfiles / Terraform / manifests / scripts. Deliberately separate from the live suite so a reviewer can tell reading-based proof from running-based proof | 65 PASS / 0 FAIL / 1 WARN |
 | `scripts/step_by_step_audit.py` | Sends the literal rubric commands to a terminal pane one at a time, so the examiner watches each command typed and its real output. `--list`, `--dry-run`, `--only <section>`, `--section`, `--pane` | — |
 | `scripts/build_push.sh` | Builds all six images as `:local`, verifies each one exists, optionally pushes the three application images to ECR with `PUSH=1` (as `:latest` and the git short SHA), prints the real size table | — |
 | `scripts/deploy.sh` | AWS path (ECS, no `kubectl`): `sts get-caller-identity` → `init`/`validate`/`plan`, stops there unless `AUTO_APPROVE=true` → ECR repositories (`-target`) → build+push → full `plan`/`apply` → `update-service --force-new-deployment` per service → `wait services-stable` → outputs. `--static-only` makes no AWS call | — |

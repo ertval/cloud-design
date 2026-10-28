@@ -403,3 +403,111 @@ definitions), so the client never offers plaintext either. `require` encrypts bu
 does not verify the server certificate; `verify-full` with the RDS CA bundle is the
 next step."
 ```
+
+## 2026-10-28 20:53 EET: Phase 2 T18, per-app least-privilege database roles instead of the RDS master user
+
+**What**
+- `terraform/files/db_role_init.py` (new folder and file): the script the new `db-role-init` init container runs. It connects as the RDS master (`sslmode=require`, 10 connect attempts 3 s apart, `lock_timeout` 30 s, `statement_timeout` 60 s) and does everything in one transaction behind `pg_advisory_xact_lock`. Steps:
+  - creates the app role `WITH LOGIN` if missing, then sets its password as a SCRAM-SHA-256 verifier computed client-side (`psycopg2.extensions.encrypt_password`);
+  - refuses a same-named role that has privileged attributes or memberships;
+  - revokes `CONNECT` on the app database from `PUBLIC`, grants it to the role, and grants `USAGE, CREATE` on schema `public`;
+  - hands tables the master owns over to the role (`GRANT role TO CURRENT_USER WITH INHERIT FALSE, SET TRUE`, then `ALTER TABLE ... OWNER TO`);
+  - exits 0 or 1.
+- `terraform/rds.tf`:
+  - `locals.db_app_users` (`inventory_app`, `billing_app`, the same names as `.env.example`);
+  - `random_password.inventory_app_db` / `billing_app_db`;
+  - secrets `aws_secretsmanager_secret.inventory_app_db` (`<prefix>-inventory-db-app-credentials`) and `billing_app_db` (`<prefix>-billing-db-app-credentials`) with their versions (same KMS key, `recovery_window_in_days = 0`);
+  - the master secret comments now say MASTER and who reads them;
+  - the role scope comment.
+- `terraform/ecs_services.tf`: the inventory-app and billing-app task definitions now hold two containers.
+  - The first is a non-essential `db-role-init`: the app's own image, `python3 -c <script>` via `file()`, the master pair and the app pair as `secrets`, logs under the stream prefix `db-role-init`.
+  - The second is the app container, with `dependsOn = [{ containerName = "db-role-init", condition = "SUCCESS" }]`. Its `*_DB_USER` / `*_DB_PASSWORD` now come from the `*_app_db` secrets, and its task definition `depends_on` both secret versions. api-gateway is unchanged.
+- `terraform/iam.tf`: `ecs_secrets_access` also allows `GetSecretValue` on the two app role secrets, with a comment on who gets which.
+- `terraform/variables.tf`: the `db_username` description says the master is used only by `db-role-init`.
+- `scripts/test_cloud.sh`: new static check. The 4 app credentials come from the `*_app_db` secrets, none from the master secrets, both app containers wait for `db-role-init`, and the script exists.
+- `README.md`:
+  - "3 secrets" becomes 5 in the diagram and in the supporting-resources list;
+  - the Secrets section rewritten for five secrets and who receives which;
+  - a new "Least-privilege database roles" bullet in Data tier;
+  - resource counts 136 to 142 `resource` blocks (131 to 135 `aws_*`) on the two count lines;
+  - the recorded `test_cloud.sh` result 64 to 65 PASS.
+- `tasklist.md`: T18 ticked and crossed out.
+- Not changed: `ecs-tasks/inventory-app-task.json` and `billing-app-task.json` still show the master secret ARNs. They are placeholders, and T47 refreshes them from the real exported task definitions after a deploy. No `srcs/` change: the apps still read `*_DB_USER` / `*_DB_PASSWORD`, only the secret behind them changed.
+
+**Why**
+T18 (gap 5.4): both apps connected to RDS as the master user, which has `CREATEROLE`, `CREATEDB` and `rds_superuser`, and AWS itself recommends against using it in applications. An init container in each task was chosen over other ways to create the roles:
+- the Terraform postgresql provider: RDS is private and there is no bastion;
+- a one-off `run-task` in the deploy script: an extra manual step that a redeploy could skip;
+- a Lambda: more resources and cost;
+- a separate postgres image: Docker Hub and ECR Public pull limits.
+
+The app image already ships psycopg2, so the init container costs nothing and runs on every task start. It needs no code change in the apps. The table handover keeps a stack deployed before this change working.
+
+**Verified**
+- `terraform fmt -check` and `terraform validate` clean.
+- Mocked `terraform test` (scratch harness `/tmp/cd-tfcheck2`, outside the repo): 13 passed, 0 failed.
+  - `db_sslmode_require` now picks containers by name, since index 0 is `db-role-init`.
+  - New run `least_privilege_db_roles` (plan, computed RDS, secret, KMS, password and broker values overridden) checks each of these:
+    - `db-role-init` comes first and is non-essential;
+    - `dependsOn` is `SUCCESS`;
+    - the app credentials come from the app role secrets;
+    - no long-running container gets a master secret;
+    - `db-role-init` gets the master and app pairs and runs the script;
+    - the IAM policy covers both new ARNs;
+    - the secrets carry `inventory_app` / `billing_app`.
+  - Negative check, inventory-app's password pointed back at the master secret on the harness copy: the new run fails ("inventory-app must get the app role's secret") and so does the new `test_cloud.sh` check (3/4, 1 from master). The harness was restored and passes again.
+- Live on local Docker, against `postgres:16-alpine` (16.15, the RDS major) with `ssl=on`. The master was an RDS-like `dbadmin LOGIN CREATEROLE CREATEDB` (not a superuser) owning the databases. The script ran from the freshly built app images, all `cd-t18-*`, no host ports.
+  - Fresh run: role created, exit 0. Second run: "up to date", exit 0. Attributes all false, 0 memberships, stored password `SCRAM-SHA-256$...`.
+  - inventory-app as `inventory_app` with `DB_SSLMODE=require`: connected, `/ready` 200, `movies` owned by `inventory_app`.
+  - Handover: billing-app first ran as the master (a pre-T18 stack) and one order was inserted. The script then moved `orders` and `orders_id_seq` from `dbadmin` to `billing_app`. That confirms the PG16 `GRANT ... WITH INHERIT FALSE, SET TRUE` syntax works for a non-superuser master. billing-app then connected as `billing_app` and an insert read back 2 orders.
+  - `inventory_app` was refused each of these: `CREATE ROLE`, `CREATE DATABASE`, reading `pg_authid`, `SET ROLE dbadmin`, connecting to `billing_db`, and `billing_app` connecting to `inventory_db`. It can still connect to the default `postgres` database (`PUBLIC` keeps `CONNECT` there), which the README now states.
+  - Password rotation, over the network with scram (the first try went through 127.0.0.1, which the image's `pg_hba.conf` trusts, so it proved nothing and was redone): after a re-run with a new password, the new one logs in with `ssl=True` and the old one is refused, twice in a row.
+  - Two runs started together on a fresh role: one "created", one "up to date", both exit 0.
+  - Refusals, all exit 1:
+    - same-named roles with `CREATEDB` or with a membership, created by the master, are refused by the script itself, and no password is set;
+    - the same created by the superuser fail earlier at `ALTER ROLE`, because the master holds no ADMIN on them;
+    - a missing `APP_DB_PASSWORD` is reported by name.
+  - With `log_statement=all`, none of the four app passwords appear in the server log; the logged `ALTER ROLE` lines show only `SCRAM-SHA-256$4096:...`.
+  - Cleanup: the PostgreSQL container with its anonymous volume (`docker rm -f -v`), the network, the two test images, the pulled `postgres:16-alpine` and the scratch folders were removed. The image list is back to its 17 tags and no prune was run.
+- `test_cloud.sh` (on a scratch copy) 65 passed, 0 failed, same 2 warnings. `run-audit-checks.sh --static` PASS=163 FAIL=0 INVALID=8 NOTES=51, including "Secrets Manager (5 secrets)" and `make test-py` with 70 tests passing.
+- Not run: against RDS itself (where the master is also in `rds_superuser`), and an ECS task start on Fargate.
+
+**Sources**
+- [Amazon ECS API Reference, ContainerDependency](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_ContainerDependency.html): `SUCCESS` is `COMPLETE` plus a zero exit status and cannot be set on an essential container; Fargate needs Linux platform version 1.3.0 or later (the services use the default, LATEST).
+- [Amazon RDS User Guide, Master user account privileges](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.MasterAccounts.html): the PostgreSQL master gets `CREATE ROLE`, `CREATE DB`, `ALTER <OBJECT> OWNER` and the `RDS_SUPERUSER` role; AWS strongly recommends not using the master user directly in applications.
+
+Pending docs text (read-only, not applied). All in `docs/AUDIT_GUIDE.md`:
+
+1. Line 264, replace `Secrets Manager (3 secrets)` with `Secrets Manager (5 secrets)`.
+
+2. Line 1535, in the per-file block, replace `rds.tf=10` with `rds.tf=16`. The other numbers in that block were already stale before T18 and are left for the docs refresh.
+
+3. Line 2729, replace the `rds.tf` row with:
+
+```
+| `rds.tf` | 16 | 2 KMS-backed `aws_db_instance`, `aws_db_parameter_group` (`rds.force_ssl=1`), 4 Secrets Manager secrets + versions (master and app role for each database), 4 random passwords |
+```
+
+4. Lines 2472-2475, replace from `AWS the same principle` up to the end of the answer with:
+
+```
+> AWS the same principle is enforced differently: the ECS services inject
+> `INVENTORY_DB_PASSWORD` and `BILLING_DB_PASSWORD` from Secrets Manager via
+> `secrets = [ … ]`, never as plaintext environment values. They are the
+> passwords of the apps' own roles (`inventory_app`, `billing_app`); the RDS
+> master password reaches only the short-lived `db-role-init` container.
+> `manifests/secrets.yaml` contains only `REPLACE_ME_*` placeholders.
+```
+
+5. After point 9 (line 487, before "### The security disclosure"), insert:
+
+```
+**10. Least-privilege database roles.** The apps do not connect as the RDS master
+user. Each task runs a short `db-role-init` container first
+(`terraform/files/db_role_init.py`, from the app's own image), which creates or
+updates `inventory_app` / `billing_app` with no `SUPERUSER`, `CREATEDB`,
+`CREATEROLE` or memberships, revokes `CONNECT` on the app database from `PUBLIC`
+and grants it to that role. The app container starts only after it exits 0
+(`dependsOn` `SUCCESS`) and receives only its role's secret. The password is sent
+as a SCRAM verifier, so it is never in a server log.
+```

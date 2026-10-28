@@ -20,6 +20,32 @@ resource "random_password" "billing_db" {
   override_special = "!#$%&*()-_=+[]{}<>:?"
 }
 
+# Least-privilege application roles. The apps no longer connect as the RDS
+# master user (var.db_username): each one gets its own PostgreSQL role that can
+# only create and use tables in its database's public schema.
+# The roles are created by the db-role-init container that runs before each app
+# container (ecs_services.tf, files/db_role_init.py); only that container ever
+# receives the master credentials. The names match the local stack's
+# .env.example, so both environments use the same roles.
+locals {
+  db_app_users = {
+    inventory = "inventory_app"
+    billing   = "billing_app"
+  }
+}
+
+resource "random_password" "inventory_app_db" {
+  length           = 20
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}<>:?"
+}
+
+resource "random_password" "billing_app_db" {
+  length           = 20
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}<>:?"
+}
+
 # KMS Key for Database Storage Encryption
 resource "aws_kms_key" "rds" {
   description             = "KMS Key for RDS PostgreSQL storage encryption"
@@ -65,7 +91,9 @@ resource "aws_db_parameter_group" "postgres" {
   tags = local.common_tags
 }
 
-# 1. AWS Secrets Manager: Inventory Database Credentials
+# 1. AWS Secrets Manager: Inventory Database MASTER Credentials
+# Read only by the db-role-init container (and by an operator); the app itself
+# uses aws_secretsmanager_secret.inventory_app_db below.
 # NOTE on recovery_window_in_days = 0 (unchanged, and deliberate): AWS's minimum
 # non-zero window is 7 days, but a secret deleted WITH a recovery window is only
 # SCHEDULED for deletion - it stays readable, and re-creating a secret with the
@@ -92,7 +120,7 @@ resource "aws_secretsmanager_secret_version" "inventory_db" {
   })
 }
 
-# 2. AWS Secrets Manager: Billing Database Credentials
+# 2. AWS Secrets Manager: Billing Database MASTER Credentials (same split as above)
 resource "aws_secretsmanager_secret" "billing_db" {
   name                    = "${local.name_prefix}-billing-db-credentials"
   kms_key_id              = aws_kms_key.rds.arn
@@ -109,6 +137,48 @@ resource "aws_secretsmanager_secret_version" "billing_db" {
     port     = aws_db_instance.billing.port
     username = var.db_username
     password = random_password.billing_db.result
+    database = "billing_db"
+  })
+}
+
+# 3. AWS Secrets Manager: the application roles' credentials. These are what the
+# app containers receive; same KMS key and recovery window as the master secrets.
+resource "aws_secretsmanager_secret" "inventory_app_db" {
+  name                    = "${local.name_prefix}-inventory-db-app-credentials"
+  kms_key_id              = aws_kms_key.rds.arn
+  recovery_window_in_days = 0
+
+  tags = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "inventory_app_db" {
+  secret_id = aws_secretsmanager_secret.inventory_app_db.id
+  secret_string = jsonencode({
+    engine   = "postgres"
+    host     = aws_db_instance.inventory.address
+    port     = aws_db_instance.inventory.port
+    username = local.db_app_users.inventory
+    password = random_password.inventory_app_db.result
+    database = "inventory_db"
+  })
+}
+
+resource "aws_secretsmanager_secret" "billing_app_db" {
+  name                    = "${local.name_prefix}-billing-db-app-credentials"
+  kms_key_id              = aws_kms_key.rds.arn
+  recovery_window_in_days = 0
+
+  tags = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "billing_app_db" {
+  secret_id = aws_secretsmanager_secret.billing_app_db.id
+  secret_string = jsonencode({
+    engine   = "postgres"
+    host     = aws_db_instance.billing.address
+    port     = aws_db_instance.billing.port
+    username = local.db_app_users.billing
+    password = random_password.billing_app_db.result
     database = "billing_db"
   })
 }

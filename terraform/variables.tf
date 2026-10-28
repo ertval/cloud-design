@@ -126,7 +126,7 @@ variable "db_max_allocated_storage" {
 }
 
 variable "db_username" {
-  description = "Master administrative username for RDS PostgreSQL instances"
+  description = "Master administrative username for RDS PostgreSQL instances. Used only by the db-role-init container to create the apps' own roles (inventory_app, billing_app); the apps never connect as it."
   type        = string
   default     = "dbadmin"
 }

@@ -76,9 +76,14 @@ resource "aws_iam_policy" "ecs_secrets_access" {
         Action = [
           "secretsmanager:GetSecretValue"
         ]
+        # The master secrets go only to the db-role-init containers; the app
+        # containers get the *_app_db secrets (ecs_services.tf). Both are
+        # fetched by this execution role at task launch, never by the app.
         Resource = [
           aws_secretsmanager_secret.inventory_db.arn,
           aws_secretsmanager_secret.billing_db.arn,
+          aws_secretsmanager_secret.inventory_app_db.arn,
+          aws_secretsmanager_secret.billing_app_db.arn,
           aws_secretsmanager_secret.mq_credentials.arn
         ]
       },

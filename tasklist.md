@@ -88,7 +88,7 @@ The biggest saving of all costs nothing: deploy shortly before the audit and des
   - Files: `srcs/billing-app/app/__init__.py`, `srcs/billing-app/app/consume_queue.py`
 - [x] ~~**T17** Add `sslmode=require` to both database URLs (`query={"sslmode": "require"}` in `URL.create`); keep the local stack working (local Postgres has no TLS, so make it an env-driven default such as `DB_SSLMODE`). (5.4)~~
   - Files: `srcs/inventory-app/app/__init__.py:148`, `srcs/billing-app/app/__init__.py:224`, `terraform/ecs_services.tf`, `.env.example`
-- [ ] **T18** Optional: per-app least-privilege database roles instead of the RDS master user. (5.4)
+- [x] ~~**T18** Optional: per-app least-privilege database roles instead of the RDS master user. (5.4)~~
 - [ ] **T19** Fix the stale budget text (300 USD / 260 USD) in `terraform/cloudwatch.tf:443-446,489`. (5.3)
 - [ ] **T20** Recompute the monthly cost after T01, T02 and T10; update `var.monthly_budget_limit`, the README cost table and the tfvars example together. (5.6)
 
