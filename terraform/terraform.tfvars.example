@@ -85,7 +85,7 @@ log_retention_days     = 30
 # !! anything.
 alarm_email = ""
 
-# ~$295/month steady state with the single-instance broker; see the itemised
+# ~$313/month steady state (single-instance broker, 2 tasks per service); see the itemised
 # estimate on var.monthly_budget_limit.
 monthly_budget_limit = 450
 

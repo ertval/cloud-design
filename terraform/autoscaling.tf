@@ -1,8 +1,8 @@
 # ------------------------------------------------------------------------------
 # Auto Scaling Policies: Target Tracking
 #
-#   api-gateway    -> ECSServiceAverageCPUUtilization, 60%, min 1 / max 3
-#   inventory-app  -> ECSServiceAverageCPUUtilization, 60%, min 1 / max 3
+#   api-gateway    -> ECSServiceAverageCPUUtilization, 60%, min 2 / max 3
+#   inventory-app  -> ECSServiceAverageCPUUtilization, 60%, min 2 / max 3
 #   billing-app    -> Amazon MQ MessageCount (backlog), min 2 / max 6
 #
 # billing-app is the ONLY RabbitMQ consumer and the ONLY writer to the billing
@@ -22,10 +22,12 @@
 # exposes for this broker, and it is the same metric dashboarded as queue depth.
 # ------------------------------------------------------------------------------
 
-# 1. API Gateway Service Auto Scaling Target (Min: 1, Max: 3)
+# 1. API Gateway Service Auto Scaling Target (Min: 2, Max: 3)
+# FIX: min was 1, so a quiet period scaled the service in to a single task: one
+# ALB target and one AZ. 2 keeps a task per private app subnet at all times.
 resource "aws_appautoscaling_target" "api_gateway" {
   max_capacity       = 3
-  min_capacity       = 1
+  min_capacity       = 2
   resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.api_gateway.name}"
   scalable_dimension = "ecs:service:DesiredCount"
   service_namespace  = "ecs"
@@ -52,10 +54,11 @@ resource "aws_appautoscaling_policy" "api_gateway_cpu" {
   }
 }
 
-# 2. Inventory App Service Auto Scaling Target (Min: 1, Max: 3)
+# 2. Inventory App Service Auto Scaling Target (Min: 2, Max: 3)
+# FIX: min was 1, for the same reason as api-gateway above.
 resource "aws_appautoscaling_target" "inventory_app" {
   max_capacity       = 3
-  min_capacity       = 1
+  min_capacity       = 2
   resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.inventory_app.name}"
   scalable_dimension = "ecs:service:DesiredCount"
   service_namespace  = "ecs"

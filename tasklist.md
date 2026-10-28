@@ -72,9 +72,9 @@ The biggest saving of all costs nothing: deploy shortly before the audit and des
 
 ## Phase 2: Close the design gaps
 
-- [ ] **T10** Raise `api-gateway` to `desired_count = 2` and `min_capacity = 2`; the ALB needs two targets to prove load balancing (V3). Doing the same for `inventory-app` is what makes the "one AZ loss halves capacity" claim true. Each extra 0.25 vCPU / 0.5 GB task costs about $9 per month (the README's ~$37 for 4 tasks). Update the cost table. (5.1)
+- [x] ~~**T10** Raise `api-gateway` to `desired_count = 2` and `min_capacity = 2`; the ALB needs two targets to prove load balancing (V3). Doing the same for `inventory-app` is what makes the "one AZ loss halves capacity" claim true. Each extra 0.25 vCPU / 0.5 GB task costs about $9 per month (the README's ~$37 for 4 tasks). Update the cost table. (5.1)~~
   - Files: `terraform/ecs_services.tf:224,286`, `terraform/autoscaling.tf:28,58`, `terraform/variables.tf`, `README.md`
-- [ ] **T11** Decide on `billing-app` `desired_count` drift: add `ignore_changes = [desired_count]` or document why not. (5.1)
+- [x] ~~**T11** Decide on `billing-app` `desired_count` drift: add `ignore_changes = [desired_count]` or document why not. (5.1)~~
   - Files: `terraform/ecs_services.tf:345-396`
 - [ ] **T12** Fix the "ALB Target Health" dashboard widget: add the `TargetGroup` dimension, one line per target group. (5.3)
   - Files: `terraform/cloudwatch.tf:407-408`

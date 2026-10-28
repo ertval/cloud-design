@@ -276,10 +276,10 @@ variable "monthly_budget_limit" {
       RDS PostgreSQL db.t4g.micro Multi-AZ x2 + storage ..................  ~$53
       NAT Gateways x2 .....................................................  ~$66
       Application Load Balancer ..........................................  ~$16
-      ECS Fargate 4 x (0.25 vCPU / 0.5 GB) ................................  ~$37
+      ECS Fargate 6 x (0.25 vCPU / 0.5 GB), 2 per service .................  ~$54
       KMS keys, ECR storage + Inspector scans, CloudWatch logs/alarms ......  ~$9
       --------------------------------------------------------------------
-      TOTAL ..............................................................  ~$295/mo
+      TOTAL ..............................................................  ~$313/mo
 
     The MQ line is the one that moved: mq.t3.micro was ~$79 but AWS withdrew it
     for new brokers (see var.mq_host_instance_type), and mq.m7g.medium is roughly
@@ -287,7 +287,7 @@ variable "monthly_budget_limit" {
     one broker, not two: Amazon MQ for RabbitMQ has no active/standby mode (see
     amazon_mq.tf), and the three-node cluster would add ~$230.
     Peak (api-gateway + inventory-app auto-scaled to their max of 3, i.e. 8 tasks
-    instead of 4) is ~$335/mo. The 450 USD default was sized for the earlier
+    instead of 6) is ~$331/mo. The 450 USD default was sized for the earlier
     two-broker estimate (~$410 steady, ~$450 peak) and now sits above the peak.
     This is an estimate built from published unit prices, not a quote - re-check
     it against the AWS Pricing Calculator before demoing.

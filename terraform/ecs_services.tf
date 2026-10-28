@@ -7,9 +7,11 @@
 # Three services, matching the three applications in srcs/:
 #   api-gateway  : public through API Gateway, behind the internal ALB target group (:3000)
 #   inventory-app: private, discovered by api-gateway over Cloud Map (:8080)
-#   billing-app  : private, the ONLY RabbitMQ consumer -> desired_count 2, and
-#                  additionally behind a second ALB target group (:8080) so
-#                  GET /api/billing/orders is reachable
+#   billing-app  : private, the ONLY RabbitMQ consumer, and additionally behind
+#                  a second ALB target group (:8080) so GET /api/billing/orders
+#                  is reachable
+# All three start with 2 tasks (one per private app subnet) and autoscaling.tf
+# owns desiredCount after that, which is why each has ignore_changes.
 # ------------------------------------------------------------------------------
 
 locals {
@@ -224,8 +226,13 @@ resource "aws_ecs_service" "api_gateway" {
   name            = "${local.name_prefix}-api-gateway"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.api_gateway.arn
-  desired_count   = 1
-  launch_type     = local.fargate_launch_type
+  # FIX: was 1. Two tasks, matching min_capacity = 2 in autoscaling.tf: the
+  # internal ALB needs at least two targets to have anything to balance, and
+  # Fargate spreads a service's tasks across the AZs of its subnets, so one per
+  # private app subnet means an AZ loss halves the request path instead of
+  # removing it. Each extra 0.25 vCPU / 0.5 GB task is about $9/month.
+  desired_count = 2
+  launch_type   = local.fargate_launch_type
 
   # FIX: aws_appautoscaling_target.api_gateway owns this service's desiredCount,
   # and Terraform and the autoscaler were fighting over it - after any scale-out
@@ -235,7 +242,10 @@ resource "aws_ecs_service" "api_gateway" {
   # default for desiredCount is 0, so a service created without it starts with NO
   # running tasks, and a target-tracking policy keyed on ECSServiceAverageCPUUtilization
   # has no metric to react to with zero tasks - it would never scale out.
-  # 1 stays as the create-time value, autoscaling keeps it afterwards.
+  # 2 is the create-time value, autoscaling keeps it afterwards. On a stack that
+  # already runs 1 task, ignore_changes means Terraform does not send the new
+  # count, but raising min_capacity does: RegisterScalableTarget moves a current
+  # capacity that is below the new minimum up to it.
   lifecycle {
     ignore_changes = [desired_count]
   }
@@ -286,8 +296,11 @@ resource "aws_ecs_service" "inventory_app" {
   name            = "${local.name_prefix}-inventory-app"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.inventory_app.arn
-  desired_count   = 1
-  launch_type     = local.fargate_launch_type
+  # FIX: was 1. Two tasks for the same reason as api-gateway above: every
+  # /api/movies request goes through this service, so with one task an AZ loss
+  # took the whole read/write path down.
+  desired_count = 2
+  launch_type   = local.fargate_launch_type
 
   # Same autoscaler conflict as api-gateway above
   # (aws_appautoscaling_target.inventory_app). See that comment.
@@ -351,6 +364,15 @@ resource "aws_ecs_service" "billing_app" {
   task_definition = aws_ecs_task_definition.billing_app.arn
   desired_count   = 2
   launch_type     = local.fargate_launch_type
+
+  # FIX: this service was the one without ignore_changes, although
+  # aws_appautoscaling_target.billing_app owns its desiredCount just like the
+  # other two. So the first `terraform apply` after a backlog scale-out set it
+  # back to 2 in the middle of the burst it was scaled out for, and the policy
+  # had to scale out again. 2 is now only the create-time value.
+  lifecycle {
+    ignore_changes = [desired_count]
+  }
 
   dynamic "capacity_provider_strategy" {
     for_each = var.ecs_use_fargate_spot ? [1] : []

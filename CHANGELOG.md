@@ -141,3 +141,22 @@ The user asked to fix the mismatch noted after T08: the prompt said "Type the AW
 
 **Verified**
 Stubbed `terraform`/`aws` on a copy of the script, prompts answered through `script` (a real TTY): right ID destroys; wrong ID and `y` abort with exit 2 and no destroy; no aws CLI gives the y/N fallback; failing `sts` exits 1 with no destroy; `--yes` destroys with no sts call; no TTY exits 2 with no destroy; `--kms` still works after the right ID. `test_cloud.sh` 63 passed, 0 failed; `run-audit-checks.sh --static` PASS=159 FAIL=0 INVALID=8.
+
+## 2026-10-28 12:40 EET: Phase 2 T10 and T11, two tasks per service and no desired_count drift
+
+**What**
+- `terraform/ecs_services.tf`: `api-gateway` and `inventory-app` start with `desired_count = 2` (was 1); `billing-app` gets `lifecycle { ignore_changes = [desired_count] }` like the other two. FIX comments explain why, and how a running stack still reaches 2 (raising `min_capacity` moves current capacity up to it). Header comment updated.
+- `terraform/autoscaling.tf`: `min_capacity = 2` (was 1) for the `api-gateway` and `inventory-app` targets; header and target comments updated. Max stays 3 / 3 / 6.
+- `terraform/variables.tf`, `terraform/terraform.tfvars.example`: cost estimate now 6 Fargate tasks ~$54, steady state ~$313/month (was ~$295), peak ~$331 (8 tasks). Budget value 450 unchanged (T20).
+- `scripts/run-audit-checks.sh`: the autoscaling parser keeps the raw bound and resolves `var.NAME` to the variable default, so the `billing-app` target (written with variables) is checked instead of silently skipped. The `desired_count` checks compare against the parsed `min_capacity` and require at least 2 (the old messages hard-coded "min_capacity=1"). New check: every `aws_ecs_service` has `ignore_changes = [desired_count]`.
+- `README.md`: component table, scalability table, autoscaling table (min 2), availability bullet, cost table (6 tasks ~$54, ~$313 steady, ~$331 peak), cost-effectiveness bullet (the stale ~$410 figure), and the Fargate Spot row.
+- `tasklist.md`: T10 and T11 ticked and crossed out.
+
+**Why**
+With one task each, the internal ALB had a single target to "balance" and one AZ loss took the request path down, so the README's availability claim was not true. `billing-app` was the only service without `ignore_changes`, so any apply after a backlog scale-out reset it to 2 mid-burst. The two extra tasks cost about $18/month together.
+
+**Verified**
+- Temp Terraform copy: `fmt -check` clean, `validate` passes, mocked `terraform test` 7 passed (new run: all three services start at 2, all targets keep min 2, max 3 / 3 / 6).
+- `run-audit-checks.sh --static` on an initialised copy: PASS=163 FAIL=0 INVALID=8 (159 before: +3 for the billing target now parsed, +1 for the drift check). With `api-gateway` put back to 1 and the `billing-app` `ignore_changes` removed, both new checks FAIL as intended.
+- `test_cloud.sh`: 63 passed, 0 failed (reports min=2 max=3).
+- Not run against AWS.

@@ -253,10 +253,10 @@ is listed as both a StatefulSet and an RDS instance.
 |---|---|---|---|---|---|---|
 | 1 | `inventory-database` | 5432 | `cloud-design/inventory-database:local` (FROM `postgres:17-alpine`) | 5432 | **Amazon RDS PostgreSQL**, `multi_az = true`, `publicly_accessible = false` (`rds.tf`) | private db |
 | 2 | `billing-database` | 5432 | `cloud-design/billing-database:local` (FROM `postgres:17-alpine`) | 5433 (5432 is taken) | **Amazon RDS PostgreSQL**, `multi_az = true`, `publicly_accessible = false` (`rds.tf`) | private db |
-| 3 | `inventory-app` | 8080 | `cloud-design/inventory-app:local` (FROM `python:3.11-alpine`) | 8081 (direct, bypasses the gateway) | **ECS task** `cloud-design-prod-inventory-app` (`ecs_services.tf`) | private app |
+| 3 | `inventory-app` | 8080 | `cloud-design/inventory-app:local` (FROM `python:3.11-alpine`) | 8081 (direct, bypasses the gateway) | **ECS task** `cloud-design-prod-inventory-app`, `desired_count = 2` (`ecs_services.tf`) | private app |
 | 4 | `billing-app` | 8080 | `cloud-design/billing-app:local` (FROM `python:3.11-alpine`) | 8082 (direct) | **ECS task** `cloud-design-prod-billing-app`, `desired_count = 2` (`ecs_services.tf`) | private app |
 | 5 | `RabbitMQ` queue | 5672 local / **5671 AWS** | `cloud-design/rabbit-queue:local` (FROM `rabbitmq:3.13-management-alpine`) | 5672 + 15672 (mgmt UI) | **Amazon MQ for RabbitMQ** `SINGLE_INSTANCE`, `publicly_accessible = false`, **AMQPS 5671 only** (`amazon_mq.tf`) | private db |
-| 6 | `api-gateway` | 3000 | `cloud-design/api-gateway:local` (FROM `python:3.11-alpine`), **2 replicas** | none (behind the LB) | **ECS task** `cloud-design-prod-api-gateway` (`ecs_services.tf`) | private app |
+| 6 | `api-gateway` | 3000 | `cloud-design/api-gateway:local` (FROM `python:3.11-alpine`), **2 replicas** | none (behind the LB) | **ECS task** `cloud-design-prod-api-gateway`, `desired_count = 2` (`ecs_services.tf`) | private app |
 | — | local load balancer | 3000 (host) | `nginx:1.27-alpine`, `least_conn` — the local stand-in for the ALB | 3000 | **Application Load Balancer**, `internal = true`, behind API Gateway (`alb.tf`) | private app |
 
 Supporting AWS resources with no local container counterpart: API Gateway HTTP
@@ -314,7 +314,7 @@ are PostgreSQL 17** (`postgres:17-alpine`), the **RDS instances are 16.9**
 
 | Layer | Mechanism | Bounds |
 |---|---|---|
-| ECS request path | `ECSServiceAverageCPUUtilization` target tracking, **60 %** (`autoscaling.tf`) | `api-gateway` and `inventory-app`: min 1 / max 3; scale-out cooldown **60 s**, scale-in **300 s** |
+| ECS request path | `ECSServiceAverageCPUUtilization` target tracking, **60 %** (`autoscaling.tf`) | `api-gateway` and `inventory-app`: min 2 / max 3; scale-out cooldown **60 s**, scale-in **300 s** |
 | Queue consumer | `AWS/AmazonMQ MessageCount` target tracking — **backlog, not CPU** (`autoscaling.tf`) | `billing-app`: min 2 / max 6 (`billing_queue_depth_target = 50` messages) |
 | Manifests path | 3 HorizontalPodAutoscalers, 60 % CPU | min 1 / max 3 for `api-gateway` and `inventory-app`; min 2 / max 6 for `billing-app` |
 | Storage | RDS storage autoscaling | 20 GB → 100 GB (`db_max_allocated_storage`) |
@@ -360,8 +360,10 @@ range — see [Usage](#usage) for the script and the full table.
   `POST /api/billing` answers **503** and the client retries; orders already
   queued are durable, persistent messages and are consumed once it is back.
   `CLUSTER_MULTI_AZ` is the upgrade path.
-- **ECS services span both private app subnets**, so one AZ loss halves capacity
-  rather than removing it. A broker outage (above) and an RDS failover are the
+- **ECS services span both private app subnets** with at least two tasks each
+  (`desired_count = 2`, `min_capacity = 2`), and Fargate spreads a service's tasks
+  across the AZs of its subnets, so one AZ loss halves capacity rather than
+  removing it. It also gives the internal ALB two targets per target group. A broker outage (above) and an RDS failover are the
   events that can still be user-visible, and both are AWS-managed.
 - **Graceful shutdown is proven, not asserted.** `docker compose stop billing-app`
   exits **0** (the SIGTERM handler at `srcs/billing-app/app/consume_queue.py:247-253`
@@ -397,7 +399,7 @@ verified by an API Gateway **JWT authorizer** attached to every `/api/*` route.
   cheaper but tasks can be reclaimed with a two-minute warning, which would
   undermine the same pillar. Opt-in.
 - **A budget that can actually fire**: `monthly_budget_limit = 450` USD with an
-  itemised `~$410/month` steady-state estimate in `variables.tf`. The previous
+  itemised `~$313/month` steady-state estimate in `variables.tf`. The previous
   `$15` default was ~20× below the real run-rate, so its alarm fired every month
   and taught an auditor nothing.
 - **Full detail in [Cost management](#cost-management).**
@@ -495,8 +497,8 @@ placeholder domains are rejected at plan time by a `validation` block.
 
 | Service | min | max | Metric | Target | Policy |
 |---|---|---|---|---|---|
-| `cloud-design-prod-api-gateway` | 1 | 3 | `ECSServiceAverageCPUUtilization` | `var.autoscaling_target_cpu` = 60 % | `…-apigw-cpu-target-tracking-60` |
-| `cloud-design-prod-inventory-app` | 1 | 3 | `ECSServiceAverageCPUUtilization` | 60 % | `…-inventory-cpu-target-tracking-60` |
+| `cloud-design-prod-api-gateway` | **2** | 3 | `ECSServiceAverageCPUUtilization` | `var.autoscaling_target_cpu` = 60 % | `…-apigw-cpu-target-tracking-60` |
+| `cloud-design-prod-inventory-app` | **2** | 3 | `ECSServiceAverageCPUUtilization` | 60 % | `…-inventory-cpu-target-tracking-60` |
 | `cloud-design-prod-billing-app` | **2** | **6** | `AWS/AmazonMQ MessageCount` | `var.billing_queue_depth_target` = 50 messages | `…-billing-queue-depth-target-tracking` |
 
 `billing-app` is the odd one out on purpose. It is the **only** RabbitMQ consumer
@@ -1333,10 +1335,10 @@ until it is deleted.
 | RDS PostgreSQL Multi-AZ | `db.t4g.micro` ×2 + 20 GB gp3 | ~$53 |
 | NAT Gateways | ×2 (one per AZ) | ~$66 |
 | Application Load Balancer | 1 | ~$16 |
-| ECS Fargate | 4 tasks (1 + 1 + 2) | ~$37 |
+| ECS Fargate | 6 tasks (2 + 2 + 2), ~$9 each | ~$54 |
 | KMS, ECR storage, logs, alarms | — | ~$9 |
-| **Steady state** | | **~$295/mo** |
-| **Peak** (gateway + inventory at max 3) | | **~$335/mo** |
+| **Steady state** | | **~$313/mo** |
+| **Peak** (gateway + inventory at max 3, 8 tasks) | | **~$331/mo** |
 
 `monthly_budget_limit = 450` was sized for the earlier two-broker estimate
 (~$410 steady, ~$450 peak) and now sits above the peak. The previous `$15`
@@ -1384,7 +1386,7 @@ nothing had been destroyed.
 | Lever | Default | Effect if you change it |
 |---|---|---|
 | `single_nat_gateway` | **`false`** | `true` saves ~**$33/mo** but every private task loses its second NAT: an AZ failure or NAT maintenance window takes the whole application down. Only for a short-lived sandbox |
-| `ecs_use_fargate_spot` | **`false`** | `true` is up to ~70 % cheaper but tasks can be reclaimed with 2 minutes' warning. Would need `desired_count ≥ 2` on the request path to survive an interruption |
+| `ecs_use_fargate_spot` | **`false`** | `true` is up to ~70 % cheaper but tasks can be reclaimed with 2 minutes' warning. The request path already runs 2 tasks per service, which an interruption needs, but a reclaimed task still drops its in-flight requests |
 | `db_instance_class` | `db.t4g.micro` | Graviton ARM; `db.t4g.small` is the next step if the CPU alarm fires |
 | `log_retention_days` | `30` | logs are a real line item; 7 is defensible for a demo |
 | `monthly_budget_limit` | `300` | validation rejects < 50 |

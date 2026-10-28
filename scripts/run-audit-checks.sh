@@ -1613,12 +1613,23 @@ else
   fail "target/policy count mismatch (${TGT_CNT:-0} targets, ${POL_CNT:-0} policies)"
 fi
 
+# The raw right-hand side is kept, so a bound written as `var.NAME` is resolved
+# to that variable's default by tf_num below. The previous parser kept only the
+# digits, so `min_capacity = var.billing_app_min_capacity` became an empty string
+# and the billing-app target was silently left out of every check in this loop.
 TARGET_ROWS="$(awk '
   /^resource .aws_appautoscaling_target./ {inblk=1; nm=$3; gsub(/"/,"",nm); mn=""; mx=""; next}
   inblk && /^}/ {if(mn!=""||mx!="") printf "target=%s min=%s max=%s\n", nm, mn, mx; inblk=0; next}
-  inblk && /min_capacity/ {gsub(/[^0-9]/,""); mn=$0}
-  inblk && /max_capacity/ {gsub(/[^0-9]/,""); mx=$0}
+  inblk && /min_capacity/ {v=$0; sub(/^[^=]*=[[:space:]]*/,"",v); sub(/[[:space:]#].*$/,"",v); mn=v}
+  inblk && /max_capacity/ {v=$0; sub(/^[^=]*=[[:space:]]*/,"",v); sub(/[[:space:]#].*$/,"",v); mx=v}
 ' "${TF_DIR}/autoscaling.tf" 2>/dev/null)"
+tf_num() { # tf_num <literal | var.NAME>: the number, or the default of variable NAME
+  case "$1" in
+    var.*) awk -v n="${1#var.}" '$0 ~ "^variable \"" n "\"" {f=1} f && /default[[:space:]]*=/ {gsub(/[^0-9]/,""); print; exit}' "${TF_DIR}/variables.tf" 2>/dev/null ;;
+    *)     printf '%s' "$1" | tr -cd '0-9' ;;
+  esac
+}
+target_min() { tf_num "$(sed -n "s/^target=$1 min=\([^ ]*\) .*/\1/p" <<<"${TARGET_ROWS}")"; }
 show "per-target min/max parsed from terraform/autoscaling.tf" "${TARGET_ROWS:-<no targets parsed>}"
 # An auto-scaling target is only "configured correctly" if BOTH ends of the range
 # are sane. The floor was checked (min_capacity = 0 was caught); the ceiling was
@@ -1630,8 +1641,8 @@ note "Auto-scaling ceilings are bounded at max_capacity <= ${AS_MAX_CEILING} (an
 while read -r row; do
   [ -n "${row}" ] || continue
   nm="$(sed 's/.*target=\([^ ]*\).*/\1/' <<<"${row}")"
-  mn="$(sed 's/.* min=\([^ ]*\).*/\1/' <<<"${row}")"
-  mx="$(sed 's/.* max=\([^ ]*\).*/\1/' <<<"${row}")"
+  mn="$(tf_num "$(sed 's/.* min=\([^ ]*\).*/\1/' <<<"${row}")")"
+  mx="$(tf_num "$(sed 's/.* max=\([^ ]*\).*/\1/' <<<"${row}")")"
   if count_ok "${mn}" && count_ok "${mx}" && [ "${mn}" -ge 1 ] && [ "${mx}" -gt "${mn}" ]; then
     pass "${nm}: min_capacity=${mn} max_capacity=${mx} (a sane range)"
   else
@@ -1664,14 +1675,35 @@ show "grep -n desired_count terraform/ecs_services.tf" "$(grep -n 'desired_count
 DC_API="$(awk '/resource .aws_ecs_service. .api_gateway./{f=1} f && /desired_count/{gsub(/[^0-9]/,"");print;exit}' "${TF_DIR}/ecs_services.tf" 2>/dev/null)"
 DC_INV="$(awk '/resource .aws_ecs_service. .inventory_app./{f=1} f && /desired_count/{gsub(/[^0-9]/,"");print;exit}' "${TF_DIR}/ecs_services.tf" 2>/dev/null)"
 DC_BIL="$(awk '/resource .aws_ecs_service. .billing_app./{f=1} f && /desired_count/{gsub(/[^0-9]/,"");print;exit}' "${TF_DIR}/ecs_services.tf" 2>/dev/null)"
-if count_ok "${DC_API}" && [ "${DC_API}" -ge 1 ]; then pass "api-gateway desired_count=${DC_API} is consistent with min_capacity=1"
-else fail "api-gateway desired_count='${DC_API:-?}' is inconsistent with min_capacity=1"; fi
-if count_ok "${DC_INV}" && [ "${DC_INV}" -ge 1 ]; then pass "inventory-app desired_count=${DC_INV} is consistent with min_capacity=1"
-else fail "inventory-app desired_count='${DC_INV:-?}' is inconsistent with min_capacity=1"; fi
-if count_ok "${DC_BIL}" && [ "${DC_BIL}" -ge 2 ]; then
-  pass "billing-app desired_count=${DC_BIL} matches billing_app_min_capacity=2 -- never a single consumer"
+MN_API="$(target_min api_gateway)"; MN_INV="$(target_min inventory_app)"; MN_BIL="$(target_min billing_app)"
+# Two tasks on the request path is the design claim: the internal ALB needs two
+# targets to balance anything, and one task per private app subnet is what makes
+# an AZ loss halve capacity instead of removing it.
+if count_ok "${DC_API}" && count_ok "${MN_API}" && [ "${DC_API}" -eq "${MN_API}" ] && [ "${DC_API}" -ge 2 ]; then
+  pass "api-gateway desired_count=${DC_API} equals min_capacity=${MN_API}: two ALB targets, one per AZ"
 else
-  fail "billing-app desired_count='${DC_BIL:-?}' must be >= 2: one consumer task is a single point of failure for order processing"
+  fail "api-gateway desired_count='${DC_API:-?}' / min_capacity='${MN_API:-?}' must be equal and >= 2, or the ALB has a single target and one AZ loss takes the request path down"
+fi
+if count_ok "${DC_INV}" && count_ok "${MN_INV}" && [ "${DC_INV}" -eq "${MN_INV}" ] && [ "${DC_INV}" -ge 2 ]; then
+  pass "inventory-app desired_count=${DC_INV} equals min_capacity=${MN_INV}: an AZ loss halves the /api/movies path instead of removing it"
+else
+  fail "inventory-app desired_count='${DC_INV:-?}' / min_capacity='${MN_INV:-?}' must be equal and >= 2, or one AZ loss takes /api/movies down"
+fi
+if count_ok "${DC_BIL}" && count_ok "${MN_BIL}" && [ "${DC_BIL}" -eq "${MN_BIL}" ] && [ "${DC_BIL}" -ge 2 ]; then
+  pass "billing-app desired_count=${DC_BIL} matches billing_app_min_capacity=${MN_BIL} -- never a single consumer"
+else
+  fail "billing-app desired_count='${DC_BIL:-?}' / min_capacity='${MN_BIL:-?}' must be equal and >= 2: one consumer task is a single point of failure for order processing"
+fi
+# The autoscaler owns desiredCount once a service exists. A service without
+# ignore_changes = [desired_count] is reset to its create-time count by the next
+# terraform apply, in the middle of whatever burst it was scaled out for.
+SVC_N="$(fcount '^resource "aws_ecs_service"' "${TF_DIR}/ecs_services.tf")"
+IGN_N="$(fcount -E 'ignore_changes[[:space:]]*=[[:space:]]*\[desired_count\]' "${TF_DIR}/ecs_services.tf")"
+show "ECS services / services with ignore_changes = [desired_count]" "${SVC_N:-0} / ${IGN_N:-0}"
+if count_ok "${SVC_N}" && [ "${SVC_N}" -ge 1 ] && [ "${IGN_N:-0}" = "${SVC_N}" ]; then
+  pass "every ECS service leaves desiredCount to its autoscaling target (ignore_changes = [desired_count])"
+else
+  fail "only ${IGN_N:-0} of ${SVC_N:-?} ECS services ignore desired_count drift: terraform apply would undo the autoscaler's scale-out on the others"
 fi
 
 # The queue consumer must scale on BACKLOG, not CPU: a consumer blocked on an
