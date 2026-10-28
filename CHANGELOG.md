@@ -657,3 +657,69 @@ The user asked for the README to say that the two projects should not be tested 
 
 **Sources**
 - None beyond the AWS account itself: the facts come from the read-only AWS CLI checks listed under Verified.
+
+## 2026-10-28 22:43 EET: T21 live AWS demo script, scripts/aws-demo.sh
+
+**What**
+- `scripts/aws-demo.sh` (new, executable): the live audit demo against the deployed ECS stack, one section per question.
+  - Sections:
+    - `verify` (V1, V2);
+    - `lb` and `lb-split` (V3);
+    - `auth` (S2, S3);
+    - `movies` (F1, F2);
+    - `billing` (B1, B2);
+    - `load` and `scaling` (O1, O2);
+    - `security` (S1);
+    - `all`.
+  - `--pause` waits for Enter before each command, and `--help` prints the header.
+  - Every `aws` and `curl` command is printed before it runs. Its real output follows, then a `[PASS]` / `[FAIL]` / `[WARN]` / `[SKIP]` line per check. The exit code is 1 if a check failed and 2 on bad usage.
+  - Guards:
+    - it stops unless `AWS_PROFILE` equals `DEMO_PROFILE` (default `cloud-design`), because the account is shared;
+    - it stops unless `sts get-caller-identity` returns the account in the Terraform outputs;
+    - it stops if `terraform/` has no outputs.
+  - Everything comes from `terraform output -json`, including the region, read from the API Gateway URL.
+  - The Cognito ID token comes from the README recipe (client secret, `SECRET_HASH`, `USER_PASSWORD_AUTH`). The token, the demo password, the client secret and the hash are masked as `$TOKEN`, `$PASSWORD`, `$SECRET` and `$SECRET_HASH` in everything printed. An argument that carries one of them is shown in double quotes, so a pasted copy still expands.
+  - `lb` marks its requests with `?lbdemo=<run id>` and counts them per target from field 5 of the ALB access logs in S3. `lb-split` repeats only that count, for logs that arrive later.
+  - `load` is a stdlib Python load generator (threads, time based, `LOAD_DURATION` default 300 s, `LOAD_CONCURRENCY` default 32). It shows the scalable targets, the policies and their `TargetTracking-*` CloudWatch alarms, then the scaling activities, the CPU and the desired counts before and after.
+  - `billing` only reads for now: the service and scaling state, `MessageCount` and the stored orders. The drill is T22.
+- `README.md`:
+  - Path B gets a step 6, `scripts/aws-demo.sh all`.
+  - New subsection "Live AWS demo (`scripts/aws-demo.sh`)" after Path B, with usage, a section table and what changes state.
+  - "Deployment verification" points to `scripts/aws-demo.sh verify lb security`.
+  - New row in "Documentation and audit tooling".
+- `tasklist.md`: T21 ticked and crossed out.
+
+**Why**
+The user asked to move on to T21. The script sits next to `deploy.sh` and follows its style: a header block, `set -uo pipefail`, the identity check first. It also prints each command, because the rubric asks the auditor to see the real commands.
+
+Decisions made along the way:
+- Per-task request counts come from the ALB access logs. The gateway runs Waitress with no access log, so the ECS log streams cannot show them.
+- The scale-out and scale-in notes point to the live target-tracking alarms instead of quoting minutes, because the AWS docs do not publish fixed datapoint counts for those alarms.
+- The `billing` SKIP line, which the auditor sees, does not mention the task list.
+
+**Verified**
+- `bash -n` clean. ShellCheck 0.11.0, from the `shellcheck-py` package in a throwaway virtualenv under `/tmp` (outside the repo), is clean. The one file-wide `SC2016` disable is commented: it covers the literal placeholders, the JMESPath backticks and the jq variables.
+- No live stack exists, so every section ran against stub `aws`, `terraform` and `curl` commands in `/tmp/cd-demo-stub`. The stubs return the post-`--query` shapes.
+  - `verify lb auth movies billing security`: PASS=56 FAIL=0 WARN=0 SKIP=1 (the billing drill).
+  - `load` against a local HTTP server: 3945 of 3945 requests answered 200, and the scale-out was detected.
+  - Expected failures were reported correctly:
+    - wrong profile, other account, no outputs, bad section, bad number and `--pause` with no terminal each stop with a message;
+    - without a demo Cognito user, the authenticated checks are skipped and the note is printed once;
+    - with no ALB logs yet, the split prints a WARN;
+    - when the load host cannot be reached, the load step reports a FAIL and keeps running.
+  - No masked value appeared in any run's output.
+- Every Terraform output, resource name, log group, route table tag, parameter group setting and S3 log prefix the script uses was checked against `terraform/*.tf`.
+- Scratch copy:
+  - `test_cloud.sh`: 66 passed, 0 failed, 2 warnings (65 before; the new check is `bash -n clean: aws-demo.sh`).
+  - `run-audit-checks.sh --static`: PASS=163 FAIL=0 INVALID=8 NOTES=51, with 8 files in `scripts/`.
+- `make test-py`: 25 + 45 tests OK.
+- No em or en dashes in the script or in the added README lines.
+
+**Sources**
+- [Access logs for your Application Load Balancer](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-access-logs.html): one file per node every 5 minutes, the S3 key layout, field 5 `target:port`.
+- [How target tracking scaling for Application Auto Scaling works](https://docs.aws.amazon.com/autoscaling/application/userguide/target-tracking-scaling-policy-overview.html): Application Auto Scaling creates and manages the alarms, cooldown behaviour. No fixed datapoint counts are given.
+- [AWS re:Post: ECS Fargate service auto scaling not working properly](https://www.repost.aws/it/questions/QUVoLPVCU5QamquwCMrFMOzw/aws-ecs-uses-fargate-service-auto-scaling-which-is-not-working-properly): the `TargetTracking-service/<cluster>/<service>-AlarmHigh-<id>` / `-AlarmLow-` alarm names used in `--alarm-name-prefix`.
+- [shellcheck-py on PyPI](https://pypi.org/project/shellcheck-py/): the ShellCheck binary used for the lint run.
+
+**Next**
+- T22 fills in the `billing` drill: suspend scaling or set min 0, scale `billing-app` to 0, POST, show `MessageCount`, scale back, show the order and the logs, restore scaling.

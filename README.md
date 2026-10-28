@@ -939,6 +939,9 @@ for svc in $SERVICES; do
   aws ecs update-service --cluster "$CLUSTER" --service "$svc" --force-new-deployment >/dev/null
 done
 aws ecs wait services-stable --cluster "$CLUSTER" --services $SERVICES
+
+# 6. show the deployment to the auditor, one section per question (next section)
+scripts/aws-demo.sh all
 ```
 
 > The ECS task definitions in `terraform/ecs_services.tf` are authoritative.
@@ -955,6 +958,42 @@ aws ecs wait services-stable --cluster "$CLUSTER" --services $SERVICES
 > and `variables.tf` default `allowed_origins` to `["https://app.example.com"]`
 > (substitute the real frontend domain — a placeholder blocks every browser
 > request from the real frontend).
+
+### Live AWS demo (`scripts/aws-demo.sh`)
+
+`scripts/aws-demo.sh` runs the live part of the audit against the deployed
+stack, one section per question. It prints every `aws` and `curl` command before
+running it, then shows the real output and a `[PASS]` / `[FAIL]` / `[WARN]` /
+`[SKIP]` line for each check. It reads the Terraform outputs, refuses to start
+unless `AWS_PROFILE=cloud-design` (see "Shared AWS account: one project at a
+time"), and checks that the credentials belong to the account the stack was
+deployed to. The token, the demo password and the client secret are never
+printed; they appear as `$TOKEN`, `$PASSWORD` and `$SECRET`.
+
+```bash
+export AWS_PROFILE=cloud-design
+scripts/aws-demo.sh --help            # sections, environment variables, exit codes
+scripts/aws-demo.sh verify            # one section
+scripts/aws-demo.sh auth movies       # several, in this order
+scripts/aws-demo.sh --pause all       # wait for Enter before each command
+```
+
+| Section | Questions | What it shows |
+|---|---|---|
+| `verify` | V1, V2 | ECS services and tasks (AZ, health), target health, the last 10 minutes of logs, RDS and Amazon MQ state, `GET /health` end to end. Explains why `docker ps` does not apply on Fargate |
+| `lb` | V3 | Two healthy targets, `LB_REQUESTS` (default 100) requests through API Gateway, then the per-task split from the ALB access logs in S3 |
+| `lb-split` | V3 | Only the split. ALB delivers its logs every 5 minutes, so run this again a few minutes after `lb` |
+| `auth` | S2, S3 | 401 with no token and with a forged one, a Cognito ID token for the demo user, 200 with it, then the JWT authorizer, the routes and the user pool |
+| `movies` | F1, F2 | POST a movie through API Gateway, then GET the list and the movie by id |
+| `billing` | B1, B2 | Read-only for now: billing-app service and scaling state, the queue depth, the stored orders. The stop, POST and restart drill is not implemented yet |
+| `load` | O1, O2 | The scaling policies and their CloudWatch alarms, a timed load test (`LOAD_DURATION`, default 300 s, `LOAD_CONCURRENCY`, default 32), then the scaling activities, the CPU and the desired counts before and after |
+| `scaling` | O1 | Only the scaling view; run it again a few minutes after `load` |
+| `security` | S1 | HTTPS only at the edge, the internal ALB and its security group, JWT on every `/api/*` route, private and encrypted databases (security group, route table, a TCP probe from outside, `rds.force_ssl`, KMS rotation), the broker's TLS endpoints, credentials from Secrets Manager, Inspector and ECR scan results |
+| `all` | | `verify lb auth movies billing security load` |
+
+`movies` creates one movie, and `lb` and `load` send requests, which API
+Gateway bills per million. `load` can scale the services out and back in.
+Every other section only reads. The exit code is 1 if any check failed.
 
 ### The Kubernetes path (manifests, local cluster)
 
@@ -1410,6 +1449,10 @@ aws elbv2 describe-target-health \
 aws cloudwatch describe-alarms --state-value ALARM
 aws sns list-topics
 
+# --- the same AWS checks section by section, graded, against the live stack
+#     (see "Live AWS demo")
+scripts/aws-demo.sh verify lb security
+
 # --- the whole rubric, automatically, with real output
 bash scripts/run-audit-checks.sh
 bash scripts/test_cloud.sh
@@ -1816,6 +1859,7 @@ only because it now does.
 | `scripts/step_by_step_audit.py` | Sends the literal rubric commands to a terminal pane one at a time, so the examiner watches each command typed and its real output. `--list`, `--dry-run`, `--only <section>`, `--section`, `--pane` | — |
 | `scripts/build_push.sh` | Builds all six images as `:local`, verifies each one exists, optionally pushes the three application images to ECR with `PUSH=1` (as `:latest` and the git short SHA), prints the real size table | — |
 | `scripts/deploy.sh` | AWS path (ECS, no `kubectl`): `sts get-caller-identity` → `init`/`validate`/`plan`, stops there unless `AUTO_APPROVE=true` → ECR repositories (`-target`) → build+push → full `plan`/`apply` → `update-service --force-new-deployment` per service → `wait services-stable` → outputs. `--static-only` makes no AWS call | — |
+| `scripts/aws-demo.sh` | Live AWS demo for the audit, one section per question (`verify`, `lb`, `lb-split`, `auth`, `movies`, `billing`, `load`, `scaling`, `security`, `all`). Prints each `aws` / `curl` command before it runs it, grades the result, never prints a secret. Requires `AWS_PROFILE=cloud-design`. See "Live AWS demo" | needs a deployed stack |
 | `scripts/deploy-k3d.sh` | Local k3d path: creates the cluster with `metrics-server`, builds, `k3d image import`, applies the manifests, waits for rollouts | — |
 | `scripts/destroy.sh` | Teardown that reports per resource class whether it actually happened, and names the charges that survive | — |
 | `Makefile` | `make help` lists every target: `up`, `ps`, `logs`, `images`, `test`, `verify`, `lb-spread`, `consumer-drain`, `queue-drain`, `down`, `down-v` | — |
