@@ -55,6 +55,9 @@ IMAGE_PREFIX="${IMAGE_PREFIX:-cloud-design}"
 TAG="${TAG:-local}"
 # Build tag pushed next to :latest. Empty = derived from git below.
 IMAGE_TAG="${IMAGE_TAG:-}"
+# 0 = do not print the "Next, move the ECS services ..." hint (deploy.sh does
+# those steps itself right after the push).
+NEXT_HINT="${NEXT_HINT:-1}"
 AWS="${AWS:-aws}"
 
 while [ "$#" -gt 0 ]; do
@@ -135,7 +138,7 @@ if [ "${PUSH}" = "1" ]; then
     || die "PUSH=1 was requested but the aws CLI ('${AWS}') is not installed. Install it and configure a profile, or drop --push to build locally only."
   ok "aws CLI is present"
 
-  CALLER="$("${AWS}" sts get-caller-identity 2>&1)"
+  CALLER="$("${AWS}" sts get-caller-identity --output json 2>&1)"
   if [ $? -ne 0 ]; then
     die "aws sts get-caller-identity failed, refusing to guess credentials:
 ${CALLER}"
@@ -250,7 +253,7 @@ echo
 if [ "${PUSH}" = "1" ]; then echo ">>> ALL IMAGES BUILT AND PUSHED <<<"; else echo ">>> ALL IMAGES BUILT <<<"; fi
 if [ "${PUSH}" != "1" ]; then
   echo "Next: ./scripts/deploy-k3d.sh   (local cluster)   or   ./scripts/deploy.sh (AWS)"
-else
+elif [ "${NEXT_HINT}" != "0" ]; then
   # Pushing a new :latest does not change any task definition, so ECS keeps
   # running the old image until it is told to redeploy.
   echo "Next, move the ECS services onto these images, either:"

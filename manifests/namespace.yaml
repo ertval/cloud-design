@@ -16,7 +16,8 @@
 #   are not in place when the workloads are admitted, so an operator who relies
 #   on admission control to reject an unhardened pod silently gets no rejection.
 #
-# CORRECT ORDER (this is exactly what scripts/deploy.sh already does)
+# CORRECT ORDER (the order kustomization.yaml emits; scripts/deploy-k3d.sh
+# applies it with `kubectl apply -k manifests/`)
 #   kubectl apply -f manifests/namespace.yaml
 #   kubectl apply -f manifests/secrets.yaml
 #   kubectl apply -f manifests/configmap.yaml

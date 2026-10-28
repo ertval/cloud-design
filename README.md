@@ -765,6 +765,11 @@ aws sts get-caller-identity
 cp terraform/terraform.tfvars.example terraform/terraform.tfvars
 $EDITOR terraform/terraform.tfvars
 
+# Steps 3 to 5 in one command, in the safer order (ECR repositories first, push,
+# full apply, redeploy, wait for services-stable, print the outputs):
+#   AUTO_APPROVE=true ./scripts/deploy.sh
+# Without AUTO_APPROVE=true it stops after `terraform plan`. By hand:
+
 # 3. infrastructure
 cd terraform
 terraform init
@@ -1635,7 +1640,7 @@ only because it now does.
 | `scripts/test_cloud.sh` | Static-only suite: reads files, parses manifests, grades Dockerfiles / Terraform / manifests / scripts. Deliberately separate from the live suite so a reviewer can tell reading-based proof from running-based proof | 64 PASS / 0 FAIL / 1 WARN |
 | `scripts/step_by_step_audit.py` | Sends the literal rubric commands to a terminal pane one at a time, so the examiner watches each command typed and its real output. `--list`, `--dry-run`, `--only <section>`, `--section`, `--pane` | — |
 | `scripts/build_push.sh` | Builds all six images as `:local`, verifies each one exists, optionally pushes the three application images to ECR with `PUSH=1` (as `:latest` and the git short SHA), prints the real size table | — |
-| `scripts/deploy.sh` | AWS path: `sts get-caller-identity` → build+push → `init`/`validate`/`plan`/`apply` → `kubectl apply -k manifests/` → rollout waits | — |
+| `scripts/deploy.sh` | AWS path (ECS, no `kubectl`): `sts get-caller-identity` → `init`/`validate`/`plan`, stops there unless `AUTO_APPROVE=true` → ECR repositories (`-target`) → build+push → full `plan`/`apply` → `update-service --force-new-deployment` per service → `wait services-stable` → outputs. `--static-only` makes no AWS call | — |
 | `scripts/deploy-k3d.sh` | Local k3d path: creates the cluster with `metrics-server`, builds, `k3d image import`, applies the manifests, waits for rollouts | — |
 | `scripts/destroy.sh` | Teardown that reports per resource class whether it actually happened, and names the charges that survive | — |
 | `Makefile` | `make help` lists every target: `up`, `ps`, `logs`, `images`, `test`, `verify`, `lb-spread`, `consumer-drain`, `queue-drain`, `down`, `down-v` | — |

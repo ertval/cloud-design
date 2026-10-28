@@ -2,37 +2,46 @@
 set -uo pipefail
 
 # ==============================================================================
-# cloud-design - AWS deployment script
+# cloud-design - AWS deployment script (ECS on Fargate)
 # ==============================================================================
 # WHAT THIS DOES, IN ORDER
-#   0. hard-fails on any missing prerequisite (see --static-only for a rehearsal)
+#   0. hard-fails on any missing prerequisite (aws, terraform, docker, jq)
 #   1. `aws sts get-caller-identity` -- proves WHO you are before spending money
-#   2. `scripts/build_push.sh` -- builds every image, pushes to ECR with PUSH=1
-#   3. terraform init / validate / plan -out=tfplan / apply
-#   4. `kubectl apply -k manifests/`   (NEVER -f; see the note below)
-#   5. `kubectl wait --for=condition=available` on every rollout
+#   2. terraform init / validate / fmt -check, and reads aws_region from Terraform
+#   3. `terraform plan` of the whole stack. Without AUTO_APPROVE=true the script
+#      STOPS here and nothing billable has been created.
+#   With AUTO_APPROVE=true it continues:
+#   4. `terraform apply -target=aws_ecr_repository.app` -- the three ECR
+#      repositories first, so the images have somewhere to go
+#   5. `scripts/build_push.sh --push` -- every app image pushed as :latest and as
+#      the git short SHA, then checked: :latest must exist in all three repos
+#   6. `terraform plan -out=tfplan` + `terraform apply tfplan` -- the full stack
+#   7. `aws ecs update-service --force-new-deployment` for each service. A new
+#      :latest does not change any task definition, so without this ECS keeps
+#      running whatever it pulled before
+#   8. `aws ecs wait services-stable` -- an apply that returns 0 only means AWS
+#      accepted the request, not that the tasks are running and healthy
+#   9. prints the outputs the demo needs (API URL, Cognito, dashboard)
 #
-# WHY `-k` AND NOT `-f manifests/`
-#   manifests/kustomization.yaml exists, and `kubectl apply -f manifests/` parses
-#   it as if it were a manifest. That command FAILS with a real exit code of 1:
-#       error: resource mapping not found ... no matches for kind "Kustomization"
-#   It also applies files in ALPHABETICAL order, which creates api-gateway.yaml
-#   before namespace.yaml. kustomize's `resources:` list is explicitly ordered
-#   (sortOptions: fifo) and emits the Namespace first. Verified with kubectl
-#   v1.36.1 / kustomize v5.8.1.
+# FIX: THE PREVIOUS REVISION COULD NOT COMPLETE AN AWS DEPLOYMENT
+#   It pushed the images BEFORE Terraform had created the ECR repositories, so
+#   build_push.sh skipped every one of them, and after `terraform apply` it ran
+#   `kubectl apply -k manifests/` against whatever cluster kubectl pointed at.
+#   This project runs on ECS, not EKS: on AWS that step either died for lack of
+#   a cluster or applied the manifests to an unrelated local one. The Kubernetes
+#   manifests belong to ./scripts/deploy-k3d.sh; this script never calls kubectl.
 #
 # WHY THERE IS NO `|| true` ANYWHERE
-#   The previous revision appended `|| true` to all eleven `kubectl apply` calls
-#   and then printed "[SUCCESS] Manifests applied successfully" unconditionally.
-#   A total failure still reported success. Every command below is checked; the
-#   script exits non-zero on the first hard failure and says which step failed.
+#   An earlier revision appended `|| true` to every `kubectl apply` and then
+#   printed "[SUCCESS]" unconditionally, so a total failure still reported
+#   success. Every command below is checked; the script exits non-zero on the
+#   first hard failure and says which step failed.
 #
 # USAGE
-#   ./scripts/deploy.sh                      # full deploy (needs aws + terraform)
-#   ./scripts/deploy.sh --static-only        # rehearsal: validate everything,
-#                                            #           deploy nothing
-#   AUTO_APPROVE=true ./scripts/deploy.sh    # plan then apply without a prompt
-#   PUSH=1 ./scripts/deploy.sh               # also push images to ECR
+#   ./scripts/deploy.sh                      # checks + full plan, applies nothing
+#   AUTO_APPROVE=true ./scripts/deploy.sh    # full deploy, no prompt
+#   ./scripts/deploy.sh --static-only        # rehearsal: no AWS call, no spend
+#   IMAGE_TAG=v1.2.0 AUTO_APPROVE=true ./scripts/deploy.sh   # own build tag
 #
 # EXIT: 0 on success, 1 on the first hard failure, 2 on bad usage.
 # ==============================================================================
@@ -40,83 +49,76 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TF_DIR="$ROOT_DIR/terraform"
-MAN_DIR="$ROOT_DIR/manifests"
-NAMESPACE="${NAMESPACE:-cloud-design}"
-REGION="${REGION:-us-east-1}"
+# Empty = read var.aws_region from Terraform (terraform.tfvars or the default).
+REGION="${REGION:-}"
 AUTO_APPROVE="${AUTO_APPROVE:-false}"
-PUSH="${PUSH:-0}"
 STATIC_ONLY=0
-ROLLBACK_TIMEOUT="${ROLLBACK_TIMEOUT:-180s}"
+# The three images ECS runs; must match local.app_images in terraform/ecr.tf.
+APP_COMPONENTS=(api-gateway inventory-app billing-app)
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --static-only) STATIC_ONLY=1 ;;
-    -h|--help)     sed -n '2,36p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help)     sed -n '2,46p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1 (try --help)" >&2; exit 2 ;;
   esac
   shift
 done
 
 STEP=0
-FAIL_COUNT=0
+WARN_COUNT=0
 die()  { echo "[FATAL] $*" >&2; exit 1; }
+warn() { echo "  [WARN] $*"; WARN_COUNT=$((WARN_COUNT + 1)); }
 step() { STEP=$((STEP + 1)); echo; echo "------------------------------------------------------------"
          echo ">>> Step ${STEP}: $*"; echo "------------------------------------------------------------"; }
+tf()   { terraform -chdir="$TF_DIR" "$@"; }
 
 echo "============================================================"
-echo " Cloud-Design Deployment Automation                        "
+echo " Cloud-Design Deployment Automation (AWS, ECS on Fargate)  "
 echo "============================================================"
-echo " mode       : $([ "${STATIC_ONLY}" -eq 1 ] && echo 'STATIC REHEARSAL (deploys nothing)' || echo 'LIVE DEPLOY')"
-echo " region     : ${REGION}"
-echo " namespace  : ${NAMESPACE}"
+echo " mode        : $([ "${STATIC_ONLY}" -eq 1 ] && echo 'STATIC REHEARSAL (no AWS call, deploys nothing)' || echo 'LIVE')"
+echo " region      : ${REGION:-<from terraform var.aws_region>}"
 echo " auto-approve: ${AUTO_APPROVE}"
-echo " push images : ${PUSH}"
 echo "============================================================"
 
 # -----------------------------------------------------------------------------
-# Step 0 -- prerequisites. HARD FAIL. The old script only printed [WARN] and
-# carried on to print [SUCCESS] at the end.
+# Preflight. HARD FAIL: an early revision only printed [WARN] and carried on to
+# print [SUCCESS] at the end.
 # -----------------------------------------------------------------------------
 step "Preflight: prerequisites"
 MISSING=""
-for c in kubectl docker; do
+if [ "${STATIC_ONLY}" -eq 1 ]; then
+  REQUIRED=(docker)
+  OPTIONAL=(terraform aws jq)
+else
+  REQUIRED=(aws terraform docker jq)
+  OPTIONAL=()
+fi
+for c in "${REQUIRED[@]}"; do
   if command -v "$c" >/dev/null 2>&1; then
     echo "  [ok]   $c -> $(command -v "$c")"
   else
     MISSING+="$c "
   fi
 done
-
-if [ "${STATIC_ONLY}" -eq 1 ]; then
-  # A rehearsal may legitimately run without the AWS toolchain.
-  for c in aws terraform; do
-    if command -v "$c" >/dev/null 2>&1; then
-      echo "  [ok]   $c -> $(command -v "$c")"
-    else
-      echo "  [skip] $c not installed -- acceptable in --static-only mode"
-    fi
-  done
-  echo "  [--]   terraform fmt/validate/plan are NOT run in --static-only mode."
-else
-  for c in aws terraform; do
-    if command -v "$c" >/dev/null 2>&1; then
-      echo "  [ok]   $c -> $(command -v "$c")"
-    else
-      MISSING+="$c "
-    fi
-  done
-fi
+for c in ${OPTIONAL[@]+"${OPTIONAL[@]}"}; do
+  if command -v "$c" >/dev/null 2>&1; then
+    echo "  [ok]   $c -> $(command -v "$c")"
+  else
+    echo "  [skip] $c not installed -- acceptable in --static-only mode"
+  fi
+done
 
 if [ -n "${MISSING}" ]; then
   echo
   echo "[FATAL] missing required prerequisite(s): ${MISSING}" >&2
-  echo "        A live deploy needs aws (to authenticate and push to ECR) and" >&2
-  echo "        terraform (to provision the VPC/RDS/MQ/ALB). Neither is" >&2
-  echo "        installed in this environment." >&2
+  echo "        A live deploy needs aws (identity, ECR, ECS), terraform (the" >&2
+  echo "        whole stack), docker (to build the images) and jq (to read the" >&2
+  echo "        CLI's JSON output)." >&2
   echo >&2
-  echo "        To rehearse the non-AWS half without deploying anything:" >&2
+  echo "        To rehearse without touching AWS:" >&2
   echo "            ./scripts/deploy.sh --static-only" >&2
-  echo "        To deploy to the local k3d cluster (no AWS account needed):" >&2
+  echo "        To run the Kubernetes manifests on a local k3d cluster instead:" >&2
   echo "            ./scripts/deploy-k3d.sh" >&2
   exit 1
 fi
@@ -130,198 +132,198 @@ done
 echo "  [ok]   every srcs/ component has a Dockerfile"
 
 # -----------------------------------------------------------------------------
-# Step 1 -- who am I?  Cheap, and it prevents applying into the wrong account.
+# --static-only: everything that needs no AWS account, then stop.
 # -----------------------------------------------------------------------------
 if [ "${STATIC_ONLY}" -eq 1 ]; then
-  step "Identity (skipped in --static-only mode)"
-  echo "  [--]   'aws sts get-caller-identity' not run: --static-only."
-else
-  step "Identity: aws sts get-caller-identity"
-  CALLER="$(aws sts get-caller-identity 2>&1)"
-  RC=$?
-  echo "${CALLER}"
-  if [ "${RC}" -ne 0 ]; then
-    die "aws sts get-caller-identity failed (exit ${RC}).
-       Run 'aws configure' or export AWS_PROFILE. Refusing to deploy with unknown credentials."
-  fi
-  CALLER_ARN="$(printf '%s' "${CALLER}" | jq -r '.Arn' 2>/dev/null)"
-  CALLER_ID="$(printf '%s' "${CALLER}" | jq -r '.Account' 2>/dev/null)"
-  echo "  [ok]   deploying as ${CALLER_ARN} (account ${CALLER_ID}) in ${REGION}"
-fi
+  step "Build one image locally (no push)"
+  bash "$ROOT_DIR/scripts/build_push.sh" --component api-gateway \
+    || die "scripts/build_push.sh failed"
+  echo "  [ok]   api-gateway image builds"
 
-# -----------------------------------------------------------------------------
-# Step 2 -- build the images (the old script never built anything at all).
-# -----------------------------------------------------------------------------
-step "Build images via scripts/build_push.sh"
-BUILD_ARGS=()
-[ "${STATIC_ONLY}" -eq 1 ] && BUILD_ARGS+=(--component api-gateway)
-[ "${PUSH}" = "1" ] && BUILD_ARGS+=(--push)
-if bash "$ROOT_DIR/scripts/build_push.sh" "${BUILD_ARGS[@]}"; then
-  if [ "${PUSH}" = "1" ]; then echo "  [ok]   images built and pushed to ECR"
-  else echo "  [ok]   images built and tagged :local (not pushed: PUSH=${PUSH})"; fi
-else
-  die "scripts/build_push.sh failed -- refusing to deploy with no (or stale) images"
-fi
-
-# -----------------------------------------------------------------------------
-# Step 3 -- Terraform
-# -----------------------------------------------------------------------------
-if [ "${STATIC_ONLY}" -eq 1 ]; then
-  step "Terraform (skipped in --static-only mode)"
-  echo "  [--]   terraform init/plan/apply are NOT run: --static-only."
-  echo "         Run 'terraform -chdir=terraform init && terraform -chdir=terraform plan'"
-  echo "         on a machine that has the binary to rehearse the IaC."
-else
-  step "Terraform: init"
-  terraform -chdir="$TF_DIR" init -input=false || die "terraform init failed"
-  echo "  [ok]   providers installed"
-
-  step "Terraform: validate"
-  terraform -chdir="$TF_DIR" validate || die "terraform validate failed -- refusing to plan invalid IaC"
-  echo "  [ok]   configuration is valid"
-
-  step "Terraform: fmt -check"
-  if terraform -chdir="$TF_DIR" fmt -check >/dev/null 2>&1; then
-    echo "  [ok]   formatting is clean"
+  if command -v terraform >/dev/null 2>&1; then
+    step "Terraform: init / validate / fmt -check (no AWS credentials needed)"
+    tf init -input=false >/dev/null || die "terraform init failed"
+    echo "  [ok]   providers installed"
+    tf validate || die "terraform validate failed"
+    if tf fmt -check -recursive >/dev/null 2>&1; then
+      echo "  [ok]   formatting is clean"
+    else
+      warn "formatting drift; run: terraform -chdir=terraform fmt -recursive"
+    fi
+    echo "  [--]   terraform plan is NOT run: it reads the account and needs credentials."
   else
-    echo "  [WARN] formatting drift; run: terraform -chdir=terraform fmt"
+    step "Terraform (skipped: not installed)"
   fi
 
-  step "Terraform: plan"
-  terraform -chdir="$TF_DIR" plan -input=false -out=tfplan || die "terraform plan failed"
-  TF_PLAN_BYTES="$(wc -c < "$TF_DIR/tfplan" 2>/dev/null | tr -d ' ')"
-  echo "  [ok]   plan written to terraform/tfplan (${TF_PLAN_BYTES:-0} bytes)"
-
-  if [ "${AUTO_APPROVE}" = "true" ]; then
-    step "Terraform: apply"
-    echo "  This provisions billable resources in ${REGION}."
-    terraform -chdir="$TF_DIR" apply -input=false -auto-approve tfplan \
-      || die "terraform apply failed -- stopping before any manifest is applied"
-    echo "  [ok]   infrastructure applied"
-  else
-    step "Terraform: apply (skipped)"
-    echo "  [--]   AUTO_APPROVE is not 'true', so nothing was applied."
-    echo "         Review the plan, then:"
-    echo "             terraform -chdir=terraform apply terraform/tfplan"
-    echo "         or re-run with AUTO_APPROVE=true ./scripts/deploy.sh"
-  fi
-fi
-
-# -----------------------------------------------------------------------------
-# Step 4 -- Kubernetes manifests, with -k and no `|| true`
-# -----------------------------------------------------------------------------
-if ! command -v kubectl >/dev/null 2>&1; then
-  die "kubectl is not installed; cannot deploy the manifests"
-fi
-
-step "kubectl context"
-if ! kubectl cluster-info >/dev/null 2>&1; then
-  die "kubectl cannot reach a cluster.
-       For AWS, configure it first:
-           aws eks update-kubeconfig --region ${REGION} --name <cluster>
-       (this project provisions ECS/Fargate, not EKS, so the manifests target a
-        local/k3d cluster -- use ./scripts/deploy-k3d.sh for that path.)
-       Check what kubectl is pointing at with: kubectl config current-context"
-fi
-CTX="$(kubectl config current-context 2>/dev/null)"
-echo "  [ok]   reachable cluster: ${CTX}"
-echo "  [--]   target namespace: ${NAMESPACE}"
-
-if [ "${STATIC_ONLY}" -eq 1 ]; then
-  step "Manifests (validated only: --static-only)"
-  if kubectl kustomize "$MAN_DIR" >/dev/null 2>&1; then
-    OBJ="$(kubectl kustomize "$MAN_DIR" | grep -c '^kind:' | head -1)"
-    echo "  [ok]   kubectl kustomize manifests/ parses cleanly (${OBJ} objects)"
-  else
-    die "kubectl kustomize manifests/ failed to parse -- fixing that comes before any apply"
-  fi
-  if kubectl apply --dry-run=server -k "$MAN_DIR" >/dev/null 2>&1; then
-    echo "  [ok]   server-side dry run accepted by the API server"
-  else
-    die "kubectl apply --dry-run=server -k manifests/ was rejected by the API server"
-  fi
   echo
-  echo "  [--]   --static-only: nothing was applied. No 'kubectl apply' was run."
+  echo "============================================================"
+  echo " [OK] REHEARSAL COMPLETE -- nothing was deployed and no AWS"
+  echo "      API was called. Warnings: ${WARN_COUNT}"
+  echo "============================================================"
+  echo " Real deploy:  AUTO_APPROVE=true ./scripts/deploy.sh"
+  exit 0
+fi
+
+# -----------------------------------------------------------------------------
+# Identity first. Cheap, and it prevents applying into the wrong account. STS
+# answers in every region, so the region does not matter yet.
+# -----------------------------------------------------------------------------
+step "Identity: aws sts get-caller-identity"
+CALLER="$(aws sts get-caller-identity --region "${REGION:-us-east-1}" --output json 2>&1)"
+RC=$?
+echo "${CALLER}"
+if [ "${RC}" -ne 0 ]; then
+  die "aws sts get-caller-identity failed (exit ${RC}).
+       Run 'aws configure' or export AWS_PROFILE. Refusing to deploy with unknown credentials."
+fi
+CALLER_ARN="$(printf '%s' "${CALLER}" | jq -r '.Arn')"
+CALLER_ID="$(printf '%s' "${CALLER}" | jq -r '.Account')"
+echo "  [ok]   deploying as ${CALLER_ARN} (account ${CALLER_ID})"
+
+# -----------------------------------------------------------------------------
+# Terraform checks, and the region the stack really goes to.
+# -----------------------------------------------------------------------------
+step "Terraform: init / validate / fmt -check"
+tf init -input=false || die "terraform init failed"
+echo "  [ok]   providers installed"
+tf validate || die "terraform validate failed -- refusing to plan invalid IaC"
+echo "  [ok]   configuration is valid"
+if tf fmt -check -recursive >/dev/null 2>&1; then
+  echo "  [ok]   formatting is clean"
 else
-  step "Manifests: kubectl apply -k manifests/   (NOT -f)"
-  if [ ! -f "$MAN_DIR/kustomization.yaml" ]; then
-    die "manifests/kustomization.yaml is missing.
-       Without it 'kubectl apply -f manifests/' applies files in alphabetical
-       order (api-gateway before namespace) and fails. Restore the file, or
-       apply the manifests individually in dependency order."
-  fi
-  APPLY_OUT="$(kubectl apply -k "$MAN_DIR" 2>&1)"
-  RC=$?
-  echo "${APPLY_OUT}"
-  if [ "${RC}" -ne 0 ]; then
-    echo >&2
-    echo "[FATAL] 'kubectl apply -k manifests/' failed with exit ${RC}." >&2
-    echo "        The previous revision of this script appended '|| true' here and" >&2
-    echo "        then reported success regardless. Inspect the error above; the" >&2
-    echo "        usual cause is an unapplied secrets.yaml placeholder." >&2
-    exit 1
-  fi
-  echo "  [ok]   manifests applied"
-  echo "  [!]    manifests/secrets.yaml ships REPLACE_ME_* placeholders only."
-  echo "        If the apps fail with 'password authentication failed for user"
-  echo "        REPLACE_ME_*', inject real values (see the header of that file)."
-  echo "        Do NOT re-apply secrets.yaml afterwards -- it silently reverts them."
+  warn "formatting drift; run: terraform -chdir=terraform fmt -recursive"
+fi
+
+# The aws CLI calls below and build_push.sh must use the region the provider
+# uses, or the push lands in another region's (non-existent) ECR.
+TF_REGION="$(echo 'var.aws_region' | tf console 2>/dev/null | tr -d '"[:space:]')"
+[ -n "${TF_REGION}" ] || die "could not read var.aws_region with 'terraform console'"
+if [ -n "${REGION}" ] && [ "${REGION}" != "${TF_REGION}" ]; then
+  die "REGION=${REGION} but Terraform deploys to ${TF_REGION} (var.aws_region). Unset REGION or change aws_region in terraform.tfvars."
+fi
+REGION="${TF_REGION}"
+echo "  [ok]   region: ${REGION} (var.aws_region)"
+
+if [ "${AUTO_APPROVE}" != "true" ]; then
+  step "Terraform: plan (review only, nothing is applied)"
+  tf plan -input=false || die "terraform plan failed"
+  echo
+  echo "============================================================"
+  echo " [--] AUTO_APPROVE is not 'true': nothing was created."
+  echo "      The plan above is the whole stack; it provisions billable"
+  echo "      resources in ${REGION}. To deploy it, re-run:"
+  echo "          AUTO_APPROVE=true ./scripts/deploy.sh"
+  echo "      Do not apply a plan by hand instead: the images have to be"
+  echo "      pushed between the ECR step and the full apply."
+  echo "============================================================"
+  exit 0
 fi
 
 # -----------------------------------------------------------------------------
-# Step 5 -- wait for rollouts. `kubectl apply` returning 0 does NOT mean the
-# pods are up; it means the objects were accepted.
+# ECR first: build_push.sh pushes into these repositories.
 # -----------------------------------------------------------------------------
-if [ "${STATIC_ONLY}" -eq 0 ] && kubectl cluster-info >/dev/null 2>&1; then
-  step "Wait for rollouts to become available"
-  FAILED_WAIT=0
-  for d in $(kubectl get deployment -n "$NAMESPACE" -o name 2>/dev/null); do
-    printf '  deployment/%-34s ' "${d#deployment.apps/}"
-    if kubectl wait --for=condition=available -n "$NAMESPACE" "$d" --timeout="$ROLLBACK_TIMEOUT" >/dev/null 2>&1; then
-      echo "available"
-    else
-      echo "NOT available within ${ROLLBACK_TIMEOUT}"
-      FAILED_WAIT=$((FAILED_WAIT + 1))
-    fi
-  done
-  for s in $(kubectl get statefulset -n "$NAMESPACE" -o name 2>/dev/null); do
-    printf '  statefulset/%-33s ' "${s#statefulset.apps/}"
-    if kubectl rollout status -n "$NAMESPACE" "$s" --timeout="$ROLLBACK_TIMEOUT" >/dev/null 2>&1; then
-      echo "rolled out"
-    else
-      echo "NOT rolled out within ${ROLLBACK_TIMEOUT}"
-      FAILED_WAIT=$((FAILED_WAIT + 1))
-    fi
-  done
-  if [ "${FAILED_WAIT}" -gt 0 ]; then
-    echo >&2
-    echo "[FATAL] ${FAILED_WAIT} workload(s) did not converge." >&2
-    echo "        Diagnostics:" >&2
-    echo "            kubectl get pods -n ${NAMESPACE} -o wide" >&2
-    echo "            kubectl get events -n ${NAMESPACE} --sort-by=.lastTimestamp | tail -30" >&2
-    echo "            kubectl describe pod -n ${NAMESPACE} <failing-pod>" >&2
-    exit 1
+step "Terraform: ECR repositories first (apply -target=aws_ecr_repository.app)"
+echo "  Terraform warns that -target is for exceptional cases; this is one, and"
+echo "  the full apply two steps later brings the rest of the stack in line."
+tf apply -input=false -auto-approve -target=aws_ecr_repository.app \
+  || die "terraform apply of the ECR repositories failed"
+echo "  [ok]   ECR repositories exist"
+
+step "Build and push the images (scripts/build_push.sh --push)"
+REGION="${REGION}" NEXT_HINT=0 bash "$ROOT_DIR/scripts/build_push.sh" --push \
+  || die "scripts/build_push.sh failed -- refusing to deploy with no (or stale) images"
+# build_push.sh only WARNs when it cannot see a repository, so check the result.
+for c in "${APP_COMPONENTS[@]}"; do
+  aws ecr describe-images --region "${REGION}" --repository-name "cloud-design/${c}" \
+    --image-ids imageTag=latest >/dev/null 2>&1 \
+    || die "cloud-design/${c}:latest is not in ECR (${REGION}) after the push; see the build_push.sh output above"
+  echo "  [ok]   cloud-design/${c}:latest is in ECR"
+done
+
+# -----------------------------------------------------------------------------
+# The full stack. A fresh plan: the -target apply above changed the state, so
+# any plan saved before it would be stale.
+# -----------------------------------------------------------------------------
+step "Terraform: plan the full stack"
+tf plan -input=false -out=tfplan || die "terraform plan failed"
+
+step "Terraform: apply"
+echo "  This provisions billable resources in ${REGION}."
+tf apply -input=false tfplan || die "terraform apply failed"
+# A saved plan can only be applied once; remove it so nobody tries again.
+rm -f "$TF_DIR/tfplan"
+echo "  [ok]   infrastructure applied"
+
+# -----------------------------------------------------------------------------
+# Roll the services onto the pushed images and wait until they are healthy.
+# -----------------------------------------------------------------------------
+step "ECS: force a new deployment of each service"
+CLUSTER="$(tf output -raw ecs_cluster_name)" || die "terraform output ecs_cluster_name failed"
+SERVICES_JSON="$(tf output -json ecs_service_names)" || die "terraform output ecs_service_names failed"
+SERVICES=()
+while IFS= read -r s; do
+  [ -n "$s" ] && SERVICES+=("$s")
+done < <(printf '%s' "${SERVICES_JSON}" | jq -r '.[]')
+[ "${#SERVICES[@]}" -gt 0 ] || die "terraform output ecs_service_names is empty"
+
+# The task definitions pull var.image_tag. build_push.sh always pushes :latest,
+# so any other value means the services may not run the build just pushed.
+IMAGE_URLS="$(tf output -json ecr_repository_urls 2>/dev/null)"
+for u in $(printf '%s' "${IMAGE_URLS}" | jq -r '.[]' 2>/dev/null); do
+  t="${u##*:}"
+  if [ "$t" = "latest" ]; then
+    echo "  [ok]   task definition pulls ${u##*/}"
+  else
+    warn "task definition pulls ${u##*/} (var.image_tag = ${t}), not :latest. Check that this is the tag build_push.sh printed above."
   fi
+done
 
-  step "Final state"
-  kubectl get pods -n "$NAMESPACE" -o wide 2>&1
-  kubectl get hpa -n "$NAMESPACE" 2>&1
+for svc in "${SERVICES[@]}"; do
+  aws ecs update-service --region "${REGION}" --cluster "${CLUSTER}" --service "${svc}" \
+    --force-new-deployment >/dev/null \
+    || die "aws ecs update-service --force-new-deployment failed for ${svc}"
+  echo "  [ok]   new deployment started: ${svc}"
+done
+
+step "ECS: aws ecs wait services-stable"
+echo "  Polls every 15 s for up to 10 minutes until each service has one deployment"
+echo "  and runningCount == desiredCount."
+if ! aws ecs wait services-stable --region "${REGION}" --cluster "${CLUSTER}" --services "${SERVICES[@]}"; then
+  echo >&2
+  echo "[FATAL] the ECS services did not become stable. Latest events per service:" >&2
+  aws ecs describe-services --region "${REGION}" --cluster "${CLUSTER}" --services "${SERVICES[@]}" \
+    --output json 2>&1 \
+    | jq -r '.services[] | "  \(.serviceName) running=\(.runningCount)/\(.desiredCount):", (.events[:5][] | "    \(.createdAt)  \(.message)")' >&2
+  echo "        Usual causes: the image is missing (CannotPullContainerError), the" >&2
+  echo "        container exits on start (see its CloudWatch log group), or the ALB" >&2
+  echo "        health check on /health fails. If it was only slow, wait again:" >&2
+  echo "            aws ecs wait services-stable --region ${REGION} --cluster ${CLUSTER} --services ${SERVICES[*]}" >&2
+  exit 1
 fi
+echo "  [ok]   all ${#SERVICES[@]} services are stable"
+aws ecs describe-services --region "${REGION}" --cluster "${CLUSTER}" --services "${SERVICES[@]}" \
+  --query 'services[].[serviceName,desiredCount,runningCount,taskDefinition]' --output table \
+  || warn "could not print the service table"
 
 # -----------------------------------------------------------------------------
+step "Outputs"
+# cognito_demo_user_password is sensitive and deliberately not printed here; see
+# "Obtain a JWT" in README.md.
+for o in api_gateway_invoke_url app_base_url billing_orders_url cognito_hosted_ui_url \
+         cognito_demo_client_id cognito_demo_user_email cloudwatch_dashboard_name alb_dns_name; do
+  printf '  %-26s %s\n' "$o" "$(tf output -raw "$o" 2>/dev/null || echo '<not set>')"
+done
+
 echo
 echo "============================================================"
-if [ "${STATIC_ONLY}" -eq 1 ]; then
-  echo " [OK] REHEARSAL COMPLETE -- nothing was deployed.         "
-  echo "      Every prerequisite, the image build, the manifest parse"
-  echo "      and the server-side dry run were verified for real.  "
-elif [ "${FAIL_COUNT}" -gt 0 ]; then
-  echo " [WARN] Deployment finished with ${FAIL_COUNT} non-fatal issue(s)."
+if [ "${WARN_COUNT}" -gt 0 ]; then
+  echo " [OK] Deployed to ${REGION}, with ${WARN_COUNT} warning(s) above."
 else
-  echo " [OK] Cloud-design deployment finished.                    "
+  echo " [OK] Deployed to ${REGION}. All ${#SERVICES[@]} ECS services are stable."
 fi
 echo "============================================================"
-echo " Verify with:"
-echo "   kubectl get pods -n ${NAMESPACE} -o wide"
-echo "   ./scripts/run-audit-checks.sh"
+echo " Next:"
+echo "   README.md, 'Obtain a JWT', to call the protected API"
+echo "   ./scripts/run-audit-checks.sh    # live checks"
+echo "   ./scripts/destroy.sh             # when the demo is over: it is billed by the hour"
 exit 0

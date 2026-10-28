@@ -32,8 +32,9 @@
 #      so the mechanism above is stated instead of a transcript that cannot be
 #      guaranteed to match. `-k` is the only supported form.)
 #
-# `kubectl apply -f <individual file>` also still works and is what
-# scripts/deploy.sh does, in the same order.
+# `kubectl apply -f <individual file>` also still works, in the order listed in
+# namespace.yaml. scripts/deploy-k3d.sh uses -k; scripts/deploy.sh is the AWS
+# (ECS) path and never applies these manifests.
 #
 # MINIMUM TOOLING: `sortOptions` below needs kustomize v5, i.e. kubectl >= 1.28
 # (kubectl 1.37 embeds kustomize v5.8.1). On an older kubectl this file is

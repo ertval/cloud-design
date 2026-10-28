@@ -91,3 +91,22 @@ The documented login failed at once with `Unknown options: --secret`, and withou
 - Temp Terraform copy: `fmt -check` clean, `validate` passes, mocked `terraform test` 6 passed (new run checks the alphabet and that the demo client stays confidential with USER_PASSWORD_AUTH).
 - Initialised temp copy of the repo: `test_cloud.sh` 63 passed, 0 failed; `run-audit-checks.sh --static` PASS=159 FAIL=0 INVALID=8.
 - Not run against real Cognito (needs a deployed stack).
+
+## 2026-10-28 10:37 EET: Phase 1 T07, deploy.sh AWS path rewritten for ECS
+
+**What**
+- `scripts/deploy.sh`: rewritten. Live order: prerequisites (aws, terraform, docker, jq), `sts get-caller-identity`, `terraform init`/`validate`/`fmt -check`, region read from `var.aws_region` (dies if a `REGION` env var disagrees), then a full `terraform plan`, stopping there unless `AUTO_APPROVE=true`. With it: `apply -target=aws_ecr_repository.app`, `build_push.sh --push`, a check that `:latest` exists in all three repos, a fresh `plan -out=tfplan` + `apply tfplan` (the spent plan is then removed), `aws ecs update-service --force-new-deployment` per service, `aws ecs wait services-stable` (on failure it prints the last 5 events per service), a warning if `var.image_tag` is not `latest`, and the demo outputs. No `kubectl` anywhere. `--static-only` now makes no AWS call: it builds one image and runs `terraform init`/`validate`/`fmt -check`. `PUSH` is gone (the AWS path always pushes).
+- `scripts/build_push.sh`: `NEXT_HINT=0` hides the "Next, move the ECS services" hint (deploy.sh does those steps itself); `sts get-caller-identity` asks for `--output json` so `jq` can parse it whatever the CLI default output is.
+- `manifests/namespace.yaml`, `manifests/kustomization.yaml`: comments no longer say `deploy.sh` applies the manifests; they point at `deploy-k3d.sh`.
+- `README.md`: AWS walkthrough names `AUTO_APPROVE=true ./scripts/deploy.sh` as the one-command form of steps 3 to 5; the scripts table row describes the new flow.
+- `tasklist.md`: T07 ticked and crossed out; the tasks ticked earlier (D1-D5, T01-T06, T48, T51) crossed out too, following the new task-list rule.
+
+**Why**
+The old script pushed before the ECR repositories existed (so every image was skipped) and then ran `kubectl apply -k manifests/`, which on an ECS project either failed or hit an unrelated local cluster. The new order puts images in ECR before the services that pull them are created, and only reports success once ECS says the services are stable.
+
+**Verified**
+- Stubbed `aws`/`terraform`/`docker` in `/tmp`: the happy path runs the calls in the order above and leaves no `tfplan`; without `AUTO_APPROVE` only `plan` runs; a failed waiter exits 1 with the service events; a missing image exits 1 before the full plan; a `REGION` mismatch exits 1 before any apply; `aws_region = eu-central-1` reaches every aws call and the push; a pinned `image_tag` gives 3 warnings; a bad argument exits 2.
+- `--static-only` with the real Terraform binary: exit 0, `validate` passes, 0 aws calls.
+- `build_push.sh` alone still prints its hint; with `NEXT_HINT=0` it does not.
+- Initialised temp copy of the repo: `test_cloud.sh` 63 passed, 0 failed; `run-audit-checks.sh --static` PASS=159 FAIL=0 INVALID=8.
+- Not run against AWS (needs credentials and creates billable resources).

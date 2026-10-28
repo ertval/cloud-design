@@ -14,18 +14,18 @@ Ground rules for this list: **cheapest option wherever there is a choice**, and 
 
 ## Phase 0: Decisions (decided 2026-10-27, cheapest option each time)
 
-- [x] **D1** TLS on the API Gateway to ALB hop: **no domain, free option.** (3.2)
+- [x] ~~**D1** TLS on the API Gateway to ALB hop: **no domain, free option.** (3.2)~~
   - Chosen: API Gateway's public endpoint stays HTTPS with its AWS-managed certificate; the hop from the VPC Link to the ALB is plain HTTP inside the VPC, on a listener only the VPC Link security group can reach.
   - Cost avoided: a domain registration (a yearly fee) plus a Route 53 hosted zone ($0.50 per month).
   - Trade-off to state in the README and the role-play: no ACM certificate is in use on this path. The `enable_acm_certificate` toggle stays in Terraform as the documented upgrade (domain + ACM + `tls_config`), and the brief names ACM as an example ("such as"), not a hard rule.
-- [x] **D2** Broker mode: **`SINGLE_INSTANCE`.** (3.1)
+- [x] ~~**D2** Broker mode: **`SINGLE_INSTANCE`.** (3.1)~~
   - Cost: one broker node instead of three for a cluster. By the README's own per-node estimate (~$115 per month per `mq.m7g.medium` node with its EBS volume) that is roughly $115 instead of $345 per month; re-check in the AWS Pricing Calculator.
   - Trade-off to state: the broker runs in one AZ. Amazon MQ replaces a failed instance behind the same endpoint and the durable queue survives on EBS, but during a broker outage `POST /api/billing` returns 503 and the client must retry. The README must stop claiming a Multi-AZ broker.
-- [x] **D3** Make the ALB **internal**, with API Gateway as the only public entry. (5.2)
+- [x] ~~**D3** Make the ALB **internal**, with API Gateway as the only public entry. (5.2)~~
   - Cost: free, an internal ALB costs the same as an internet-facing one.
   - Effect: removes the ALB Cognito action (blocker 3.3), the public `:80` and `:443` listeners, the two `0.0.0.0/0` ingress rules and the "any ENI in the VPC can reach :443" residual.
-- [x] **D4** Docs: **keep both pairs.** `docs/cloud-design-instructions.md` and `docs/cloud-design-questions.md` become the authoritative brief and rubric; `docs/readme.md` and `docs/audit.md` stay as the earlier versions. `docs/HANDOFF.md` stays too. Nothing is deleted. (6.2)
-- [x] **D5** Names: **keep the current names** (`api-gateway`, `inventory-database`, `billing-database`, `rabbit-queue`) and document the mapping to the brief's `api-gateway-app`, `inventory-db`, `billing-db`. No renames, no moved files. (6.1)
+- [x] ~~**D4** Docs: **keep both pairs.** `docs/cloud-design-instructions.md` and `docs/cloud-design-questions.md` become the authoritative brief and rubric; `docs/readme.md` and `docs/audit.md` stay as the earlier versions. `docs/HANDOFF.md` stays too. Nothing is deleted. (6.2)~~
+- [x] ~~**D5** Names: **keep the current names** (`api-gateway`, `inventory-database`, `billing-database`, `rabbit-queue`) and document the mapping to the brief's `api-gateway-app`, `inventory-db`, `billing-db`. No renames, no moved files. (6.1)~~
 
 **Further cost levers, not applied** (each one saves money but weakens the Availability answer the audit grades; switch any of them on only if the budget forces it):
 
@@ -39,28 +39,28 @@ The biggest saving of all costs nothing: deploy shortly before the audit and des
 
 ## Phase 1: Fix the apply and runtime blockers
 
-- [x] **T01** Switch Amazon MQ to `SINGLE_INSTANCE` (D2). A single-instance broker takes exactly one subnet, so set `subnet_ids = [aws_subnet.private_db[0].id]`. Update the cost text and every "Multi-AZ broker" / `ACTIVE_STANDBY_MULTI_AZ` mention. (3.1)
+- [x] ~~**T01** Switch Amazon MQ to `SINGLE_INSTANCE` (D2). A single-instance broker takes exactly one subnet, so set `subnet_ids = [aws_subnet.private_db[0].id]`. Update the cost text and every "Multi-AZ broker" / `ACTIVE_STANDBY_MULTI_AZ` mention. (3.1)~~
   - Files: `terraform/amazon_mq.tf:70-74`, `terraform/terraform.tfvars.example`, `terraform/variables.tf` (cost estimate), `README.md`
   - Done when: `terraform plan` shows the broker as `SINGLE_INSTANCE` and no file still says `ACTIVE_STANDBY_MULTI_AZ`.
   - Done 2026-10-27: `SINGLE_INSTANCE` in one subnet; cost text updated in `variables.tf`, the tfvars example and the README (~$295 steady, ~$335 peak). The budget value itself is left for T20.
-- [x] **T02** Rebuild the ALB edge for D1 + D3: `internal = true`, ALB in the private app subnets, an HTTP listener whose rules forward `/api/billing/orders*` to the billing target group and everything else to the api-gateway target group, ALB ingress only from the VPC Link security group, VPC Link egress to that listener port, `integration_uri` pointed at the new listener. Keep the ACM / self-signed resources behind `enable_acm_certificate` as the documented upgrade path, unused by default. (3.2, 5.2)
+- [x] ~~**T02** Rebuild the ALB edge for D1 + D3: `internal = true`, ALB in the private app subnets, an HTTP listener whose rules forward `/api/billing/orders*` to the billing target group and everything else to the api-gateway target group, ALB ingress only from the VPC Link security group, VPC Link egress to that listener port, `integration_uri` pointed at the new listener. Keep the ACM / self-signed resources behind `enable_acm_certificate` as the documented upgrade path, unused by default. (3.2, 5.2)~~
   - Files: `terraform/alb.tf`, `terraform/api_gateway.tf:60-128`, `terraform/security_groups.tf:17-87`, `terraform/outputs.tf` (`alb_https_url`, `app_base_url_via_alb`)
   - Done when: the comments in `alb.tf`, `README.md:898` and `terraform.tfvars.example` all describe the same, real behaviour.
   - Done 2026-10-27, with one change to the plan: the self-signed certificate resources were removed, not kept, because an API Gateway HTTP API cannot skip certificate verification, so they could never be used. The `tls` provider went with them. The ACM path stays behind `enable_acm_certificate` and now also sets `tls_config`. One listener (`aws_lb_listener.main`) replaces the old `http` and `https` pair, and the outputs `alb_https_url` and `app_base_url_via_alb` became `alb_listener`.
-- [x] **T03** Remove the ALB `authenticate-cognito` action and the two `source_ip` listener rules (D3 makes them unnecessary); drop the `/oauth2/idpresponse` callback URLs from the Cognito client. The user pool, the hosted UI and the API Gateway JWT authorizer stay. (3.3)
+- [x] ~~**T03** Remove the ALB `authenticate-cognito` action and the two `source_ip` listener rules (D3 makes them unnecessary); drop the `/oauth2/idpresponse` callback URLs from the Cognito client. The user pool, the hosted UI and the API Gateway JWT authorizer stay. (3.3)~~
   - Files: `terraform/alb.tf:223-360`, `terraform/cognito.tf:120-133`
   - Done 2026-10-27.
-- [x] **T04** Add the missing `aws:SecureTransport = false` condition to the `DenyInsecureTransport` statement. (3.4)
+- [x] ~~**T04** Add the missing `aws:SecureTransport = false` condition to the `DenyInsecureTransport` statement. (3.4)~~
   - Files: `terraform/storage.tf:143-157`
   - Done when: the policy only denies non-TLS requests.
   - Done 2026-10-27.
-- [x] **T05** Make the pushed image tag match what ECS pulls: push `:latest` (or an immutable git-SHA tag passed to Terraform as a variable). (3.5)
+- [x] ~~**T05** Make the pushed image tag match what ECS pulls: push `:latest` (or an immutable git-SHA tag passed to Terraform as a variable). (3.5)~~
   - Files: `scripts/build_push.sh:49,167`, optionally `terraform/ecs_services.tf:21` + a new variable
   - Done 2026-10-28: both options. The local tag stays `:local` (docker-compose and `deploy-k3d.sh` use it); `--push` sends each app image as `:latest` and as the git short SHA (`-dirty-<UTC time>` suffix if `srcs/` has uncommitted changes, `IMAGE_TAG` overrides). New variable `image_tag` (default `latest`, validated) feeds `local.ecr_image_urls`. README step 5 no longer re-applies the spent `tfplan`; it pins the SHA or forces a redeploy and waits for `services-stable`.
-- [x] **T06** Fix the Cognito demo login: compute `SECRET_HASH` and use the JSON form of `--auth-parameters` (or make the demo client public), and remove `=` and `,` from the demo password alphabet. (3.6)
+- [x] ~~**T06** Fix the Cognito demo login: compute `SECRET_HASH` and use the JSON form of `--auth-parameters` (or make the demo client public), and remove `=` and `,` from the demo password alphabet. (3.6)~~
   - Files: `README.md:946-961`, `terraform/cognito.tf:19` (and `:171-190` if the client becomes public)
   - Done 2026-10-28: the demo client keeps its secret. README computes `SECRET_HASH` with `openssl` and builds the JSON `--auth-parameters` with `jq`; `=` dropped from `override_special` (`,` was never in it). Checked locally: AWS CLI 2.38.2 rejects `--secret`, splits a `,` in shorthand into a list (an `=` survives), and the exact README block gets a token from a local mock Cognito that verifies the hash. Also fixed the `-raw`/`-json` note and the demo-client comment in `cognito.tf`.
-- [ ] **T07** Rewrite the AWS path of `deploy.sh`: ECR first, push, full apply, `aws ecs update-service --force-new-deployment` per service, `aws ecs wait services-stable`, print outputs. No `kubectl` on the AWS path. (3.7)
+- [x] ~~**T07** Rewrite the AWS path of `deploy.sh`: ECR first, push, full apply, `aws ecs update-service --force-new-deployment` per service, `aws ecs wait services-stable`, print outputs. No `kubectl` on the AWS path. (3.7)~~
   - Files: `scripts/deploy.sh`
 - [ ] **T08** Make `destroy.sh --kms` touch only this project's key (by Terraform output or tag), or make the option a no-op that prints the command. The script file stays. (3.8)
   - Files: `scripts/destroy.sh:212-245`, `README.md:1322,1333,1511`
@@ -134,11 +134,11 @@ The biggest saving of all costs nothing: deploy shortly before the audit and des
 - [ ] **T45** Add the AWS usage sections: 401 test, billing drill, load test; extend Prerequisites (Session Manager plugin, billing alerts setting). (6.1)
 - [ ] **T46** Make `README.md`, the `terraform/*.tf` comments and the `manifests/` comments name `docs/cloud-design-instructions.md` and `docs/cloud-design-questions.md` as authoritative, and mention that `docs/readme.md` and `docs/audit.md` are kept as the earlier versions (D4). (6.1)
 - [ ] **T47** Keep every file in `ecs-tasks/`. Refresh the three app task definitions from the real ones exported after deploy (`aws ecs describe-task-definition`; secrets are ARNs, nothing sensitive), and add `ecs-tasks/README.md` stating that `inventory-database`, `billing-database` and `rabbitmq` are reference definitions that are not deployed, because RDS and Amazon MQ replace them. (6.4)
-- [x] **T48** Update the architecture diagrams for D2 and D3 (single-instance broker, internal ALB, no ALB Cognito action, API Gateway as the only public entry).
+- [x] ~~**T48** Update the architecture diagrams for D2 and D3 (single-instance broker, internal ALB, no ALB Cognito action, API Gateway as the only public entry).~~
   - Done 2026-10-27, together with T01-T03: all three README diagrams.
 - [ ] **T49 [YOU]** In `docs/` (read-only for me): nothing to delete (D4). Optionally add one line at the top of `docs/readme.md` and `docs/audit.md` pointing to the new files. (6.2)
 - [ ] **T50 [YOU]** In `docs/AUDIT_GUIDE.md`: add answers for V1, F1, F2, B1, B2, S1 (DB restricted to the VPC), S2, S3; update Q5, Q6, Q7, Q9 and the availability pillar after Phases 1 and 2, including the D1 and D2 trade-offs. (6.2)
-- [x] **T51** `docs/HANDOFF.md` stays in the repository (D4).
+- [x] ~~**T51** `docs/HANDOFF.md` stays in the repository (D4).~~
 
 ---
 
