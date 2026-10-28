@@ -11,12 +11,18 @@ resource "random_string" "cognito_domain_suffix" {
 # Password for the optional demo identity. Only created when the demo user is
 # enabled and the operator did not supply one, so the default deployment never
 # ships a password anyone can guess.
+# FIX: "=" is dropped from override_special. It is the separator of the AWS CLI
+# KEY=value,KEY=value shorthand that `initiate-auth --auth-parameters` accepts
+# (a "," there splits the value into a list; "," was never in the alphabet). The
+# README login now sends JSON built by jq, so no character can break it, but the
+# password stays safe for the shorthand too. Every character left is a Cognito
+# password-policy symbol.
 resource "random_password" "demo_user" {
   count = var.enable_demo_cognito_user && var.demo_user_password == null ? 1 : 0
 
   length           = 16
   special          = true
-  override_special = "!#$%&*()-_=+"
+  override_special = "!#$%&*()-_+"
   # Must satisfy the pool's password_policy below (upper, lower, number, symbol).
   min_lower   = 1
   min_upper   = 1
@@ -154,13 +160,16 @@ resource "aws_cognito_user_pool_client" "main" {
 }
 
 # 4. Demo app client: confidential, for the audit walkthrough
-# `aws cognito-idp initiate-auth --auth-flow USER_PASSWORD_AUTH` needs a client
-# SECRET, which the public PKCE client above (generate_secret = false) does not
-# have. This second client provides one so the "get a JWT, call a protected
-# route" demo runs immediately after apply. It also disables USER_SRP_AUTH in
-# favour of USER_PASSWORD_AUTH only, because USER_PASSWORD_AUTH is not supported
-# by every Cognito client configuration and naming it explicitly avoids the
-# InvalidParameterException at the call site.
+# The public PKCE client above allows only USER_SRP_AUTH, which the plain AWS
+# CLI cannot drive, so `aws cognito-idp initiate-auth --auth-flow
+# USER_PASSWORD_AUTH` would fail against it. This second client enables
+# USER_PASSWORD_AUTH so the "get a JWT, call a protected route" demo runs
+# immediately after apply.
+# FIX (comment): the old text said initiate-auth "needs a client secret". It
+# does not; the secret is kept so the demo client is not a second public client.
+# Because it has one, every initiate-auth call must carry SECRET_HASH =
+# Base64(HMAC-SHA256(key = client secret, message = username + client id)) inside
+# --auth-parameters. The CLI has no --secret option; the README shows the call.
 resource "aws_cognito_user_pool_client" "demo" {
   count = var.enable_demo_cognito_user ? 1 : 0
 

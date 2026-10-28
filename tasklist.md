@@ -57,8 +57,9 @@ The biggest saving of all costs nothing: deploy shortly before the audit and des
 - [x] **T05** Make the pushed image tag match what ECS pulls: push `:latest` (or an immutable git-SHA tag passed to Terraform as a variable). (3.5)
   - Files: `scripts/build_push.sh:49,167`, optionally `terraform/ecs_services.tf:21` + a new variable
   - Done 2026-10-28: both options. The local tag stays `:local` (docker-compose and `deploy-k3d.sh` use it); `--push` sends each app image as `:latest` and as the git short SHA (`-dirty-<UTC time>` suffix if `srcs/` has uncommitted changes, `IMAGE_TAG` overrides). New variable `image_tag` (default `latest`, validated) feeds `local.ecr_image_urls`. README step 5 no longer re-applies the spent `tfplan`; it pins the SHA or forces a redeploy and waits for `services-stable`.
-- [ ] **T06** Fix the Cognito demo login: compute `SECRET_HASH` and use the JSON form of `--auth-parameters` (or make the demo client public), and remove `=` and `,` from the demo password alphabet. (3.6)
+- [x] **T06** Fix the Cognito demo login: compute `SECRET_HASH` and use the JSON form of `--auth-parameters` (or make the demo client public), and remove `=` and `,` from the demo password alphabet. (3.6)
   - Files: `README.md:946-961`, `terraform/cognito.tf:19` (and `:171-190` if the client becomes public)
+  - Done 2026-10-28: the demo client keeps its secret. README computes `SECRET_HASH` with `openssl` and builds the JSON `--auth-parameters` with `jq`; `=` dropped from `override_special` (`,` was never in it). Checked locally: AWS CLI 2.38.2 rejects `--secret`, splits a `,` in shorthand into a list (an `=` survives), and the exact README block gets a token from a local mock Cognito that verifies the hash. Also fixed the `-raw`/`-json` note and the demo-client comment in `cognito.tf`.
 - [ ] **T07** Rewrite the AWS path of `deploy.sh`: ECR first, push, full apply, `aws ecs update-service --force-new-deployment` per service, `aws ecs wait services-stable`, print outputs. No `kubectl` on the AWS path. (3.7)
   - Files: `scripts/deploy.sh`
 - [ ] **T08** Make `destroy.sh --kms` touch only this project's key (by Terraform output or tag), or make the option a no-op that prints the command. The script file stays. (3.8)
@@ -126,6 +127,7 @@ The biggest saving of all costs nothing: deploy shortly before the audit and des
 ## Phase 5: Documentation
 
 - [ ] **T41** Apply the README corrections table: broker mode, 18 vs 19 files, push tag, stale `tfplan` re-apply, VPC Link chain claim, `initiate-auth`, test count, `kubectl get hpa,pdb`, budget 300 vs 450, `--kms` text. (6.1)
+  - Already done: broker mode (T01), push tag and stale `tfplan` re-apply (T05), `initiate-auth` (T06).
 - [ ] **T42** Add the component-name mapping from D5 to the README component table. (6.1)
 - [ ] **T43** Replace the "verified on this machine" tables and audit tallies with numbers re-run on this machine, or reword them. (6.1)
 - [ ] **T44** Add a "Verified on AWS" section with the real output from T32 to T40. (6.1)

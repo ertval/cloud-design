@@ -73,3 +73,21 @@ The push sent `:local` while the task definitions pulled `:latest`, so every ECS
 - Temp Terraform copy: `fmt -check` clean, `validate` passes, mocked `terraform test` 5 passed (two edge runs from T01-T04 plus `image_tag` default, pinned and invalid).
 - Initialised temp copy of the repo: `test_cloud.sh` 63 passed, 0 failed; `run-audit-checks.sh --static` PASS=159 FAIL=0 INVALID=8.
 - No real build, push or `terraform plan` (needs AWS credentials).
+
+## 2026-10-28 00:30 EET: Phase 1 T06, Cognito demo login command fixed
+
+**What**
+- `README.md`: the "Obtain a JWT" block no longer passes `--secret` (not an `initiate-auth` option). It computes `SECRET_HASH` with `openssl` (HMAC-SHA256 of username + client id, keyed with the client secret, Base64) and sends `USERNAME`, `PASSWORD` and `SECRET_HASH` as JSON built by `jq`. The note under it now says correctly how `terraform output` shows the sensitive password (`-raw` prints it; `-json` quotes it and escapes `&`) and what `None` in `AUTH` means. The prerequisites row now lists `jq` and `openssl`.
+- `terraform/cognito.tf`: `=` removed from the demo password `override_special` (now `!#$%&*()-_+`), with a FIX comment; the demo-client comment rewritten, since the old one claimed `initiate-auth` needs a client secret (it needs `USER_PASSWORD_AUTH`, which the PKCE client does not allow).
+- `terraform/terraform.tfvars.example`: points at `terraform output -raw` instead of `-json` for the demo password.
+- `tasklist.md`: T06 ticked with a note; T41 notes which of its README corrections are already done.
+
+**Why**
+The documented login failed at once with `Unknown options: --secret`, and without `SECRET_HASH` Cognito refuses any call to a client that has a secret, so the managed-authentication demo could not be shown. The client keeps its secret (free either way, and smaller than turning it into a second public client). JSON built by `jq` works for any password, including one an operator sets.
+
+**Verified**
+- Local only, dummy credentials, no AWS calls: AWS CLI 2.38.2 rejects `--secret`; in shorthand a `,` in the password turns it into a list (an `=` survives); the JSON form reaches the request body unchanged; the `openssl` hash matches a Python HMAC reference.
+- The exact README block, run against a local mock Cognito that recomputes `SECRET_HASH`, returned the token for a generated-style password and for an operator password containing `, = " \` and a space; a wrong hash was rejected.
+- Temp Terraform copy: `fmt -check` clean, `validate` passes, mocked `terraform test` 6 passed (new run checks the alphabet and that the demo client stays confidential with USER_PASSWORD_AUTH).
+- Initialised temp copy of the repo: `test_cloud.sh` 63 passed, 0 failed; `run-audit-checks.sh --static` PASS=159 FAIL=0 INVALID=8.
+- Not run against real Cognito (needs a deployed stack).

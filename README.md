@@ -696,7 +696,7 @@ resource anywhere in `terraform/`. They are future work, listed in [Bonus](#bonu
 |---|---|---|
 | AWS CLI v2 | push to ECR, read outputs, `aws ecs describe-services` | ≥ 2.x |
 | Terraform | all infrastructure | **≥ 1.5.0** (`main.tf:2`), provider `aws ~> 5.50`, plus `random ~> 3.6` |
-| `jq` | `build_push.sh --push` reads the account ID with it; the redeploy loop in step 5 of the AWS walkthrough | any 1.6+ |
+| `jq`, `openssl` | `build_push.sh --push` reads the account ID with `jq`; the redeploy loop in step 5 of the AWS walkthrough; the Cognito demo login (`SECRET_HASH` and the JSON auth parameters) | `jq` 1.6+, any `openssl` |
 | An AWS account | — | with IAM permissions for VPC, ELB, RDS, MQ, ECS, ECR, Cognito, APIGateway, ACM, Route 53, KMS, Secrets Manager, CloudWatch, SNS, Budgets, Inspector2 |
 
 ### Optional, per path
@@ -974,17 +974,30 @@ SECRET=$(aws cognito-idp describe-user-pool-client \
 EMAIL=$(terraform -chdir=terraform output -raw cognito_demo_user_email)
 PASS=$(terraform -chdir=terraform output -raw cognito_demo_user_password)
 
+# initiate-auth has no --secret option. A client with a secret must send
+# SECRET_HASH = Base64(HMAC-SHA256(key = client secret, message = username + client id))
+# inside --auth-parameters.
+SECRET_HASH=$(printf '%s' "${EMAIL}${CID}" \
+  | openssl dgst -sha256 -hmac "$SECRET" -binary | base64)
+# JSON form, built by jq: a "," in the password would split the
+# KEY=value,KEY=value shorthand, and hand-written JSON breaks on '"' or '\'.
+AUTH_PARAMS=$(jq -cn --arg u "$EMAIL" --arg p "$PASS" --arg h "$SECRET_HASH" \
+  '{USERNAME: $u, PASSWORD: $p, SECRET_HASH: $h}')
+
 AUTH=$(aws cognito-idp initiate-auth \
   --auth-flow USER_PASSWORD_AUTH \
-  --auth-parameters USERNAME="$EMAIL",PASSWORD="$PASS" \
-  --client-id "$CID" --secret "$SECRET" \
+  --client-id "$CID" \
+  --auth-parameters "$AUTH_PARAMS" \
   --query AuthenticationResult.IdToken --output text)
 
 BASE=$(terraform -chdir=terraform output -raw app_base_url)   # https://…/api/movies
 ```
 
-`cognito_demo_user_password` is a **sensitive** output, so `terraform output -raw`
-prints it (add `-raw`, not `-json`, or you get the redaction marker).
+`cognito_demo_user_password` is a **sensitive** output: the plain `terraform output`
+listing shows `<sensitive>`, while `-raw` prints the value as is. Use `-raw`;
+`-json` prints it quoted and escapes `&` as `\u0026`, which is not the password.
+`AUTH` holds the ID token; if it prints `None`, Cognito answered with a challenge
+instead of tokens.
 
 Browser route: `terraform -chdir=terraform output cognito_hosted_ui_url` gives
 the hosted-UI login page, which returns the tokens to a registered callback URL

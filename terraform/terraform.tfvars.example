@@ -119,6 +119,7 @@ enable_demo_cognito_user = true
 demo_user_email          = "auditor@cloud-design.local"
 
 # Leave null to have Terraform generate a compliant password and read it from
-# `terraform output -json cognito_demo_user_password`. Set a value to choose it
-# yourself (must satisfy the pool policy: 8+ chars, upper, lower, digit, symbol).
+# `terraform output -raw cognito_demo_user_password` (-json prints it quoted and
+# escapes "&" as \u0026). Set a value to choose it yourself (must satisfy the
+# pool policy: 8+ chars, upper, lower, digit, symbol).
 demo_user_password = null
