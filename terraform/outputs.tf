@@ -198,7 +198,7 @@ output "inspector2_findings_filter_name" {
 
 # Storage Outputs (Amazon S3)
 output "artifact_bucket_name" {
-  description = "Name of the S3 artefact / log-archive bucket (storage.tf). Nothing in this repository writes to it yet - it is the archive target for build artefacts and CloudWatch log exports. Null when var.enable_artifact_bucket = false."
+  description = "Name of the S3 bucket (storage.tf) that receives the ALB access logs under alb-access-logs/, and the archive target for build artefacts and CloudWatch log exports. Null when var.enable_artifact_bucket = false."
   value       = try(aws_s3_bucket.artifacts[0].bucket, null)
 }
 

@@ -9,7 +9,7 @@ authorizer** is the only internet-facing entrypoint (HTTPS) and reaches the ALB
 through a VPC Link; **Amazon RDS PostgreSQL Multi-AZ** and **Amazon MQ for
 RabbitMQ** (`SINGLE_INSTANCE`, AMQPS only) form a data tier with no route to the
 internet. East–west traffic is resolved privately by **AWS Cloud Map**. Everything
-is described in Terraform: 19 `.tf` files, 134 `resource` blocks, 34 variables,
+is described in Terraform: 19 `.tf` files, 136 `resource` blocks, 34 variables,
 40 outputs.
 
 Everything asserted below is either reproducible from a command in this README or
@@ -44,7 +44,7 @@ explicitly listed as unverified in [Known limitations](#known-limitations--verif
 ### System context
 
 Who talks to what, and which trust boundaries the traffic crosses. Cognito, ACM,
-Route 53, ECR, Inspector2, KMS, Secrets Manager and CloudWatch are AWS-managed
+Route 53, ECR, Inspector2, KMS, Secrets Manager, CloudWatch and S3 are AWS-managed
 and therefore live *outside* the VPC. Nothing inside the VPC is internet-facing:
 the ALB is internal, and API Gateway is the only public entry.
 
@@ -69,6 +69,7 @@ flowchart TB
 
         subgraph Ops["Observability and security (managed)"]
             CW["CloudWatch: 4 log groups,<br/>13 alarms, 8-widget dashboard"]
+            S3["Amazon S3 bucket<br/>ALB access logs, 30 days"]
             SNS["SNS topic + topic policy<br/>AWS Budget + alarms"]
             ECR["Amazon ECR<br/>3 repos, scan-on-push,<br/>keep last 5"]
             Insp["Amazon Inspector v2<br/>CRITICAL/HIGH filter"]
@@ -85,6 +86,7 @@ flowchart TB
     AppTier -->|"7. resolve inventory-app.<ns>.local"| CloudMap
     AppTier -->|"8. SQL :5432 / AMQPS :5671"| DataTier
     AppTier -.->|"stdout/stderr awslogs"| CW
+    ALB -.->|"access logs every 5 min"| S3
     DataTier -.->|"metrics"| CW
     CW --> SNS
     AppTier -.-> ECR
@@ -262,8 +264,9 @@ is listed as both a StatefulSet and an RDS instance.
 Supporting AWS resources with no local container counterpart: API Gateway HTTP
 API, Cognito user pool + app clients, ACM certificate, Cloud Map namespace, ECR
 (3 repos), Inspector v2, KMS key, Secrets Manager (3 secrets), CloudWatch log
-groups/alarms/dashboard, SNS topic, AWS Budget, VPC/subnets/NAT/security groups
-and their rules, IAM roles and policies for ECS.
+groups/alarms/dashboard, SNS topic, AWS Budget, an S3 bucket for the ALB access
+logs (`storage.tf`), VPC/subnets/NAT/security groups and their rules, IAM roles
+and policies for ECS.
 
 ### Per-platform naming (no renames — this table documents intent)
 
@@ -445,6 +448,39 @@ ECS Container Insights **is** enabled on the cluster
 different thing from the `/aws/containerinsights/.../application` *log* pipeline,
 which this project does not create. The `billing-app-consumers-below-min` alarm
 uses one of those metrics, `ECS/ContainerInsights` `RunningTaskCount`.
+
+### ALB access logs (S3)
+
+The internal ALB writes an access log to the S3 bucket
+`cloud-design-prod-artifacts-<account-id>` under `alb-access-logs/`
+(`alb.tf` `access_logs`, `storage.tf`). ELB delivers one gzip file per ALB node
+every 5 minutes, on a best-effort basis, with one line per request. Field 5 is
+the `target:port` that served the request, so this is the AWS-side evidence of
+how traffic is spread over the tasks: port 3000 is an api-gateway task, 8080 a
+billing-app task.
+
+```bash
+B=$(terraform -chdir=terraform output -raw artifact_bucket_name)
+aws s3 sync "s3://$B/alb-access-logs/" /tmp/alb-logs
+find /tmp/alb-logs -name '*.log.gz' -exec zcat {} + | awk '{print $5}' | sort | uniq -c
+```
+
+How the bucket is set up for it:
+
+- **Bucket policy:** one statement allows `s3:PutObject` for the ELB log delivery
+  service (`logdelivery.elasticloadbalancing.amazonaws.com`), only under
+  `alb-access-logs/AWSLogs/<this account>/` and only for this project's ALB name
+  (`aws:SourceArn`). The TLS-only and encryption denies still apply.
+- **Encryption:** SSE-S3, the only bucket encryption ALB log delivery supports.
+- **Retention:** log files expire after `log_retention_days` (30), like the log
+  groups, so they never reach the bucket-wide GLACIER transition at 90 days.
+- **Teardown:** `force_destroy = true`, because a bucket with objects in it
+  cannot be deleted. `terraform destroy` removes the ALB first, then empties and
+  deletes the bucket.
+- **Cost:** S3 storage and PUT requests only; ELB does not charge for the
+  delivery. At demo traffic that is cents per month.
+
+`enable_artifact_bucket = false` removes the bucket and turns the access logs off.
 
 ### Alarms (all 13)
 
@@ -961,7 +997,8 @@ HTTP inside the VPC; `true` makes it HTTPS with an ACM certificate and needs a
 Route 53 domain you already own), and
 `enable_demo_cognito_user` (default `true` so `initiate-auth` works immediately —
 set `false` outside a demo, since the demo password lives in Terraform state
-either way).
+either way), and `enable_artifact_bucket` (default `true`: the S3 bucket for the
+ALB access logs; `false` turns the access logs off).
 
 ### Environment variable names across the three environments
 
@@ -1269,6 +1306,7 @@ docker compose logs --tail=50 inventory-app billing-app
 # --- is load balancing distributing traffic? (audit.md:66)
 docker compose logs --no-log-prefix gateway-lb | grep -o 'upstream=[0-9.]*:3000' | sort | uniq -c
 make lb-spread
+# on AWS, the same count from the ALB access logs: see "ALB access logs (S3)"
 
 # --- Kubernetes path (audit.md:76)
 kubectl apply -k manifests/
@@ -1406,6 +1444,7 @@ class whether teardown actually happened and names the charges that **survive**
 | Manual RDS snapshots | both instances use `skip_final_snapshot = true`, so Terraform takes none — but snapshots you created by hand are not deleted | `aws rds delete-db-snapshot --db-snapshot-identifier <id>` |
 | CloudWatch | log groups and alarms are destroyed, but the elapsed part of the month is still charged | wait for the month to roll over |
 | ECR | **not** a survivor here: the repositories use `force_delete = true` plus the 5-image lifecycle policy | verify with `aws ecr describe-repositories` |
+| S3 bucket | **not** a survivor: `force_destroy = true` deletes every object version (the ALB access logs) and then the bucket | verify with `aws s3 ls \| grep cloud-design` |
 
 This is a deliberate change from the previous revision, which printed "Zero idle
 cloud costs" unconditionally — including when Terraform was not installed and
@@ -1563,7 +1602,7 @@ Claimed against `docs/readme.md`'s bonus list. Each item says exactly what exist
 
 - [x] `README.md` — architecture diagrams, component descriptions, design rationale, prerequisites, setup, configuration, usage, verification
 - [x] `srcs/` — application source for all six components, with tests
-- [x] `terraform/` — 19 `.tf` files, 134 `resource` blocks (129 `aws_*`), 34 variables, 40 outputs, 7 `data` blocks, 0 modules
+- [x] `terraform/` — 19 `.tf` files, 136 `resource` blocks (131 `aws_*`), 34 variables, 40 outputs, 7 `data` blocks, 0 modules
 - [x] `docker-compose.yml`, `Makefile`, `.env.example`, `.dockerignore`, `.gitignore`
 - [x] `manifests/` — 29 Kubernetes objects including `kustomization.yaml`
 - [x] `ecs-tasks/` — 6 standalone task-definition documents with placeholder ARNs (the authoritative ones are in `terraform/ecs_services.tf`)

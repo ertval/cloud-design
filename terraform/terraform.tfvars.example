@@ -74,7 +74,8 @@ image_tag = "latest"
 # Autoscaling & CloudWatch
 # ------------------------------------------------------------------------------
 autoscaling_target_cpu = 60
-log_retention_days     = 30
+# Also how long the ALB access logs stay in the S3 bucket.
+log_retention_days = 30
 
 # !! Set this to an address you actually read, or leave "" to create the alarms
 # !! with no email subscriber. Placeholder domains (example.com/org/net,
@@ -92,8 +93,9 @@ monthly_budget_limit = 450
 # ------------------------------------------------------------------------------
 # Storage / teardown
 # ------------------------------------------------------------------------------
-# S3 log- and artefact-archive bucket (storage.tf). Nothing writes to it yet.
-# Set false only for a throwaway sandbox.
+# S3 bucket (storage.tf) that receives the ALB access logs and archives
+# artefacts. Set false only for a throwaway sandbox; that also turns the ALB
+# access logs off.
 enable_artifact_bucket = true
 
 # Take a final manual RDS snapshot on `terraform destroy`. false reproduces the

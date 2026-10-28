@@ -209,3 +209,69 @@ Phase 2 monitoring group. The backlog alarm threshold is twice the autoscaling t
 
 **Why**
 The user asked for the sources behind each change to be recorded in the changelog, including earlier tasks, and allowed earlier entries to be edited this one time, only to add the sources. The list comes from the web lookups recorded in this session's transcript, not from memory.
+
+## 2026-10-28 15:04 EET: Phase 2 T15, ALB access logs to the S3 bucket
+
+**What**
+- `terraform/alb.tf`: `aws_lb.main` gets an `access_logs` block (bucket = the artifacts bucket, prefix `alb-access-logs`, `enabled = var.enable_artifact_bucket`, so without the bucket logging is explicitly off) and `depends_on = [aws_s3_bucket_policy.artifacts]`, because ELB writes a test file when logging is turned on and because destroy must remove the ALB before the bucket.
+- `terraform/storage.tf`: header rewritten (the ALB now writes here; the old "nothing writes to it" text is gone). New `local.alb_access_log_prefix`. `force_destroy = true` on the bucket, since a bucket holding log versions cannot be deleted and `terraform destroy` would stop with BucketNotEmpty. Bucket policy document renamed from `artifacts_tls_only` to `artifacts` and given a third statement, `AllowAlbAccessLogDelivery`: `s3:PutObject` for `logdelivery.elasticloadbalancing.amazonaws.com` on `alb-access-logs/AWSLogs/<account>/*`, with `aws:SourceArn` limited to this account, Region and ALB name. New lifecycle rule `alb-access-logs-expiry`: logs expire after `var.log_retention_days`, noncurrent versions a day later. The encryption comment now says SSE-S3 is required for ALB log delivery.
+- `terraform/variables.tf`, `terraform/outputs.tf`, `terraform/terraform.tfvars.example`: `log_retention_days` also sets the S3 log expiry; `enable_artifact_bucket` and the bucket output describe the new use (false turns the access logs off).
+- `scripts/destroy.sh`: closing summary lists the S3 bucket (emptied by `force_destroy`) and adds a leftover check, `aws s3api list-buckets` filtered by project name.
+- `README.md`: new "ALB access logs (S3)" section (what is logged, the per-target count command, bucket policy, encryption, retention, teardown, cost); S3 added to the system context diagram, its intro and the supporting-resources list; `enable_artifact_bucket` in the tfvars notes; S3 row in the "Survives" table; pointer from the load-distribution verification block. Also corrected the Terraform counts to 136 `resource` blocks (131 `aws_*`) in two places: the two T14 alarms had made the old 134 / 129 stale, and the T12-T14 entry missed it.
+- `tasklist.md`: T15 ticked and crossed out.
+
+**Why**
+T15: the bucket had no real use, and the ALB access logs give it one and are the AWS-side proof of how requests are spread over the tasks (the local proof is the nginx log). The service principal policy is the form AWS now recommends; the legacy per-Region ELB account was not used. Logs expire with the CloudWatch retention instead of going to GLACIER, which for many small files would cost more than it saves.
+
+**Verified**
+- `terraform fmt -check` clean, `terraform validate` passes; mocked `terraform test` 11 passed (new runs `alb_access_logs` and `no_bucket_no_access_logs`), and the plans show no dependency cycle between the ALB and the bucket policy. Negative check (force_destroy off, wrong principal, `AWSLogs` prefix) made `alb_access_logs` fail on three asserts.
+- The real bucket policy JSON was rendered with AWS provider 5.100.0 and fake credentials (this data source is computed locally, no AWS call): the new statement matches the AWS example policy plus the `aws:SourceArn` condition.
+- `scripts/test_cloud.sh` 63 passed (same 2 warnings as before); `scripts/run-audit-checks.sh --static` PASS=163 FAIL=0.
+- Not run against AWS: log delivery, the ELB test file and the destroy of a bucket with objects are unverified until a real deployment.
+
+**Sources**
+- [Enable access logs for your Application Load Balancer](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/enable-access-logging.html): the `logdelivery.elasticloadbalancing.amazonaws.com` policy (the per-Region account policy is legacy), the resource path with `AWSLogs/<account-id>`, the `aws:SourceArn` best practice, SSE-S3 as the only supported encryption, the prefix must not contain `AWSLogs`, the `ELBAccessLogTestFile` check, and disabling logs before deleting the bucket.
+- [Access logs for your Application Load Balancer](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-access-logs.html): one gzip file per node every 5 minutes, best-effort delivery, field 5 is `target:port`, S3 storage is charged but not the delivery bandwidth.
+- [How Amazon S3 handles conflicts in lifecycle configurations](https://docs.aws.amazon.com/AmazonS3/latest/userguide/lifecycle-conflicts.html): the shorter of two overlapping expirations is honored, and deletion takes precedence over transition.
+- [terraform-provider-aws v5.100.0, `internal/service/elbv2/load_balancer.go`](https://raw.githubusercontent.com/hashicorp/terraform-provider-aws/v5.100.0/internal/service/elbv2/load_balancer.go): with `enabled = false` (or no `access_logs` block) the provider sends `access_logs.s3.enabled = false` and ignores bucket and prefix; `bucket` is required in the block.
+
+Text for the read-only docs (for you to apply):
+  - docs/HANDOFF.md:404 becomes:
+    - Do not let the docs claim the S3 bucket is used by the application. Only the ALB writes to it (access logs under \alb-access-logs/`);
+    no application code does.`
+  - docs/AUDIT_GUIDE.md:2263 becomes:
+  | **S3 object storage** | `terraform/storage.tf` declares one bucket, toggleable via `var.enable_artifact_bucket` (default on): SSE 
+  AES256, versioning, `force_destroy`, full public-access block, lifecycle rules (ALB logs expire after 30 days), and a bucket policy with 
+  TLS-only and encrypted-upload denies plus an allow for ELB log delivery. | The internal ALB writes its **access logs** here under 
+  `alb-access-logs/`; it is also the archive target for build artefacts and log exports. No application code writes to it: there is no 
+  `boto3` call anywhere in `srcs/` and no task-definition mount. Do not claim the app uses it. |
+
+## 2026-10-28 18:29 EET: T15 docs text recorded, docs not changed yet
+
+**What**
+- `CHANGELOG.md`: this entry stores the replacement text for the two lines in the read-only docs that T15 made stale, so it is kept until the docs are edited. No file in `docs/` was changed. The unheaded text at the end of the T15 entry above is the same text pasted from the terminal and was left as it is; its table row is wrapped over five lines and a backtick was lost on its first line, so copy from the blocks below instead.
+
+Pending docs changes:
+
+1. `docs/HANDOFF.md:404` says nothing writes to the bucket; the ALB now does. Replace the line with:
+
+```
+- Do not let the docs claim the S3 bucket is used by the application. Only the ALB writes to it (access logs under `alb-access-logs/`); no application code does.
+```
+
+2. `docs/AUDIT_GUIDE.md:2263`, the S3 row: it lacks `force_destroy`, the log expiry rule and the ELB log delivery statement, and names only artefacts and log archival as uses. Replace the row with:
+
+```
+| **S3 object storage** | `terraform/storage.tf` declares one bucket, toggleable via `var.enable_artifact_bucket` (default on): SSE AES256, versioning, `force_destroy`, full public-access block, lifecycle rules (ALB logs expire after 30 days), and a bucket policy with TLS-only and encrypted-upload denies plus an allow for ELB log delivery. | The internal ALB writes its **access logs** here under `alb-access-logs/`; it is also the archive target for build artefacts and log exports. No application code writes to it: there is no `boto3` call anywhere in `srcs/` and no task-definition mount. Do not claim the app uses it. |
+```
+
+Checked, no change needed:
+- `docs/HANDOFF.md:78-79`: still true; `ecs_services.tf` has no reference to `storage.tf` (only `alb.tf` and `outputs.tf` reference the bucket) and no application code writes to S3.
+- `docs/HANDOFF.md:258-260`: still true; it says the application does not write to the bucket, and ALB logs fall under the log archival it names.
+- `docs/AUDIT_GUIDE.md:1536`: `storage.tf=7` is a per-file resource count, and `storage.tf` still has 7 `resource` blocks.
+
+**Why**
+The user decided not to edit the read-only docs yet and asked for the T15 docs text to be recorded in the changelog as well. Fenced blocks keep the Markdown exact when copied.
+
+**Verified**
+Read the current lines in `docs/HANDOFF.md` and `docs/AUDIT_GUIDE.md` (read only) and searched `docs/` for other claims that nothing writes to the bucket: only the lines above. Resource count from `grep -c '^resource ' terraform/storage.tf` (7, same as at HEAD).

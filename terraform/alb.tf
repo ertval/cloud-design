@@ -96,6 +96,23 @@ resource "aws_lb" "main" {
   enable_deletion_protection = false
   drop_invalid_header_fields = true
 
+  # Access logs to the S3 bucket (storage.tf): one line per request, including
+  # the target IP:port that served it, which is the evidence of how the traffic
+  # was spread across the tasks. The block stays even without the bucket, with
+  # enabled = false, so switching the bucket off sends an explicit "logging off"
+  # before the bucket is deleted (the provider ignores bucket and prefix while
+  # enabled is false).
+  access_logs {
+    enabled = var.enable_artifact_bucket
+    bucket  = var.enable_artifact_bucket ? aws_s3_bucket.artifacts[0].id : ""
+    prefix  = local.alb_access_log_prefix
+  }
+
+  # When logging is turned on, ELB writes a test file to check its permission,
+  # so the bucket policy must exist first. This also makes `terraform destroy`
+  # delete the ALB, and so stop the logs, before it empties the bucket.
+  depends_on = [aws_s3_bucket_policy.artifacts]
+
   tags = merge(local.common_tags, {
     Name = "${local.name_prefix}-alb"
     Tier = "Private-ALB"

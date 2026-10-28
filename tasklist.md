@@ -82,7 +82,7 @@ The biggest saving of all costs nothing: deploy shortly before the audit and des
   - Files: `terraform/cloudwatch.tf`
 - [x] ~~**T14** Add alarms for the queue consumer: `billing-app` running task count below 2, and `MessageCount` staying high. (5.3)~~
   - Files: `terraform/cloudwatch.tf`
-- [ ] **T15** Enable ALB access logs to the S3 bucket, with a bucket policy statement for ELB log delivery (after T04). Storage cost is pennies at demo volume. (5.3)
+- [x] ~~**T15** Enable ALB access logs to the S3 bucket, with a bucket policy statement for ELB log delivery (after T04). Storage cost is pennies at demo volume. (5.3)~~
   - Files: `terraform/alb.tf`, `terraform/storage.tf`, `README.md` (the bucket now has a real use)
 - [ ] **T16** Optional: make `billing-app` readiness reflect the consumer connection, not only the database. (5.3)
   - Files: `srcs/billing-app/app/__init__.py`, `srcs/billing-app/app/consume_queue.py`

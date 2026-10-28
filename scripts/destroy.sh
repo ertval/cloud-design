@@ -412,6 +412,9 @@ echo "                    takes none. Manual snapshots you created are NOT delet
 echo "                        aws rds delete-db-snapshot --db-snapshot-identifier <id>"
 echo "   ECR images     : repositories use force_delete = true and a lifecycle policy."
 echo "                    Check for leftovers:  aws ecr describe-repositories"
+echo "   S3 bucket      : force_destroy = true deletes every object version (the ALB"
+echo "                    access logs) before the bucket itself."
+echo "                    Check for leftovers:  aws s3 ls | grep ${TF_PROJECT:-cloud-design}"
 echo "   CloudWatch     : log groups and alarms are removed by destroy; the current"
 echo "                    partial month is still charged."
 echo
@@ -421,6 +424,7 @@ echo "   aws rds describe-db-instances --query 'DBInstances[].{Id:DBInstanceIden
 echo "   aws mq describe-brokers         --query 'BrokerSummaries[].{Id:BrokerId,State:BrokerState}'"
 echo "   aws elbv2 describe-load-balancers --query 'LoadBalancers[].DNSName'"
 echo "   aws ecr describe-repositories     --query 'repositories[].repositoryName'"
+echo "   aws s3api list-buckets --query \"Buckets[?contains(Name, '${TF_PROJECT:-cloud-design}')].Name\""
 echo "   aws resourcegroupstaggingapi get-resources --resource-type-filters kms:key \\"
 echo "     --tag-filters Key=Project,Values=${TF_PROJECT:-cloud-design} --query 'ResourceTagMappingList[].ResourceARN'"
 exit 0

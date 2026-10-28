@@ -244,7 +244,7 @@ variable "billing_queue_depth_target" {
 }
 
 variable "log_retention_days" {
-  description = "CloudWatch log retention period in days"
+  description = "CloudWatch log retention period in days. Also the number of days the ALB access logs are kept in the S3 bucket (storage.tf)."
   type        = number
   default     = 30
 }
@@ -312,11 +312,11 @@ variable "allowed_origins" {
 # ------------------------------------------------------------------------------
 variable "enable_artifact_bucket" {
   description = <<-EOT
-    Create the S3 bucket that backs log- and artefact-archival (storage.tf). The
-    audit brief asks for "storage services using AWS S3 or similar" and the repo
-    previously contained no storage service at all. Set false to skip it for a
-    throwaway sandbox; an empty bucket costs nothing beyond the requests made
-    against it, so there is no reason to disable it for a real deployment.
+    Create the S3 bucket that receives the ALB access logs and backs log- and
+    artefact-archival (storage.tf). The audit brief asks for "storage services
+    using AWS S3 or similar". Set false to skip it for a throwaway sandbox; that
+    also turns the ALB access logs off. At demo traffic the logs cost cents per
+    month in S3 storage and requests, so keep it on for a real deployment.
   EOT
   type        = bool
   default     = true
