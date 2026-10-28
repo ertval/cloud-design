@@ -723,3 +723,53 @@ Decisions made along the way:
 
 **Next**
 - T22 fills in the `billing` drill: suspend scaling or set min 0, scale `billing-app` to 0, POST, show `MessageCount`, scale back, show the order and the logs, restore scaling.
+
+## 2026-10-28 23:20 EET: T22 billing outage drill on AWS in scripts/aws-demo.sh
+
+**What**
+- `scripts/aws-demo.sh`: the `billing` section is now the B1/B2 drill. It used to only read.
+  - Preconditions, checked before anything changes: a Cognito token, billing-app steady (running equals desired, rollout COMPLETED), and a readable scalable target. Otherwise the section skips or fails without touching the stack.
+  - Steps:
+    1. Read billing-app's desired count, min, max and suspended state.
+    2. `register-scalable-target --min-capacity 0` with scale-in, scale-out and scheduled scaling suspended.
+    3. `update-service --desired-count 0`, then poll until 0 tasks run, and show `GET /api/billing/orders` answering 503.
+    4. POST an order through API Gateway with `user_id` set to the epoch seconds (B1, expects 200).
+    5. Poll the broker's `MessageCount` from the POST's minute until it shows the message.
+    6. `update-service` back to the desired count from step 1, then poll until it runs.
+    7. Poll `GET /api/billing/orders` until the order is listed (B2), show its lines with `aws logs tail --filter-pattern`, poll `MessageCount` back to 0, and show the `consumers-below-min` alarm history.
+    8. Register the original min, max and suspended state again, and compare them with step 1.
+  - New `DRILL_WAIT` (default 420 s) caps each poll, and it is validated like the other numbers.
+  - New `drill_restore` and an `on_exit` EXIT trap, with INT and TERM traps that exit 130 and 143. If the script stops between steps 2 and 8, they put the desired count and the scalable target back, printing each command.
+  - The header, WHAT CHANGES STATE and ENVIRONMENT text are updated.
+- `README.md`:
+  - the `billing` row in the "Live AWS demo" table;
+  - the paragraph on what changes state;
+  - new subsection "Resilience drill on AWS" after the local drill: the eight steps, the trap, the alarm that fires, and why the order, not the metric, decides B2.
+- `tasklist.md`: T22 ticked and crossed out.
+
+**Why**
+The user asked to start T22.
+
+The order of the steps comes from the RegisterScalableTarget API reference: an update call moves the current capacity into [min, max] at once. So the minimum is lowered to 0 while the tasks still run, scaling is suspended, and only then is the service scaled to 0. The minimum is restored after the tasks run again.
+
+Only `consumers-below-min` is expected to fire. The backlog alarm needs more than 100 messages for 5 minutes, so the claim in `progress.md` line 281 that both fire in the B1 drill does not hold. `progress.md` was left unchanged.
+
+**Verified**
+- `bash -n` and ShellCheck 0.11.0 (the `/tmp` virtualenv from T21) are clean.
+- No live stack exists, so the drill ran against the extended stubs in `/tmp/cd-demo-stub`. They now keep billing-app's desired count, scalable target, posted order, queue metric and alarm history as state.
+  - Normal run: PASS=11 FAIL=0, with the scalable target back at min 2, max 6, nothing suspended.
+  - A restart that never comes up: two FAILs, the auto scaling still restored, exit 1.
+  - SIGINT during the queue wait: the trap printed `[RESTORE]` and set the desired count back to 2 and the target to min 2, max 6, all suspensions false. Exit 130.
+  - No demo Cognito user, or billing-app not steady: skip or fail, with no `update-service` or `register-scalable-target` call at all.
+  - `DRILL_WAIT=abc` is rejected with exit 2.
+  - No masked value appeared in any drill output.
+- Regression: `verify lb auth movies billing security` against the stubs gives PASS=65 FAIL=0 WARN=0 SKIP=0.
+- Scratch copy: `test_cloud.sh` 66 checks passed, 2 warnings. `run-audit-checks.sh --static` PASS=163 FAIL=0 INVALID=8 NOTES=51.
+- No em or en dashes in the script or in the added README lines.
+
+**Sources**
+- [RegisterScalableTarget, Application Auto Scaling API Reference](https://docs.aws.amazon.com/autoscaling/application/APIReference/API_RegisterScalableTarget.html): an update moves the current capacity into [min, max]; omitted parameters are not changed; the minimum for ECS services may be 0.
+- [Suspend and resume scaling for Application Auto Scaling](https://docs.aws.amazon.com/autoscaling/application/userguide/application-auto-scaling-suspend-resume-scaling.html): the three suspended-state flags and the `register-scalable-target --suspended-state` command.
+
+**Next**
+- T37 [AWS] runs this drill on the live stack and captures the B1/B2 evidence.

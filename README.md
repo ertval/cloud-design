@@ -985,7 +985,7 @@ scripts/aws-demo.sh --pause all       # wait for Enter before each command
 | `lb-split` | V3 | Only the split. ALB delivers its logs every 5 minutes, so run this again a few minutes after `lb` |
 | `auth` | S2, S3 | 401 with no token and with a forged one, a Cognito ID token for the demo user, 200 with it, then the JWT authorizer, the routes and the user pool |
 | `movies` | F1, F2 | POST a movie through API Gateway, then GET the list and the movie by id |
-| `billing` | B1, B2 | Read-only for now: billing-app service and scaling state, the queue depth, the stored orders. The stop, POST and restart drill is not implemented yet |
+| `billing` | B1, B2 | The consumer outage drill: pause billing-app's auto scaling, stop billing-app, POST an order through API Gateway (200), show it waiting in the queue (`MessageCount`), start billing-app again, show the order in `GET /api/billing/orders` and in the billing-app log, then restore the auto scaling. See "Resilience drill on AWS" |
 | `load` | O1, O2 | The scaling policies and their CloudWatch alarms, a timed load test (`LOAD_DURATION`, default 300 s, `LOAD_CONCURRENCY`, default 32), then the scaling activities, the CPU and the desired counts before and after |
 | `scaling` | O1 | Only the scaling view; run it again a few minutes after `load` |
 | `security` | S1 | HTTPS only at the edge, the internal ALB and its security group, JWT on every `/api/*` route, private and encrypted databases (security group, route table, a TCP probe from outside, `rds.force_ssl`, KMS rotation), the broker's TLS endpoints, credentials from Secrets Manager, Inspector and ECR scan results |
@@ -993,7 +993,8 @@ scripts/aws-demo.sh --pause all       # wait for Enter before each command
 
 `movies` creates one movie, and `lb` and `load` send requests, which API
 Gateway bills per million. `load` can scale the services out and back in.
-Every other section only reads. The exit code is 1 if any check failed.
+`billing` stops billing-app for a few minutes and creates one order. Every
+other section only reads. The exit code is 1 if any check failed.
 
 ### The Kubernetes path (manifests, local cluster)
 
@@ -1357,6 +1358,40 @@ docker compose start billing-app
 the consumer exits **0** rather than being SIGKILLed at 137; the order survives in
 the durable queue (`delivery_mode=Persistent`, `durable=True`); and it is
 persisted with exact decimal precision once the consumer returns.
+
+### Resilience drill on AWS
+
+`scripts/aws-demo.sh billing` runs the same drill against ECS (questions B1 and
+B2). billing-app's auto scaling has a minimum of 2, so the drill pauses it
+first; otherwise the stopped service could be started again in the middle.
+
+1. Read billing-app's desired count and its scalable target (min, max,
+   suspended state). The drill only starts if billing-app is steady and a
+   Cognito token is available.
+2. `register-scalable-target --min-capacity 0` with scale-in, scale-out and
+   scheduled scaling suspended. The minimum is lowered while billing-app still
+   runs its tasks, because a register call moves the task count into the
+   min/max range at once.
+3. `update-service --desired-count 0`, wait for 0 running tasks.
+   `GET /api/billing/orders` now answers 503: nothing is behind the billing
+   target group.
+4. POST an order through API Gateway, marked by a unique numeric `user_id`.
+   It answers 200 with no consumer running (B1).
+5. Wait for the broker's `MessageCount` in CloudWatch to show the message.
+6. `update-service` back to the desired count read in step 1, wait until the
+   tasks run.
+7. Wait for the order in `GET /api/billing/orders`, show its lines in the
+   billing-app log, wait for `MessageCount` to return to 0 (B2).
+8. Put the minimum, maximum and suspended state back as read in step 1, and
+   check them.
+
+If the script stops between steps 2 and 8 (a failure, Ctrl-C), its exit trap
+puts the desired count and the scalable target back. While the consumers are
+down, `cloud-design-prod-billing-app-consumers-below-min` fires and emails
+the alerts topic; the drill shows its state history. `DRILL_WAIT` (default
+420 s) is how long each wait lasts. `MessageCount` is a broker-wide metric that
+reaches CloudWatch a minute or more late, so the stored order is what decides
+B2.
 
 ### API behaviour notes
 

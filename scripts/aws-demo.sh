@@ -25,9 +25,11 @@ set -uo pipefail
 #                     token, 200 with it, then the JWT authorizer, the routes
 #                     and the user pool
 #   movies    F1, F2  POST a movie through API Gateway and GET it back
-#   billing   B1, B2  read-only for now: the consumer's service and scaling
-#                     state, the queue depth and the stored orders. The stop,
-#                     POST and restart drill comes with task T22
+#   billing   B1, B2  the consumer outage drill: pause billing-app's auto
+#                     scaling, stop billing-app, POST an order through API
+#                     Gateway, show it waiting in the queue (MessageCount),
+#                     start billing-app again, show the order stored and in
+#                     the logs, then restore the auto scaling
 #   load      O1, O2  the scaling policies, a timed load test through API
 #                     Gateway, then the scaling activities and the CPU
 #   scaling   O1      only the scaling view; run it again a few minutes after
@@ -39,8 +41,12 @@ set -uo pipefail
 # WHAT CHANGES STATE
 #   `movies` creates one movie. `lb` and `load` send requests (API Gateway bills
 #   $1 per million) and `load` can make the services scale out and back in.
-#   Nothing else writes anything. No secret is printed: the ID token, the demo
-#   password, the client secret and the SECRET_HASH appear as $TOKEN,
+#   `billing` stops billing-app for a few minutes and creates one order; while
+#   the consumers are down, the consumers-below-min alarm fires and emails the
+#   alerts topic. The drill puts billing-app's task count, minimum, maximum and
+#   suspended state back as it found them, also when it fails or is interrupted
+#   (Ctrl-C). Nothing else writes anything. No secret is printed: the ID token,
+#   the demo password, the client secret and the SECRET_HASH appear as $TOKEN,
 #   $PASSWORD, $SECRET and $SECRET_HASH.
 #
 # USAGE
@@ -60,6 +66,9 @@ set -uo pipefail
 #   LOAD_DURATION     seconds of load in `load` (default 300)
 #   LOAD_CONCURRENCY  parallel workers in `load` (default 32)
 #   LOAD_PATH         path the load hits (default /api/movies, with the token)
+#   DRILL_WAIT        seconds `billing` waits at each step: the tasks stopping,
+#                     the queued message in CloudWatch, the tasks starting, the
+#                     order stored, the queue drained (default 420)
 #
 # NEEDS: aws (v2), terraform (reads the outputs of terraform/), jq, curl;
 #        openssl for the Cognito token, python3 for `load`, zcat for `lb`.
@@ -77,6 +86,7 @@ LB_REQUESTS="${LB_REQUESTS:-100}"
 LOAD_DURATION="${LOAD_DURATION:-300}"
 LOAD_CONCURRENCY="${LOAD_CONCURRENCY:-32}"
 LOAD_PATH="${LOAD_PATH:-/api/movies}"
+DRILL_WAIT="${DRILL_WAIT:-420}"
 PAUSE=0
 ALL_SECTIONS=(verify lb auth movies billing security load)
 KNOWN_SECTIONS=" verify lb lb-split auth movies billing load scaling security all "
@@ -111,7 +121,7 @@ if [ "${#SECTIONS[@]}" -eq 0 ]; then usage >&2; exit 2; fi
 if [ "${PAUSE}" -eq 1 ] && ! { : </dev/tty; } 2>/dev/null; then
   echo "--pause waits for Enter on the terminal, and there is none here" >&2; exit 2
 fi
-for n in LB_REQUESTS LOAD_DURATION LOAD_CONCURRENCY; do
+for n in LB_REQUESTS LOAD_DURATION LOAD_CONCURRENCY DRILL_WAIT; do
   case "${!n}" in
     ''|*[!0-9]*|0) echo "${n} must be a positive whole number, got '${!n}'" >&2; exit 2 ;;
   esac
@@ -194,7 +204,33 @@ jqc() { printf '%s' "${OUT}" | jq -e "$@" >/dev/null 2>&1; }
 ago() { date -u -d "-$1 minutes" +%FT%TZ 2>/dev/null || date -u -v-"$1"M +%FT%TZ; }
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "${TMP}"' EXIT
+
+# While the billing drill runs, billing-app may be at 0 tasks with its auto
+# scaling paused. If the script stops for any reason before the drill's last
+# step (a failed command, `die`, Ctrl-C), the EXIT trap puts both back.
+DRILL_ACTIVE=0; DRILL_DESIRED=""; DRILL_MIN=""; DRILL_MAX=""; DRILL_SUSPENDED=""
+# The three suspended flags as one comparable JSON value.
+SUSPENDED_JQ='.suspended // {} | [.DynamicScalingInSuspended, .DynamicScalingOutSuspended, .ScheduledScalingSuspended] | map(. // false)'
+drill_restore() {
+  [ "${DRILL_ACTIVE}" -eq 1 ] || return 0
+  DRILL_ACTIVE=0
+  echo
+  echo "[RESTORE] the billing drill did not finish: putting billing-app back as it was"
+  echo "\$ aws ecs update-service --cluster ${CLUSTER} --service ${SVC_BIL} --desired-count ${DRILL_DESIRED}"
+  aws ecs update-service --cluster "${CLUSTER}" --service "${SVC_BIL}" \
+    --desired-count "${DRILL_DESIRED}" >/dev/null \
+    || echo "[RESTORE] update-service failed: run the command above by hand"
+  echo "\$ aws application-autoscaling register-scalable-target --service-namespace ecs --scalable-dimension ecs:service:DesiredCount --resource-id service/${CLUSTER}/${SVC_BIL} --min-capacity ${DRILL_MIN} --max-capacity ${DRILL_MAX} --suspended-state ${DRILL_SUSPENDED}"
+  aws application-autoscaling register-scalable-target --service-namespace ecs \
+    --scalable-dimension ecs:service:DesiredCount --resource-id "service/${CLUSTER}/${SVC_BIL}" \
+    --min-capacity "${DRILL_MIN}" --max-capacity "${DRILL_MAX}" \
+    --suspended-state "${DRILL_SUSPENDED}" >/dev/null \
+    || echo "[RESTORE] register-scalable-target failed: run the command above by hand"
+}
+on_exit() { drill_restore; rm -rf "${TMP}"; }
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 
 # http METHOD URL [TOKEN] [JSON]: print the curl call, run it, set CODE + BODY.
@@ -700,29 +736,219 @@ sec_movies() {
   fi
 }
 
+# billing_counts: "running pending desired" for billing-app.
+billing_counts() {
+  aws ecs describe-services --cluster "${CLUSTER}" --services "${SVC_BIL}" \
+    --query 'services[0].[runningCount,pendingCount,desiredCount]' --output text 2>/dev/null
+}
+
+# wait_billing_running N: poll until billing-app runs N tasks with none pending.
+wait_billing_running() {
+  local want="$1" start="${SECONDS}" running pending
+  echo
+  echo "\$ aws ecs describe-services --cluster ${CLUSTER} --services ${SVC_BIL} --query 'services[0].[runningCount,pendingCount,desiredCount]' --output text    # every 10 s, up to ${DRILL_WAIT} s"
+  pause
+  while :; do
+    read -r running pending _ <<<"$(billing_counts)"
+    note "$((SECONDS - start)) s: running ${running:-?}, pending ${pending:-?}"
+    if [ "${running:-}" = "${want}" ] && [ "${pending:-}" = 0 ]; then return 0; fi
+    [ $((SECONDS - start)) -ge "${DRILL_WAIT}" ] && return 1
+    sleep 10
+  done
+}
+
+# wait_queue SINCE queued|drained: poll the broker's MessageCount (one point a
+# minute, Maximum) from SINCE on, until a point is at least 1 (queued) or the
+# newest point is 0 (drained). The metric reaches CloudWatch a minute or more
+# after the fact, so this waits instead of reading once.
+wait_queue() {
+  local since="$1" want="$2" start="${SECONDS}" rows shown peak last
+  echo
+  echo "\$ aws cloudwatch get-metric-statistics --namespace AWS/AmazonMQ --metric-name MessageCount --dimensions Name=Broker,Value=${NAME_PREFIX}-rabbitmq --start-time ${since} --end-time \$(date -u +%FT%TZ) --period 60 --statistics Maximum --query 'sort_by(Datapoints,&Timestamp)[].[Timestamp,Maximum]' --output text    # every 20 s, up to ${DRILL_WAIT} s"
+  pause
+  while :; do
+    rows="$(aws cloudwatch get-metric-statistics --namespace AWS/AmazonMQ --metric-name MessageCount \
+              --dimensions "Name=Broker,Value=${NAME_PREFIX}-rabbitmq" \
+              --start-time "${since}" --end-time "$(date -u +%FT%TZ)" --period 60 --statistics Maximum \
+              --query 'sort_by(Datapoints,&Timestamp)[].[Timestamp,Maximum]' --output text 2>/dev/null)"
+    shown="$(printf '%s\n' "${rows}" | awk 'NF == 2 {printf "%s%s %s", sep, substr($1, 12, 5), $2 + 0; sep = ", "}')"
+    note "$((SECONDS - start)) s: messages per minute (UTC): ${shown:-no datapoint yet}"
+    peak="$(printf '%s\n' "${rows}" | awk 'NF == 2 && $2 + 0 > m {m = $2 + 0} END {print m + 0}')"
+    last="$(printf '%s\n' "${rows}" | awk 'NF == 2 {v = $2 + 0} END {print v}')"
+    case "${want}" in
+      queued)  [ "${peak}" -ge 1 ] 2>/dev/null && return 0 ;;
+      drained) [ "${last}" = 0 ] && return 0 ;;
+    esac
+    [ $((SECONDS - start)) -ge "${DRILL_WAIT}" ] && return 1
+    sleep 20
+  done
+}
+
+# wait_order USER_ID: poll GET /api/billing/orders until the order is listed.
+ORDER=""
+wait_order() {
+  local uid="$1" start="${SECONDS}" url code
+  url="$(tfo billing_orders_url)"
+  echo
+  echo "\$ curl -sS -H \"Authorization: Bearer \$TOKEN\" ${url} | jq '.orders[] | select(.user_id == ${uid})'    # every 10 s, up to ${DRILL_WAIT} s"
+  pause
+  while :; do
+    code="$(curl -sS -m 20 -H "Authorization: Bearer ${TOKEN}" -o "${TMP}/orders" -w '%{http_code}' "${url}" 2>/dev/null)"
+    ORDER="$(jq -c --arg u "${uid}" '[.orders[]? | select((.user_id | tostring) == $u)] | last // empty' "${TMP}/orders" 2>/dev/null)"
+    if [ -n "${ORDER}" ]; then
+      printf '%s\n' "${ORDER}" | jq .
+      return 0
+    fi
+    note "$((SECONDS - start)) s: HTTP ${code:-000}, the order is not listed yet"
+    [ $((SECONDS - start)) -ge "${DRILL_WAIT}" ] && return 1
+    sleep 10
+  done
+}
+
 sec_billing() {
   section "Billing service and queue resilience (B1, B2)" \
     "Q: with the billing service stopped, can a billing request still be sent?" \
     "Q: after the restart, was the queued request processed?"
-  describe_services "${SVC_BIL}" || bad "aws ecs describe-services failed for billing-app"
-  cap aws application-autoscaling describe-scalable-targets --service-namespace ecs \
-    --resource-ids "service/${CLUSTER}/${SVC_BIL}" \
-    --query 'ScalableTargets[].{min:MinCapacity,max:MaxCapacity,suspended:SuspendedState}' --output json \
-    || bad "could not read the billing-app scalable target"
-  cap aws cloudwatch get-metric-statistics --namespace AWS/AmazonMQ --metric-name MessageCount \
-    --dimensions "Name=Broker,Value=${NAME_PREFIX}-rabbitmq" \
-    --start-time "$(ago 15)" --end-time "$(date -u +%FT%TZ)" \
-    --period 60 --statistics Maximum \
-    --query 'sort_by(Datapoints,&Timestamp)[-5:].{time:Timestamp,messages:Maximum}' --output table \
-    || bad "could not read the queue depth"
-  if get_token; then
-    http GET "$(tfo billing_orders_url)" "${TOKEN}"
-    expect_code 200 "GET /api/billing/orders"
-    note "orders stored: $(printf '%s' "${BODY}" | jq -r '.orders | length' 2>/dev/null)"
-  else
-    skip "no Cognito token, so the orders cannot be listed"
+  local resource="service/${CLUSTER}/${SVC_BIL}" alarm="${NAME_PREFIX}-billing-app-consumers-below-min"
+  local started uid body since orders_url suspended_before
+  started="$(date -u +%FT%TZ)"
+  orders_url="$(tfo billing_orders_url)"
+
+  # --- before: nothing is changed until every precondition holds
+  if ! get_token; then
+    skip "no Cognito token, so no order can be sent: the drill does not start"
+    return
   fi
-  skip "the stop, POST and restart drill is not in this script yet; this section only reads"
+  if ! describe_services "${SVC_BIL}" || ! jqc '.[0].desired >= 1 and .[0].running == .[0].desired and .[0].rollout == "COMPLETED"'; then
+    bad "billing-app is not steady (running tasks differ from desired, or a deployment is rolling): the drill does not start"
+    return
+  fi
+  DRILL_DESIRED="$(jqo '.[0].desired')"
+  if ! cap aws application-autoscaling describe-scalable-targets --service-namespace ecs --resource-ids "${resource}" \
+       --query 'ScalableTargets[0].{min:MinCapacity,max:MaxCapacity,suspended:SuspendedState}' --output json \
+     || ! jqc '.min != null and .max != null'; then
+    bad "could not read billing-app's scalable target: the drill does not start"
+    return
+  fi
+  DRILL_MIN="$(jqo '.min')"
+  DRILL_MAX="$(jqo '.max')"
+  DRILL_SUSPENDED="$(jqo '.suspended // {} | "DynamicScalingInSuspended=\(.DynamicScalingInSuspended // false),DynamicScalingOutSuspended=\(.DynamicScalingOutSuspended // false),ScheduledScalingSuspended=\(.ScheduledScalingSuspended // false)"')"
+  suspended_before="$(jqo -c "${SUSPENDED_JQ}")"
+  note "before the drill: ${DRILL_DESIRED} task(s), min ${DRILL_MIN}, max ${DRILL_MAX}, ${DRILL_SUSPENDED}"
+  note "While the consumers are down, ${alarm} fires and emails the alerts topic. That is expected."
+
+  # --- 1. pause auto scaling, so nothing starts a consumer during the outage.
+  # Lower the minimum while billing-app still runs its tasks: a register call
+  # moves the task count into [min, max] at once, so min 0 must come first.
+  echo
+  echo "--- 1. pause billing-app's auto scaling (minimum 0, scale-in, scale-out and scheduled scaling suspended)"
+  DRILL_ACTIVE=1
+  if ! cap aws application-autoscaling register-scalable-target --service-namespace ecs \
+       --scalable-dimension ecs:service:DesiredCount --resource-id "${resource}" --min-capacity 0 \
+       --suspended-state DynamicScalingInSuspended=true,DynamicScalingOutSuspended=true,ScheduledScalingSuspended=true \
+       --output json; then
+    bad "could not pause the auto scaling: the drill stops here"
+    drill_restore
+    return
+  fi
+  ok "auto scaling paused: minimum 0, every scaling activity suspended"
+
+  # --- 2. stop the only consumer
+  echo
+  echo "--- 2. stop billing-app (desired count 0)"
+  cap aws ecs update-service --cluster "${CLUSTER}" --service "${SVC_BIL}" --desired-count 0 \
+    --query 'service.{service:serviceName,desired:desiredCount,running:runningCount}' --output json \
+    || bad "aws ecs update-service --desired-count 0 failed"
+  if wait_billing_running 0; then
+    ok "billing-app runs 0 tasks: no consumer is reading the queue"
+  else
+    bad "billing-app still runs tasks after ${DRILL_WAIT} s"
+  fi
+  http GET "${orders_url}" "${TOKEN}"
+  if [ "${CODE}" = 503 ]; then
+    ok "GET /api/billing/orders answers 503: billing-app is really down"
+  else
+    warn "GET /api/billing/orders answered ${CODE}, not 503, while billing-app is stopped"
+  fi
+
+  # --- 3. B1: the order is accepted with no consumer running
+  echo
+  echo "--- 3. send an order through API Gateway while billing-app is stopped (B1)"
+  uid="$(date +%s)"
+  body="$(jq -cn --arg u "${uid}" '{user_id: $u, number_of_items: "2", total_amount: "49.99"}')"
+  since="$(date -u +%Y-%m-%dT%H:%M:00Z)"
+  http POST "${API}/api/billing" "${TOKEN}" "${body}"
+  expect_code 200 "B1: API Gateway accepted the order with no billing-app task running"
+  note "the order is marked by user_id ${uid}"
+
+  # --- 4. the order waits in the queue
+  echo
+  echo "--- 4. the order waits in the queue (broker MessageCount)"
+  if wait_queue "${since}" queued; then
+    ok "the broker holds the message while no consumer runs"
+  else
+    warn "MessageCount showed no queued message within ${DRILL_WAIT} s (the metric lags; the order check below still decides B2)"
+  fi
+
+  # --- 5. start the consumer again
+  echo
+  echo "--- 5. start billing-app again (desired count ${DRILL_DESIRED})"
+  cap aws ecs update-service --cluster "${CLUSTER}" --service "${SVC_BIL}" --desired-count "${DRILL_DESIRED}" \
+    --query 'service.{service:serviceName,desired:desiredCount,running:runningCount}' --output json \
+    || bad "aws ecs update-service --desired-count ${DRILL_DESIRED} failed"
+  if wait_billing_running "${DRILL_DESIRED}"; then
+    ok "billing-app runs ${DRILL_DESIRED} task(s) again"
+  else
+    bad "billing-app did not reach ${DRILL_DESIRED} running task(s) within ${DRILL_WAIT} s"
+  fi
+
+  # --- 6. B2: the queued order was processed
+  echo
+  echo "--- 6. the queued order was processed (B2)"
+  if wait_order "${uid}"; then
+    ok "B2: the order sent during the outage is stored in the billing database"
+  else
+    bad "B2: the order of user_id ${uid} is not listed after ${DRILL_WAIT} s"
+  fi
+  if cap aws logs tail "/aws/microservices/${NAME_PREFIX}/billing-app" --since 30m --filter-pattern "\"${uid}\""; then
+    if printf '%s' "${OUT}" | grep -q "Successfully processed and recorded order"; then
+      ok "the billing-app log shows the consumer receiving and recording the order"
+    else
+      warn "no 'Successfully processed' line for user ${uid} in the billing-app log yet"
+    fi
+  else
+    warn "could not read the billing-app log group"
+  fi
+  if wait_queue "${since}" drained; then
+    ok "MessageCount is back to 0: the queue is drained"
+  else
+    warn "MessageCount has not shown 0 yet (the metric lags)"
+  fi
+  cap aws cloudwatch describe-alarm-history --alarm-name "${alarm}" --history-item-type StateUpdate \
+    --start-date "${started}" --query 'AlarmHistoryItems[].{time:Timestamp,summary:HistorySummary}' --output table \
+    || true
+  note "${alarm} goes to ALARM after 3 one-minute periods with fewer than ${DRILL_MIN} running tasks"
+  note "(cloudwatch.tf) and back to OK once Container Insights reports the tasks again."
+
+  # --- 7. restore the auto scaling exactly as it was
+  echo
+  echo "--- 7. restore billing-app's auto scaling (minimum ${DRILL_MIN}, maximum ${DRILL_MAX}, as before)"
+  if cap aws application-autoscaling register-scalable-target --service-namespace ecs \
+       --scalable-dimension ecs:service:DesiredCount --resource-id "${resource}" \
+       --min-capacity "${DRILL_MIN}" --max-capacity "${DRILL_MAX}" --suspended-state "${DRILL_SUSPENDED}" \
+       --output json; then
+    DRILL_ACTIVE=0
+  else
+    bad "could not restore the auto scaling (the exit trap tries again)"
+  fi
+  if cap aws application-autoscaling describe-scalable-targets --service-namespace ecs --resource-ids "${resource}" \
+       --query 'ScalableTargets[0].{min:MinCapacity,max:MaxCapacity,suspended:SuspendedState}' --output json \
+     && jqc --argjson min "${DRILL_MIN}" --argjson max "${DRILL_MAX}" --argjson sus "${suspended_before}" \
+          ".min == \$min and .max == \$max and (${SUSPENDED_JQ}) == \$sus"; then
+    ok "auto scaling restored: min ${DRILL_MIN}, max ${DRILL_MAX}, ${DRILL_SUSPENDED}"
+  else
+    bad "billing-app's scalable target does not match the values read before the drill"
+  fi
 }
 
 sec_load() {

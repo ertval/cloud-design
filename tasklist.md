@@ -97,7 +97,7 @@ The biggest saving of all costs nothing: deploy shortly before the audit and des
 ## Phase 3: Demo and audit tooling
 
 - [x] ~~**T21** Create an AWS demo script (e.g. `scripts/aws-demo.sh` or `make aws-*` targets) with one section per live question: verify (V1-V2), load balancing (V3), 401 and Cognito (S2-S3), POST/GET movies (F1-F2), billing drill (B1-B2), load test (O1-O2), security evidence (S1). (4)~~
-- [ ] **T22** Inside T21, implement the billing drill with the autoscaler handled: set min capacity 0 or suspend scaling, scale `billing-app` to 0, POST through API Gateway, show `MessageCount`, scale back to 2, show the order via `GET /api/billing/orders` and the logs, restore scaling. (4.7)
+- [x] ~~**T22** Inside T21, implement the billing drill with the autoscaler handled: set min capacity 0 or suspend scaling, scale `billing-app` to 0, POST through API Gateway, show `MessageCount`, scale back to 2, show the order via `GET /api/billing/orders` and the logs, restore scaling. (4.7)~~
 - [ ] **T23** Add an AWS mode to `scripts/run-audit-checks.sh` and `scripts/step_by_step_audit.py` covering the new questions, keeping PASS / FAIL / INVALID semantics. (6.3)
 - [ ] **T24** Point the scripts at `docs/cloud-design-questions.md` as the rubric (D4). `docs/audit.md` is kept, so the existing check in `scripts/test_cloud.sh:53-59` still passes; add a second check for the new file. (6.3)
 
