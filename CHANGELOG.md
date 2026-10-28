@@ -773,3 +773,37 @@ Only `consumers-below-min` is expected to fire. The backlog alarm needs more tha
 
 **Next**
 - T37 [AWS] runs this drill on the live stack and captures the B1/B2 evidence.
+
+## 2026-10-28 23:52 EET: T37 preparation, saved and masked evidence in scripts/aws-demo.sh
+
+**What**
+- `scripts/aws-demo.sh`:
+  - New `--save` option. From the banner on, everything printed also goes to `evidence/aws/<UTC run id>-<sections>.txt` (`EVIDENCE_DIR` overrides the folder). The copy is redacted by `redact()`: the account ID becomes `<account-id>`, the IAM user or assumed role in ARNs becomes `<iam-principal>`, and the `UserId` becomes `<user-id>`. The screen output stays complete. `--save` stops with a message if the account ID cannot be read, since it could not be masked. The run ends by printing the file's path.
+  - `on_exit` stops a pending poll sleep and then waits only for the save pipeline (`SAVE_PID`), so the copy is complete when the script returns and Ctrl-C is not delayed.
+  - New `nap()` replaces the three poll `sleep`s in the billing drill. A signal now interrupts the wait at once, where before the trap ran only after the current 10 or 20 s sleep.
+  - The header USAGE and ENVIRONMENT text are updated.
+- `README.md`: the "Live AWS demo" usage block shows `--save`, plus a paragraph on what the copy masks.
+
+**Why**
+The user asked to implement T37: run the billing drill on the live stack and capture the B1/B2 evidence.
+
+The read-only checks found nothing deployed: no `terraform/terraform.tfvars`, no Terraform state, no ECS cluster and no resource tagged `Project=cloud-design` in us-east-1. No `AWS/Billing` metrics exist yet, so T26 is still open. The user chose one live session for T30 to T39, after doing T26 and T29 themselves, with the evidence saved.
+
+The raw output contains the account ID (ARNs, the ECR URL) and the IAM user name (`get-caller-identity`), which must not land in a repository that may be published; hence the masking. T37 itself stays open until the live run.
+
+**Verified**
+- `bash -n` and ShellCheck 0.11.0 are clean.
+- Stub runs with `EVIDENCE_DIR` under `/tmp`, so no `evidence/` folder was created in the repo:
+  - `--save verify billing`: the copy had all 191 lines of the screen. The stub account ID appeared 8 times on screen and 0 times in the file, and the IAM user and the UserId were masked.
+  - `--save verify lb auth movies billing security`: 374 of 374 lines, no account ID, no masked secret, PASS=65 FAIL=0.
+  - SIGINT during a saved drill: exit 130 after 0 s (20 s before `nap()` and the `on_exit` change). The `[RESTORE]` lines are in the file, billing-app is back at desired 2 and min 2, and no poll `sleep` is left running.
+  - An early `die` with `--save`: exit 1 with the message, and no error from the trap.
+- Scratch copy: `test_cloud.sh` 66 checks passed, 2 warnings. `run-audit-checks.sh --static` PASS=163 FAIL=0 INVALID=8 NOTES=51.
+- Read-only AWS calls under the `cloud-design` profile: `sts get-caller-identity`, `ecs list-clusters`, `resourcegroupstaggingapi get-resources` (0 resources), `cloudwatch list-metrics --namespace AWS/Billing` (0 metrics).
+
+**Sources**
+- [Create a billing alarm to monitor your estimated AWS charges, Amazon CloudWatch User Guide](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/monitor_estimated_charges_with_cloudwatch.html): the console path for T26 (Billing Preferences, Alert preferences, Edit, Receive CloudWatch Billing Alerts), the data in us-east-1, and about 15 minutes until the data appears.
+
+**Next**
+- The user: T26 (billing alerts) and T29 (`terraform/terraform.tfvars` with `alarm_email`).
+- Then T30 (`AUTO_APPROVE=true ./scripts/deploy.sh`) to T32, and T33 to T39 with `scripts/aws-demo.sh --save`, including the billing drill for T37.

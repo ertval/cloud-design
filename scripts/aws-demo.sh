@@ -54,6 +54,7 @@ set -uo pipefail
 #   scripts/aws-demo.sh verify           # one section
 #   scripts/aws-demo.sh auth movies      # several, in this order
 #   scripts/aws-demo.sh --pause all      # wait for Enter before each command
+#   scripts/aws-demo.sh --save billing   # also keep a copy of the run as evidence
 #   LB_REQUESTS=200 scripts/aws-demo.sh lb
 #   LOAD_DURATION=420 LOAD_CONCURRENCY=48 scripts/aws-demo.sh load
 #
@@ -69,6 +70,9 @@ set -uo pipefail
 #   DRILL_WAIT        seconds `billing` waits at each step: the tasks stopping,
 #                     the queued message in CloudWatch, the tasks starting, the
 #                     order stored, the queue drained (default 420)
+#   EVIDENCE_DIR      where --save writes (default evidence/aws). The saved copy
+#                     masks the account ID, the IAM user in ARNs and the
+#                     UserId, so it can be committed; the screen shows all
 #
 # NEEDS: aws (v2), terraform (reads the outputs of terraform/), jq, curl;
 #        openssl for the Cognito token, python3 for `load`, zcat for `lb`.
@@ -88,6 +92,9 @@ LOAD_CONCURRENCY="${LOAD_CONCURRENCY:-32}"
 LOAD_PATH="${LOAD_PATH:-/api/movies}"
 DRILL_WAIT="${DRILL_WAIT:-420}"
 PAUSE=0
+SAVE=0
+SAVE_FILE=""; SAVE_PID=""
+EVIDENCE_DIR="${EVIDENCE_DIR:-${ROOT_DIR}/evidence/aws}"
 ALL_SECTIONS=(verify lb auth movies billing security load)
 KNOWN_SECTIONS=" verify lb lb-split auth movies billing load scaling security all "
 
@@ -102,6 +109,7 @@ add_section() {
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --pause) PAUSE=1 ;;
+    --save) SAVE=1 ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
     *)
@@ -209,6 +217,7 @@ TMP="$(mktemp -d)"
 # scaling paused. If the script stops for any reason before the drill's last
 # step (a failed command, `die`, Ctrl-C), the EXIT trap puts both back.
 DRILL_ACTIVE=0; DRILL_DESIRED=""; DRILL_MIN=""; DRILL_MAX=""; DRILL_SUSPENDED=""
+NAP_PID=""
 # The three suspended flags as one comparable JSON value.
 SUSPENDED_JQ='.suspended // {} | [.DynamicScalingInSuspended, .DynamicScalingOutSuspended, .ScheduledScalingSuspended] | map(. // false)'
 drill_restore() {
@@ -227,7 +236,14 @@ drill_restore() {
     --suspended-state "${DRILL_SUSPENDED}" >/dev/null \
     || echo "[RESTORE] register-scalable-target failed: run the command above by hand"
 }
-on_exit() { drill_restore; rm -rf "${TMP}"; }
+on_exit() {
+  drill_restore
+  rm -rf "${TMP}"
+  [ -n "${NAP_PID}" ] && kill "${NAP_PID}" 2>/dev/null
+  # Let the --save pipeline write its last lines before the script returns.
+  if [ -n "${SAVE_PID}" ]; then exec >&- 2>&-; wait "${SAVE_PID}" 2>/dev/null; fi
+  return 0
+}
 trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -291,6 +307,24 @@ SVC_BIL="$(printf '%s' "${TF_OUT}" | jq -r '.ecs_service_names.value["billing-ap
 NAME_PREFIX="${CLUSTER%-ecs-cluster}"
 ECR_REGISTRY="$(tfo ecr_registry_url)"
 ACCOUNT_TF="${ECR_REGISTRY%%.*}"
+
+# --save: from here on, everything printed also goes, redacted, to SAVE_FILE.
+redact() {
+  sed -E \
+    -e "s/${ACCOUNT_TF:-ACCOUNT_UNKNOWN}/<account-id>/g" \
+    -e 's#(arn:aws:(iam|sts)::[^:]*:(user|assumed-role)/)[A-Za-z0-9+=,.@_/-]+#\1<iam-principal>#g' \
+    -e 's/("UserId": *")[^"]+/\1<user-id>/g'
+}
+if [ "${SAVE}" -eq 1 ]; then
+  case "${ACCOUNT_TF}" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+    *) die "--save needs the account ID from the ecr_registry_url output, to mask it" ;;
+  esac
+  mkdir -p "${EVIDENCE_DIR}" || die "cannot create ${EVIDENCE_DIR}"
+  SAVE_FILE="${EVIDENCE_DIR}/${RUN_ID}-$(IFS=-; echo "${SECTIONS[*]}").txt"
+  exec > >(tee >(redact > "${SAVE_FILE}")) 2>&1
+  SAVE_PID=$!
+fi
 
 echo "=================================================================="
 echo " cloud-design: live AWS demo"
@@ -736,6 +770,10 @@ sec_movies() {
   fi
 }
 
+# nap SECONDS: a sleep that a signal interrupts at once, so the traps run
+# without waiting for the current poll interval to end.
+nap() { sleep "$1" & NAP_PID=$!; wait "${NAP_PID}"; NAP_PID=""; }
+
 # billing_counts: "running pending desired" for billing-app.
 billing_counts() {
   aws ecs describe-services --cluster "${CLUSTER}" --services "${SVC_BIL}" \
@@ -753,7 +791,7 @@ wait_billing_running() {
     note "$((SECONDS - start)) s: running ${running:-?}, pending ${pending:-?}"
     if [ "${running:-}" = "${want}" ] && [ "${pending:-}" = 0 ]; then return 0; fi
     [ $((SECONDS - start)) -ge "${DRILL_WAIT}" ] && return 1
-    sleep 10
+    nap 10
   done
 }
 
@@ -780,7 +818,7 @@ wait_queue() {
       drained) [ "${last}" = 0 ] && return 0 ;;
     esac
     [ $((SECONDS - start)) -ge "${DRILL_WAIT}" ] && return 1
-    sleep 20
+    nap 20
   done
 }
 
@@ -801,7 +839,7 @@ wait_order() {
     fi
     note "$((SECONDS - start)) s: HTTP ${code:-000}, the order is not listed yet"
     [ $((SECONDS - start)) -ge "${DRILL_WAIT}" ] && return 1
-    sleep 10
+    nap 10
   done
 }
 
@@ -1251,4 +1289,7 @@ echo
 echo "=================================================================="
 echo " Result: PASS=${PASS} FAIL=${FAIL} WARN=${WARN} SKIP=${SKIP}"
 echo "=================================================================="
+if [ -n "${SAVE_FILE}" ]; then
+  echo " Evidence (account ID and IAM user masked): ${SAVE_FILE#"${ROOT_DIR}/"}"
+fi
 [ "${FAIL}" -eq 0 ]

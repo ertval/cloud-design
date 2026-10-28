@@ -976,7 +976,14 @@ scripts/aws-demo.sh --help            # sections, environment variables, exit co
 scripts/aws-demo.sh verify            # one section
 scripts/aws-demo.sh auth movies       # several, in this order
 scripts/aws-demo.sh --pause all       # wait for Enter before each command
+scripts/aws-demo.sh --save billing    # also keep a copy in evidence/aws/
 ```
+
+`--save` writes a copy of the whole run to
+`evidence/aws/<UTC time>-<sections>.txt` (`EVIDENCE_DIR` changes the folder).
+The copy masks the account ID, the IAM user in ARNs and the `UserId` as
+`<account-id>`, `<iam-principal>` and `<user-id>`, so it can be committed; the
+screen keeps the full output.
 
 | Section | Questions | What it shows |
 |---|---|---|
