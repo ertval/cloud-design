@@ -275,3 +275,52 @@ The user decided not to edit the read-only docs yet and asked for the T15 docs t
 
 **Verified**
 Read the current lines in `docs/HANDOFF.md` and `docs/AUDIT_GUIDE.md` (read only) and searched `docs/` for other claims that nothing writes to the bucket: only the lines above. Resource count from `grep -c '^resource ' terraform/storage.tf` (7, same as at HEAD).
+
+## 2026-10-28 18:32 EET: T12-T14 docs text recorded, docs not changed yet
+
+**What**
+- `CHANGELOG.md`: this entry stores the replacement text for the lines in `docs/AUDIT_GUIDE.md` (read-only) that T12-T14 made stale: the dashboard grew from 6 to 8 widgets, and the alarms from 11 to 13, which puts `cloudwatch.tf` at 22 resources. The text was given in chat after T12-T14 and is now written out as whole replacement lines. No file in `docs/` was changed.
+
+Pending docs changes in `docs/AUDIT_GUIDE.md`:
+
+1. Lines 550-553, the "A 6-widget dashboard" bullet. Replace the four lines with:
+
+```
+- **An 8-widget dashboard** `cloud-design-prod-observability`: API Gateway traffic
+  + 4xx/5xx; ALB request volume and target latency; both RDS instances' CPU and
+  connections; RabbitMQ `MessageCount`; ALB healthy/unhealthy targets per target
+  group; ECS per-service CPU; and two Logs Insights widgets (errors per service,
+  recent API Gateway 5xx).
+```
+
+2. Line 1126. Replace with:
+
+```
+| Monitoring | 13 alarms, 8-widget dashboard, 4 log groups, SNS topic **with a policy** |
+```
+
+3. Line 1790. Replace with:
+
+```
+Every one of the 13 alarms has `alarm_actions` pointing at an SNS topic **that has a
+```
+
+4. Line 2740. Replace with:
+
+```
+| `cloudwatch.tf` | 22 | 4 log groups, SNS topic + topic policy + email subscription, 13 alarms, 8-widget dashboard, budget, billing alarm |
+```
+
+5. Line 2766. Replace with:
+
+```
+| `:84` monitoring | 4 log groups with retention; 13 alarms; SNS topic **with** topic policy (13 alarm actions); 8-widget dashboard; `aws_api_gateway_account` | STATIC |
+```
+
+Not covered here: some lines next to these hold numbers that earlier tasks made stale, for example line 1124 (142 resources, 33 variables; now 34 variables), line 2739 (autoscaling min 1, now min 2, and 6 resources in `autoscaling.tf`) and line 2767 (`desired_count` 1/1/2, now 2/2/2). They belong to the T50 docs pass.
+
+**Why**
+The user asked for the T12-T14 docs text to be recorded in the changelog the same way as the T15 text, so it is kept until the read-only docs are edited.
+
+**Verified**
+Read the current lines 550-553, 1124-1126, 1790, 2739-2741 and 2766-2767 (read only); `grep` over `docs/` found no other line with the old alarm or widget counts. Counts checked against the Terraform at HEAD (05187af): 22 `resource` blocks in `cloudwatch.tf`, 13 `aws_cloudwatch_metric_alarm` (all in `cloudwatch.tf`) with 13 `alarm_actions`, 6 metric plus 2 log widgets, 4 log groups, 34 variables, 6 resources in `autoscaling.tf`.
