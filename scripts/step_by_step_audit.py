@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
-"""Drive the cloud-design docs/audit.md walkthrough through a Herdr pane.
+"""Drive the cloud-design audit walkthrough through a Herdr pane.
+
+The rubric is docs/cloud-design-questions.md; every step title cites the line
+it answers. docs/audit.md, the earlier version of the rubric, is kept.
 
 Why a driver instead of a plain script: during the audit the examiner wants to
 see each command typed and its real output. This sends the *literal* rubric
 commands to a terminal pane (one per step, with a header), waits for the shell
 prompt to come back, and leaves the whole transcript on screen.
 
-Steps are grouped into SECTIONS so `--only` can select a rubric area rather than
-a single command, and so the driver composes with scripts/run-audit-checks.sh:
-the same section numbers address the same audit.md questions in both tools.
+Steps are grouped into SECTIONS so `--section` can select a rubric area rather
+than a single command. The section numbers are this driver's own; they do not
+match the sections of scripts/run-audit-checks.sh, so the rubric line in each
+title is what ties the two tools together.
+
+AWS MODE (--aws) adds section 14: the questions only the deployed stack can
+answer, as literal aws / curl commands (the deployment, target health, the 401)
+plus scripts/aws-demo.sh for the flows that need a Cognito token (the movies
+API, the billing outage drill) and for the security evidence. It needs
+`export AWS_PROFILE=cloud-design` and a deployed stack.
 
 PANE DISCOVERY -- there is deliberately NO hardcoded pane id.
     herdr pane list
@@ -23,6 +33,7 @@ Usage:
     scripts/step_by_step_audit.py --only 9
     scripts/step_by_step_audit.py --section 10 --end 12
     scripts/step_by_step_audit.py --pane w3:p1
+    scripts/step_by_step_audit.py --aws --section 14 --pane w3:p1
 
 Exit codes: 0 ok, 2 bad usage / no pane, 3 herdr not installed.
 """
@@ -40,119 +51,121 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # --------------------------------------------------------------------------
 # The walkthrough. (section, title, command, mutates_state)
-# The commands are the ones docs/audit.md asks the auditee to demonstrate.
+# The commands are the ones docs/cloud-design-questions.md asks the learner to
+# demonstrate.
 # --------------------------------------------------------------------------
 STEPS = [
-    # --- section 1: repo content (audit.md:11) -----------------------------
-    (1, "Repo content: required files, real counts (audit.md:11)",
+    # --- section 1: repo content (cloud-design-questions.md:11) -----------------------------
+    (1, "Repo content: required files, real counts (cloud-design-questions.md:11)",
      "ls -1 README.md Makefile docker-compose.yml .env.example && "
      "ls -d srcs manifests ecs-tasks scripts docs terraform && "
      "echo \"tf=$(ls -1 terraform/*.tf | wc -l)  manifests=$(ls -1 manifests/*.yaml | wc -l)  "
      "ecs=$(ls -1 ecs-tasks/*.json | wc -l)  dockerfiles=$(ls -1 srcs/*/Dockerfile | wc -l)\"", False),
-    (1, "audit.md used to live at the repo root; it is now docs/audit.md (audit.md:11)",
-     "ls -1 docs/ && grep -c '^######' docs/audit.md | xargs echo 'audit.md questions:'", False),
+    (1, "The rubric: docs/cloud-design-questions.md, with its earlier version docs/audit.md kept (cloud-design-questions.md:11)",
+     "ls -1 docs/ && for f in docs/cloud-design-questions.md docs/audit.md; do "
+     "printf '%s: %s questions\\n' \"$f\" \"$(grep -c '^######' \"$f\")\"; done", False),
 
     # --- section 2: the two-stack reality ----------------------------------
-    (2, "Tooling reality: what is and is not available (audit.md:62,70,76)",
+    (2, "Tooling reality: what is and is not available (cloud-design-questions.md:69,91,97)",
      "for t in docker kubectl k3d aws terraform jq curl; do "
      "printf '%-10s %s\\n' \"$t\" \"$(command -v $t 2>/dev/null || echo NOT-INSTALLED)\"; done", False),
 
-    # --- section 4: local stack, live (audit.md:64,66,90) ------------------
-    (4, "docker ps: every microservice running and healthy (audit.md:64)",
+    # --- section 4: local stack, live (cloud-design-questions.md:73,75,111) ------------------
+    (4, "docker ps: every microservice running and healthy (cloud-design-questions.md:73)",
      "docker compose ps", False),
-    (4, "Container health + non-root execution (audit.md:64,94)",
+    (4, "Container health + non-root execution (cloud-design-questions.md:73,115)",
      "for c in $(docker compose ps -q); do docker inspect -f '{{.Name}} {{.State.Status}} "
      "health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} "
      "user={{.Config.User}}' $c; done", False),
-    (4, "Live health endpoints through the load balancer (audit.md:64)",
+    (4, "Live health endpoints through the load balancer (cloud-design-questions.md:73)",
      "curl -s -i http://localhost:3000/health && echo && "
      "curl -s -i http://localhost:8081/ready && echo && curl -s -i http://localhost:8082/ready", False),
-    (4, "End-to-end: gateway -> inventory-app -> inventory-database (audit.md:64)",
+    (4, "End-to-end: gateway -> inventory-app -> inventory-database (cloud-design-questions.md:73)",
      "curl -s -i http://localhost:3000/api/movies/", False),
 
-    # --- section 5: load balancing, live (audit.md:66) ---------------------
-    (5, "Load balancing PROOF: 20 requests, then the per-replica upstream counts (audit.md:66)",
+    # --- section 5: load balancing, live (cloud-design-questions.md:75) ---------------------
+    (5, "Load balancing PROOF: 20 requests, then the per-replica upstream counts (cloud-design-questions.md:75)",
      "for i in $(seq 1 20); do curl -s -o /dev/null http://localhost:3000/health; done; "
      "docker compose logs --since=1m gateway-lb | grep -oE 'upstream=[0-9.]+:[0-9]+' | sort | uniq -c", False),
-    (5, "Static counterpart: the ALB target group the demo stands in for (audit.md:66)",
+    (5, "Static counterpart: the ALB target group the demo stands in for (cloud-design-questions.md:75)",
      "grep -nE '^resource \"aws_lb' terraform/alb.tf && "
      "grep -A 12 'aws_lb_target_group' terraform/alb.tf | grep -E 'port|health_check|path|target_type'", False),
 
-    # --- section 6: secure communication (audit.md:68,94) ------------------
-    (6, "Broker refuses anonymous management access (audit.md:68)",
+    # --- section 6: secure communication (cloud-design-questions.md:77,115) ------------------
+    (6, "Broker refuses anonymous management access (cloud-design-questions.md:77)",
      "curl -s -o /dev/null -w 'no-credentials /api/overview -> HTTP %{http_code}\\n' "
      "http://localhost:15672/api/overview", False),
-    (6, "Queue round-trip: publish an order, watch the consumer drain it (audit.md:68,90)",
+    (6, "Queue round-trip: publish an order, watch the consumer drain it (cloud-design-questions.md:77,111)",
      "curl -s -X POST http://localhost:3000/api/billing/ -H 'Content-Type: application/json' "
      "-d '{\"user_id\": \"424242\", \"number_of_items\": \"7\", \"total_amount\": \"99\"}'; echo; "
      "docker exec cloud-design-rabbit-queue rabbitmqctl list_queues name messages 2>/dev/null | tail -3", True),
-    (6, "The order actually landed in PostgreSQL (audit.md:68)",
+    (6, "The order actually landed in PostgreSQL (cloud-design-questions.md:77)",
      "docker exec cloud-design-billing-database psql -U postgres -d billing_db "
      "-c \"SELECT user_id, number_of_items, total_amount FROM orders "
      "WHERE user_id='424242' ORDER BY id DESC LIMIT 3;\"", False),
-    (6, "Static: Cognito authorizer attached to every non-health API Gateway route (audit.md:68)",
+    (6, "Static: Cognito authorizer attached to every non-health API Gateway route (cloud-design-questions.md:77)",
      "grep -nE '^resource \"aws_apigatewayv2_route\"|authorizer_id' terraform/api_gateway.tf", False),
-    (6, "Static: KMS at rest, Secrets Manager, private data tier (audit.md:68,94)",
+    (6, "Static: KMS at rest, Secrets Manager, private data tier (cloud-design-questions.md:77,115)",
      "grep -c kms_key_id terraform/rds.tf | xargs echo 'rds kms_key_id refs:' && "
      "grep -rhc '^resource \"aws_secretsmanager_secret\"' terraform/*.tf | paste -sd+ | bc | xargs echo 'secrets:' && "
      "grep -n 'publicly_accessible' terraform/rds.tf terraform/amazon_mq.tf", False),
 
-    # --- section 7: the k3d cluster, live (audit.md:64,66,80,88) -----------
-    (7, "kubectl: the full stack in namespace cloud-design (audit.md:64)",
+    # --- section 7: the k3d cluster, live (cloud-design-questions.md:73,75,101,109) -----------
+    (7, "kubectl: the full stack in namespace cloud-design (cloud-design-questions.md:73)",
      "kubectl get pods -n cloud-design -o wide", False),
-    (7, "Services, ingress and network isolation (audit.md:64,68)",
+    (7, "Services, ingress and network isolation (cloud-design-questions.md:73,77)",
      "kubectl get svc,ingress -n cloud-design && echo && "
      "kubectl get networkpolicy -n cloud-design", False),
-    (7, "Auto-scaling actually live, with real metrics (audit.md:88)",
+    (7, "Auto-scaling actually live, with real metrics (cloud-design-questions.md:109)",
      "kubectl get hpa -n cloud-design && echo && kubectl top pods -n cloud-design 2>&1 | head -8", False),
 
-    # --- section 8: orchestration correctness (audit.md:80) ----------------
-    (8, "Why 'kubectl apply -f manifests/' is BROKEN and '-k' is required (audit.md:80)",
+    # --- section 8: orchestration correctness (cloud-design-questions.md:101) ----------------
+    (8, "Why 'kubectl apply -f manifests/' is BROKEN and '-k' is required (cloud-design-questions.md:101)",
      "kubectl apply -f manifests/ --dry-run=client 2>&1 | tail -4; echo \"exit=$?\"", False),
-    (8, "The supported path: kustomize build, then a server-side dry run (audit.md:80)",
+    (8, "The supported path: kustomize build, then a server-side dry run (cloud-design-questions.md:101)",
      "kubectl kustomize manifests/ | grep -c '^kind:' | xargs echo 'objects:' && "
      "kubectl apply --dry-run=server -k manifests/ 2>&1 | tail -6", False),
-    (8, "ECS task definitions: valid JSON, families and port mappings (audit.md:80)",
+    (8, "ECS task definitions: valid JSON, families and port mappings (cloud-design-questions.md:101)",
      "for j in ecs-tasks/*.json; do echo -n \"$j: \"; jq -c '{family, net:.networkMode, "
      "ports:[.containerDefinitions[].portMappings[].containerPort]}' \"$j\"; done", False),
 
-    # --- section 9: Dockerfile optimisation (audit.md:78) ------------------
-    (9, "Real Dockerfile analysis: base image, stages, USER, COPY --chmod (audit.md:78)",
+    # --- section 9: Dockerfile optimisation (cloud-design-questions.md:99) ------------------
+    (9, "Real Dockerfile analysis: base image, stages, USER, COPY --chmod (cloud-design-questions.md:99)",
      "for f in srcs/*/Dockerfile; do echo \"== $f\"; grep -nE '^FROM|^USER|^EXPOSE|^COPY .*--chmod' \"$f\"; done", False),
-    (9, "Real measured image sizes (audit.md:78)",
+    (9, "Real measured image sizes (cloud-design-questions.md:99)",
      "docker images --format '{{.Repository}}:{{.Tag}}  {{.Size}}' | grep '^cloud-design/' | sort", False),
 
-    # --- section 10: Terraform, statically (audit.md:72,74) ----------------
-    (10, "Terraform: module inventory and resource density (audit.md:72)",
+    # --- section 10: Terraform, statically (cloud-design-questions.md:93,95) ----------------
+    (10, "Terraform: module inventory and resource density (cloud-design-questions.md:93)",
      "ls -1 terraform/*.tf | wc -l | xargs echo 'tf files:' && "
      "grep -h '^resource ' terraform/*.tf | wc -l | xargs echo 'resources:' && "
      "for f in terraform/*.tf; do printf '%-24s %s\\n' \"$(basename $f)\" "
      "\"$(grep -c '^resource ' $f)\"; done", False),
-    (10, "Terraform: variables declared vs actually referenced (audit.md:72)",
+    (10, "Terraform: variables declared vs actually referenced (cloud-design-questions.md:93)",
      "echo \"declared: $(grep -c '^variable ' terraform/variables.tf)\"; "
      "echo \"referenced: $(grep -rhoE 'var\\.[a-z0-9_]+' terraform/*.tf | sort -u | wc -l)\"", False),
-    (10, "terraform validate/fmt are INVALID here: the binary is not installed (audit.md:72)",
+    (10, "terraform validate/fmt are INVALID here: the binary is not installed (cloud-design-questions.md:93)",
      "command -v terraform >/dev/null 2>&1 && terraform -chdir=terraform validate "
      "|| echo 'INVALID (tool not installed): terraform fmt/validate/plan cannot be run in this environment'", False),
-    (10, "Cost controls: budget, right-sizing, NAT toggle (audit.md:54)",
+    (10, "Cost controls: budget, right-sizing, NAT toggle (cloud-design-questions.md:61)",
      "grep -nE 'monthly_budget_limit|db.t4g.micro|mq.t3.micro|single_nat_gateway|skip_final_snapshot' "
      "terraform/variables.tf terraform/rds.tf terraform/vpc.tf | grep -v description", False),
 
-    # --- section 11: monitoring and security (audit.md:84,94) --------------
-    (11, "Monitoring: dashboard widgets, log groups, alarm count, SNS (audit.md:84)",
+    # --- section 11: monitoring and security (cloud-design-questions.md:105,115) --------------
+    (11, "Monitoring: dashboard widgets, log groups, alarm count, SNS (cloud-design-questions.md:105)",
      "grep -c 'type   = \"metric\"' terraform/cloudwatch.tf | xargs echo 'dashboard widgets:' && "
      "grep -c '^resource \"aws_cloudwatch_log_group\"' terraform/cloudwatch.tf | xargs echo 'log groups:' && "
      "grep -c '^resource \"aws_cloudwatch_metric_alarm\"' terraform/cloudwatch.tf | xargs echo 'metric alarms:' && "
      "grep -cE '^resource \"aws_sns_topic(_policy)?\"' terraform/cloudwatch.tf | xargs echo 'sns topic+policy:'", False),
-    (11, "Security: internal ALB behind HTTPS API Gateway, Inspector v2, ECR scan-on-push, no hardcoded creds (audit.md:94)",
+    (11, "Security: internal ALB behind HTTPS API Gateway, Inspector v2, ECR scan-on-push, no hardcoded creds (cloud-design-questions.md:115)",
      "grep -nE 'internal *=|protocol *=|ssl_policy|server_name_to_verify' terraform/alb.tf terraform/api_gateway.tf | head -8; echo; "
      "grep -rn 'aws_inspector2\\|scan_on_push' terraform/*.tf; echo; "
      "grep -rnE 'getenv\\([^)]*, *\"[^\"]*pass' srcs/ || echo 'no hardcoded password defaults in srcs/'", False),
-    (11, "No credentials committed: secrets.yaml is placeholders only (audit.md:94)",
+    (11, "No credentials committed: secrets.yaml is placeholders only (cloud-design-questions.md:115)",
      "grep -E '^[[:space:]]+[A-Z0-9_]+:[[:space:]]*\"' manifests/secrets.yaml", False),
 
-    # --- section 12: load, live (audit.md:90) ------------------------------
-    (12, "Throughput and latency under real concurrent load (audit.md:90)",
+    # --- section 12: load, live (cloud-design-questions.md:111) ------------------------------
+    (12, "Throughput and latency under real concurrent load (cloud-design-questions.md:111)",
      "S=$(date +%s.%N); seq 1 200 | xargs -P 20 -I{} curl -s -m 10 -o /dev/null "
      "-w '%{http_code} %{time_total}\\n' http://localhost:3000/health > /tmp/l.txt; "
      "E=$(date +%s.%N); echo \"elapsed: $(echo \"$E - $S\"|bc)s\"; "
@@ -160,7 +173,7 @@ STEPS = [
      "echo \"latency:\"; sort -k2 -g /tmp/l.txt | awk '{a[NR]=$2;s+=$2} "
      "END{printf \"min=%.1fms avg=%.1fms p95=%.1fms max=%.1fms\\n\", a[1]*1000, (s/NR)*1000, "
      "a[int(NR*0.95)+1]*1000, a[NR]*1000}'", False),
-    (12, "Load-balancer distribution observed under that load (audit.md:66,90)",
+    (12, "Load-balancer distribution observed under that load (cloud-design-questions.md:75,111)",
      "docker compose logs --since=2m gateway-lb | grep -oE 'upstream=[0-9.]+:[0-9]+' | sort | uniq -c", False),
 
     # --- section 13: the full automated suite (composes with run-audit-checks.sh)
@@ -170,7 +183,41 @@ STEPS = [
      "./scripts/test_cloud.sh", False),
 ]
 
-SECTIONS = sorted({s for s, _, _, _ in STEPS})
+# --------------------------------------------------------------------------
+# AWS mode (--aws): the questions only the deployed stack can answer. The
+# Terraform outputs of this checkout name the cluster and the API, so the
+# commands reach the stack this repository deployed and nothing else.
+# --------------------------------------------------------------------------
+TFO = "terraform -chdir=terraform output"
+AWS_STEPS = [
+    (14, "AWS: who runs this, in which account; the account is shared, so AWS_PROFILE=cloud-design (cloud-design-questions.md:69,71)",
+     "echo \"AWS_PROFILE=${AWS_PROFILE:-<unset>}\" && aws sts get-caller-identity --query Arn --output text", False),
+    (14, "ECS: every service ACTIVE, desired tasks running, no rollout pending (cloud-design-questions.md:71,73)",
+     f"C=$({TFO} -raw ecs_cluster_name); aws ecs describe-services --cluster \"$C\" "
+     f"--services $({TFO} -json ecs_service_names | jq -r '.[]') "
+     "--query 'services[].{service:serviceName,status:status,desired:desiredCount,running:runningCount,"
+     "rollout:deployments[0].rolloutState}' --output table", False),
+    (14, "ECS tasks per AZ, RUNNING and HEALTHY: the Fargate answer to 'docker ps' (cloud-design-questions.md:69,73)",
+     f"C=$({TFO} -raw ecs_cluster_name); aws ecs describe-tasks --cluster \"$C\" "
+     "--tasks $(aws ecs list-tasks --cluster \"$C\" --query taskArns --output text) "
+     "--query 'tasks[].{group:group,az:availabilityZone,last:lastStatus,health:healthStatus}' --output table", False),
+    (14, "ALB target health behind API Gateway: two healthy api-gateway targets (cloud-design-questions.md:75)",
+     "aws elbv2 describe-target-health --target-group-arn \"$(aws elbv2 describe-target-groups "
+     "--names cloud-design-prod-apigw-tg --query 'TargetGroups[0].TargetGroupArn' --output text)\" "
+     "--query 'TargetHealthDescriptions[].{target:Target.Id,port:Target.Port,state:TargetHealth.State}' --output table", False),
+    (14, "No token, no entry: API Gateway answers 401; GET /health is public (cloud-design-questions.md:117)",
+     f"API=$({TFO} -raw api_gateway_invoke_url); "
+     "curl -s -o /dev/null -w 'GET /api/movies without a token -> HTTP %{http_code}\\n' \"$API/api/movies\"; "
+     "curl -s -o /dev/null -w 'GET /health without a token     -> HTTP %{http_code}\\n' \"$API/health\"", False),
+    (14, "Cognito token, 401 and 200, the JWT authorizer; then POST and GET a movie (cloud-design-questions.md:81,83,117,119)",
+     "scripts/aws-demo.sh auth movies", True),
+    (14, "Billing outage drill: stop billing-app, POST, MessageCount, restart, order stored (cloud-design-questions.md:87,89)",
+     "scripts/aws-demo.sh billing", True),
+    (14, "Security: HTTPS edge, internal ALB, databases inside the VPC, TLS broker, scans (cloud-design-questions.md:115)",
+     "scripts/aws-demo.sh security", False),
+]
+
+SECTIONS = sorted({s for s, _, _, _ in STEPS + AWS_STEPS})
 
 
 # --------------------------------------------------------------------------
@@ -252,7 +299,7 @@ def prompt_idle(pane, quiet_for=2.0, timeout=600):
 # --------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(
-        description="Drive the docs/audit.md walkthrough through a Herdr pane.",
+        description="Drive the docs/cloud-design-questions.md walkthrough through a Herdr pane.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Find your pane with:  herdr pane list")
     ap.add_argument("--pane", default=None,
@@ -264,10 +311,13 @@ def main():
     ap.add_argument("--only", type=int, action="append", metavar="N",
                     help="run only this step number; repeatable")
     ap.add_argument("--section", type=int, action="append", metavar="N",
-                    help="run only this section (same numbering as "
-                         "run-audit-checks.sh); repeatable")
+                    help="run only this section (this driver's numbering, see "
+                         "--list); repeatable")
+    ap.add_argument("--aws", action="store_true",
+                    help="add the live AWS steps (section 14); needs the deployed "
+                         "stack and AWS_PROFILE=cloud-design")
     ap.add_argument("--start", type=int, default=1, help="first step to run (1-based)")
-    ap.add_argument("--end", type=int, default=len(STEPS), help="last step to run (1-based)")
+    ap.add_argument("--end", type=int, default=None, help="last step to run (1-based, default: the last)")
     ap.add_argument("--list", action="store_true", help="list every step and exit")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the plan and exit without touching any pane")
@@ -275,17 +325,23 @@ def main():
 
     if args.list:
         print(f"{'#':>3}  {'sec':>3}  {'mutates':<8}  title")
-        for i, (sec, title, _, mut) in enumerate(STEPS, 1):
-            print(f"{i:>3}  {sec:>3}  {'[STATE]' if mut else '-':<8}  {title}")
+        for i, (sec, title, _, mut) in enumerate(STEPS + AWS_STEPS, 1):
+            aws = " [AWS]" if i > len(STEPS) else ""
+            print(f"{i:>3}  {sec:>3}  {'[STATE]' if mut else '-':<8}  {title}{aws}")
         print()
         print("Sections: " + ", ".join(str(s) for s in SECTIONS))
-        print("These are the SAME section numbers used by scripts/run-audit-checks.sh.")
-        print("Mutating steps are tagged [STATE] and write to PostgreSQL or publish to RabbitMQ.")
+        print("Section numbers are this driver's own; the rubric line in each title "
+              "(docs/cloud-design-questions.md) is what matches scripts/run-audit-checks.sh.")
+        print("Steps tagged [AWS] run only with --aws, against the deployed stack.")
+        print("Mutating steps are tagged [STATE]: they write to PostgreSQL, publish to "
+              "RabbitMQ, or (AWS) create a movie and stop billing-app for the drill.")
         return 0
 
+    steps = STEPS + (AWS_STEPS if args.aws else [])
+    end = len(steps) if args.end is None else args.end
     wanted = []
-    for i, (sec, title, cmd, mut) in enumerate(STEPS, 1):
-        if not (args.start <= i <= args.end):
+    for i, (sec, title, cmd, mut) in enumerate(steps, 1):
+        if not (args.start <= i <= end):
             continue
         if args.only and i not in args.only:
             continue
@@ -295,10 +351,12 @@ def main():
 
     if not wanted:
         print("No steps matched the selection.", file=sys.stderr)
+        if not args.aws and args.section and any(sec in args.section for sec, _, _, _ in AWS_STEPS):
+            print("Section 14 holds the AWS steps; add --aws to include them.", file=sys.stderr)
         print("Try --list to see what exists.", file=sys.stderr)
         return 2
 
-    print(f"Plan: {len(wanted)} step(s) of {len(STEPS)}.")
+    print(f"Plan: {len(wanted)} step(s) of {len(steps)}.")
     if args.dry_run:
         print("DRY RUN -- no pane is touched, nothing is executed.\n")
         for i, sec, title, cmd, mut in wanted:
@@ -324,21 +382,26 @@ def main():
 
     in_pane(pane, "clear")
     time.sleep(0.5)
-    in_pane(pane, r"echo -e '\033[1;36m=== cloud-design docs/audit.md STEP-BY-STEP WALKTHROUGH ===\033[0m'")
+    in_pane(pane, r"echo -e '\033[1;36m=== cloud-design docs/cloud-design-questions.md STEP-BY-STEP WALKTHROUGH ===\033[0m'")
     in_pane(pane, f"cd {REPO}")
     time.sleep(0.8)
 
     for i, sec, title, cmd, mut in wanted:
         tag = r" \033[1;31m[mutates state]\033[0m" if mut else ""
-        print(f"[{i}/{len(STEPS)}] section {sec}: {title}{' [mutates state]' if mut else ''}")
-        in_pane(pane, f"echo -e '\\n\\033[1;33m>>> Step {i}/{len(STEPS)} (section {sec}): {title}{tag}\\033[0m'")
+        print(f"[{i}/{len(steps)}] section {sec}: {title}{' [mutates state]' if mut else ''}")
+        in_pane(pane, f"echo -e '\\n\\033[1;33m>>> Step {i}/{len(steps)} (section {sec}): {title}{tag}\\033[0m'")
         time.sleep(0.4)
         in_pane(pane, cmd)
         slow = ("run-audit-checks" in cmd) or ("test_cloud" in cmd) or ("xargs -P" in cmd)
-        prompt_idle(pane, timeout=900 if slow else 300)
+        if "aws-demo.sh" in cmd:
+            # aws-demo.sh polls AWS every 10-20 s and prints nothing in between,
+            # so "quiet for 2 s" would type the next step into a running drill.
+            prompt_idle(pane, quiet_for=30.0, timeout=3600 if "billing" in cmd else 900)
+        else:
+            prompt_idle(pane, timeout=900 if slow else 300)
         time.sleep(args.delay)
 
-    in_pane(pane, r"echo -e '\n\033[1;32m=== END OF docs/audit.md WALKTHROUGH ===\033[0m'")
+    in_pane(pane, r"echo -e '\n\033[1;32m=== END OF docs/cloud-design-questions.md WALKTHROUGH ===\033[0m'")
     print("Done. The full transcript is in the pane.")
     return 0
 

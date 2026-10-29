@@ -223,6 +223,9 @@ SUSPENDED_JQ='.suspended // {} | [.DynamicScalingInSuspended, .DynamicScalingOut
 drill_restore() {
   [ "${DRILL_ACTIVE}" -eq 1 ] || return 0
   DRILL_ACTIVE=0
+  # Whoever reads this output (a terminal, run-audit-checks.sh) may be gone
+  # after Ctrl-C; a write to a closed pipe must not stop the restore.
+  trap '' PIPE
   echo
   echo "[RESTORE] the billing drill did not finish: putting billing-app back as it was"
   echo "\$ aws ecs update-service --cluster ${CLUSTER} --service ${SVC_BIL} --desired-count ${DRILL_DESIRED}"

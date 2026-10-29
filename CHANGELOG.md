@@ -807,3 +807,46 @@ The raw output contains the account ID (ARNs, the ECR URL) and the IAM user name
 **Next**
 - The user: T26 (billing alerts) and T29 (`terraform/terraform.tfvars` with `alarm_email`).
 - Then T30 (`AUTO_APPROVE=true ./scripts/deploy.sh`) to T32, and T33 to T39 with `scripts/aws-demo.sh --save`, including the billing drill for T37.
+
+## 2026-10-29 00:48 EET: T23 and T24, AWS mode for the audit scripts, docs/cloud-design-questions.md as the rubric
+
+**What**
+- `scripts/run-audit-checks.sh`:
+  - Every `audit.md:<line>` citation now points at the matching line of `docs/cloud-design-questions.md` (73 citations). The header, banner, section 1 file list and the section 6 README check name the new rubric; `docs/audit.md` is kept as its earlier version.
+  - New `--aws` option (also with `--static`) and four new sections that run before section 21: 22 the deployment shown with aws cli and ECS commands (`aws-demo.sh verify`, rubric lines 69, 71, 73), 23 POST and GET of a movie (`movies`, 81, 83), 24 the billing outage drill (`billing`, 87, 89), 25 HTTPS, database isolation, the 401 and Cognito (`auth security`, 115, 117, 119).
+  - A helper, `aws_demo`, streams `scripts/aws-demo.sh` and maps its verdicts: `[PASS]` / `[FAIL]` carry over, `[WARN]` and `[SKIP]` become INVALID, a `[FATAL]` stop or a run with no check is INVALID, and without `--aws` each section is one INVALID. On Ctrl-C it keeps reading until aws-demo.sh has finished its restore, then exits 130.
+  - Section 10: the live 401 check takes the invoke URL from `terraform output api_gateway_invoke_url` of this checkout (it used to grep the docs for any execute-api URL); without `--aws` it is INVALID with the reason.
+  - Section 18: three new static checks for "restricting database access to the VPC" (line 115): every ingress rule on the db security group names the app security group and no CIDR; the database route table has no route besides the local one; both RDS instances sit in the `private_db` subnets and use only the db security group.
+  - Section 21 notes that V1 (line 71) is the grader's call, with its commands in section 22. `--list` and the "valid: 0..25" message updated.
+- `scripts/step_by_step_audit.py`: 41 citations converted; `--aws` adds section 14 (8 steps, tagged `[AWS]` in `--list`): caller identity, ECS services, tasks per AZ, target health, the 401 without a token, then `aws-demo.sh auth movies`, `billing` and `security`. Step 2 shows both rubric files with their question counts. The docstring, `--list` and `--section` help no longer claim the section numbers match run-audit-checks.sh (they never did); aws-demo steps wait for 30 s of quiet before the next step. `--end` defaults to the last step of the chosen list.
+- `scripts/test_cloud.sh`: the `docs/audit.md` check stays; new checks that `docs/cloud-design-questions.md` exists (29 questions), that every rubric line the two scripts cite lands on a heading, question or list item, and that no `audit.md:<line>` citation is left.
+- `scripts/aws-demo.sh`: `drill_restore` ignores SIGPIPE, so a reader that is gone after Ctrl-C (a terminal, the runner) cannot stop the restore.
+- `README.md`: the runner paragraph, the status table, the docs bullet and the two tooling rows describe the new rubric and `--aws`; the measured PASS=203 run is kept and marked as older than sections 22-25.
+- `tasklist.md`: T23 and T24 ticked and crossed out.
+
+**Why**
+The user asked for T23 and T24. The AWS sections reuse `scripts/aws-demo.sh` rather than a second copy of its checks, so the demo and the audit cannot disagree; WARN and SKIP count as INVALID because a question that was not proven must not look passed. The invoke URL comes from this checkout's Terraform state so the 401 call can only reach the stack this repository deployed.
+
+**Verified**
+- `bash -n` on the three shell scripts; shellcheck: aws-demo.sh and test_cloud.sh clean except findings already at HEAD, run-audit-checks.sh has exactly the same findings as HEAD; `python3 -m py_compile` and `--list`, `--dry-run`, `--aws --dry-run --section 14` on the driver.
+- Static suite on a copy of the tree: PASS=166 FAIL=0 INVALID=12 NOTES=55 (before: 163 / 0 / 8 / 51; +3 database checks, +4 INVALID for sections 22-25 without `--aws`, +4 notes). `test_cloud.sh`: 69 checks passed, 2 warnings (before: 66).
+- Deliberate breaks in that copy were caught: a CIDR rule on the db security group, a 0.0.0.0/0 route in the database route table, a citation of prose line 70, a leftover `audit.md:64`.
+- With `--aws` against the local stub AWS CLI and API: sections 22 to 25 gave PASS=21, 5, 11 and 28 with FAIL=0; a stuck billing-app gave FAIL=2 and exit 1; no Cognito client and `AWS_PROFILE=code-keeper` gave INVALID; Ctrl-C during section 24 printed the restore, exited 130 and left billing-app at desired 2, minimum 2. No live AWS call was made; the stack is not deployed.
+
+**Pending docs text** (`docs/` is read-only; for T50)
+`docs/AUDIT_GUIDE.md:888-889`, replace the two lines with:
+```
+3. **Documentation that cannot drift silently.** `scripts/run-audit-checks.sh`
+  walks the 29 questions of `docs/cloud-design-questions.md` with real commands and emits three-state verdicts:
+```
+`docs/AUDIT_GUIDE.md:2248`, in that row replace `walks all 22 rubric questions with real commands and three-state verdicts; \`scripts/step_by_step_audit.py\` (**33 steps** across 12 sections` with:
+```
+walks the 29 questions of `docs/cloud-design-questions.md` with real commands and three-state verdicts (with `--aws`, also sections 22-25 against the deployed stack); `scripts/step_by_step_audit.py` (**33 steps** across 12 sections, plus 8 AWS steps in section 14 with `--aws`
+```
+`docs/AUDIT_GUIDE.md:2443`, replace `**33 steps across 12 sections** (numbered to match \`run-audit-checks.sh\`); \`--dry-run\`` with:
+```
+**33 steps across 12 sections**, 41 across 13 with `--aws` (the section numbers are the driver's own; each title cites its rubric line); `--dry-run`
+```
+
+**Next**
+- T37 and the other live tasks still wait for T26 and T29; in that session `bash scripts/run-audit-checks.sh --static --aws` grades sections 22-25 against the real stack.

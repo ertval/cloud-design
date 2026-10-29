@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# cloud-design - automated docs/audit.md verification runner  (THE MAIN EVENT)
+# cloud-design - automated docs/cloud-design-questions.md verification runner
 # ==============================================================================
 #
 # WHAT THIS DOES
-#   Walks every question in docs/audit.md (22 `######` items + the 5 Well-
-#   Architected pillars + the 14 stakeholder roleplay questions + the 2 bonus
-#   questions), runs the REAL command the rubric asks for, prints that command's
+#   Walks every question in docs/cloud-design-questions.md, the current rubric
+#   (29 `######` items including the 2 bonus questions, plus the 5 Well-
+#   Architected pillars and the 14 stakeholder roleplay questions), runs the
+#   REAL command the rubric asks for, prints that command's
 #   REAL stdout/stderr, and turns each item into one of three verdicts:
 #
 #       [PASS]    the check was executed and the real evidence satisfies it
@@ -22,10 +23,26 @@
 #   roleplay questions) are printed as clearly-labelled [NOTE] lines pointing at
 #   docs/AUDIT_GUIDE.md. They are NOT scored - a script cannot grade prose.
 #
+#   Every section cites the line of docs/cloud-design-questions.md it answers.
+#   docs/audit.md, the earlier version of the rubric, is kept next to it.
+#
+#   AWS MODE (--aws). The questions only the AWS deployment can answer are
+#   sections 22-25: the deployment shown with aws cli and ECS commands, the
+#   movies API, the billing outage drill, and HTTPS / database isolation / 401 /
+#   Cognito. Each runs the matching scripts/aws-demo.sh section and grades its
+#   checks: [PASS] and [FAIL] carry over, [WARN] and [SKIP] become INVALID, and
+#   a stop before any check (no deployed stack, AWS_PROFILE not cloud-design)
+#   is INVALID too. Without --aws those sections report INVALID. Section 24
+#   stops billing-app for a few minutes; aws-demo.sh puts it back, also when
+#   interrupted.
+#
 # HOW TO RUN IT
 #   ./scripts/run-audit-checks.sh                # everything
 #   ./scripts/run-audit-checks.sh --static       # skip the live docker/kubectl
 #                                               # sections (they report INVALID)
+#   ./scripts/run-audit-checks.sh --aws          # also the live AWS sections
+#                                               # 22-25 (export AWS_PROFILE=cloud-design)
+#   ./scripts/run-audit-checks.sh --static --aws # AWS sections, no local stack
 #   ./scripts/run-audit-checks.sh --section 90   # one numbered section
 #   ./scripts/run-audit-checks.sh --list         # list the sections
 #   ./scripts/run-audit-checks.sh --no-color     # plain output
@@ -95,6 +112,7 @@ LB_MARK="lb-${RUN_MARKER}"
 LOAD_OUT="/tmp/cloud-design-load-${RUN_MARKER}.txt"
 
 STATIC_ONLY=0
+AWS_MODE=0
 NO_COLOR=0
 ONLY_SECTION=""
 LIST_ONLY=0
@@ -103,6 +121,7 @@ GREEN=''; RED=''; YELLOW=''; BLUE=''; BOLD=''; DIM=''; NC=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --static)   STATIC_ONLY=1 ;;
+    --aws)      AWS_MODE=1 ;;
     --no-color) NO_COLOR=1 ;;
     --section)  ONLY_SECTION="${2:-}"; shift ;;
     --list)     LIST_ONLY=1 ;;
@@ -314,7 +333,7 @@ probe_environment() {
 # report_preconditions -- the section-0 REPORT. Emits the pass/invalid lines,
 # so it is gated by step() exactly like every other section.
 report_preconditions() {
-  step "0" "Preconditions: tool inventory and reachability" "audit.md:62,70,76 - the rubric demands aws cli / docker ps / kubectl be SHOWN" || return 0
+  step "0" "Preconditions: tool inventory and reachability" "cloud-design-questions.md:69,91,97 - the rubric demands aws cli / docker ps / kubectl be SHOWN" || return 0
 
   for t in docker kubectl aws terraform jq curl python3 make; do
     case "$t" in
@@ -383,40 +402,49 @@ report_preconditions() {
 }
 
 SECTIONS=(
-"0|0. Preconditions: tool inventory and reachability|audit.md:62,70,76"
-"1|1. Are all the required files present?|audit.md:11"
-"2|2. Stakeholder roleplay (14) + grader observations - NOT automatable|audit.md:19-32,34,36,38,40"
-"3|3. Well-Architected pillars (5) - static evidence + prose is NOT automatable|audit.md:46-50"
-"4|4. Architecture aligns with requirements (PORT CONSISTENCY MATRIX)|audit.md:52"
-"5|5. Cost-effectiveness|audit.md:54"
-"6|6. README completeness|audit.md:58"
-"7|7. Documentation clarity, diagrams, structure|audit.md:60"
-"8|8. All microservices running, no errors/connectivity (LIVE)|audit.md:64"
-"9|9. Load balancing distributes traffic (LIVE)|audit.md:66"
-"10|10. Secure service communication, auth + encryption (incl. rds.force_ssl)|audit.md:68"
-"11|11. Terraform used effectively (attachment-aware data-tier exposure check)|audit.md:72"
-"12|12. Infrastructure follows architecture (PDB effectiveness + probe semantics)|audit.md:74"
-"13|13. Dockerfile optimisation (real analysis)|audit.md:78"
-"14|14. Orchestration configured correctly|audit.md:80"
-"15|15. Monitoring & logging dashboards|audit.md:84"
-"16|16. Auto-scaling configured correctly (per-target)|audit.md:88"
-"17|17. Efficient under different load (LIVE load test, marker-isolated LB split)|audit.md:90"
-"18|18. Security best practices incl. vulnerability scanning|audit.md:94"
-"19|19. Bonus: what is ACTUALLY implemented + app source imports and its tests pass|audit.md:98"
-"20|20. Bonus: outstanding project - evidence tally|audit.md:100"
-"21|21. Non-automatable items and final summary|audit.md:34,36,38,40"
+"0|0. Preconditions: tool inventory and reachability|cloud-design-questions.md:69,91,97"
+"1|1. Are all the required files present?|cloud-design-questions.md:11"
+"2|2. Stakeholder roleplay (14) + grader observations - NOT automatable|cloud-design-questions.md:23-37,39,41,43,45"
+"3|3. Well-Architected pillars (5) - static evidence + prose is NOT automatable|cloud-design-questions.md:51-57"
+"4|4. Architecture aligns with requirements (PORT CONSISTENCY MATRIX)|cloud-design-questions.md:59"
+"5|5. Cost-effectiveness|cloud-design-questions.md:61"
+"6|6. README completeness|cloud-design-questions.md:65"
+"7|7. Documentation clarity, diagrams, structure|cloud-design-questions.md:67"
+"8|8. All microservices running, no errors/connectivity (LIVE)|cloud-design-questions.md:73"
+"9|9. Load balancing distributes traffic (LIVE)|cloud-design-questions.md:75"
+"10|10. Secure service communication, auth + encryption (incl. rds.force_ssl)|cloud-design-questions.md:77"
+"11|11. Terraform used effectively (attachment-aware data-tier exposure check)|cloud-design-questions.md:93"
+"12|12. Infrastructure follows architecture (PDB effectiveness + probe semantics)|cloud-design-questions.md:95"
+"13|13. Dockerfile optimisation (real analysis)|cloud-design-questions.md:99"
+"14|14. Orchestration configured correctly|cloud-design-questions.md:101"
+"15|15. Monitoring & logging dashboards|cloud-design-questions.md:105"
+"16|16. Auto-scaling configured correctly (per-target)|cloud-design-questions.md:109"
+"17|17. Efficient under different load (LIVE load test, marker-isolated LB split)|cloud-design-questions.md:111"
+"18|18. Security best practices incl. vulnerability scanning|cloud-design-questions.md:115"
+"19|19. Bonus: what is ACTUALLY implemented + app source imports and its tests pass|cloud-design-questions.md:123"
+"20|20. Bonus: outstanding project - evidence tally|cloud-design-questions.md:125"
+"22|22. AWS: the deployment shown with aws cli + ECS commands (LIVE AWS, --aws)|cloud-design-questions.md:69,71,73"
+"23|23. AWS: create and read movies through API Gateway (LIVE AWS, --aws)|cloud-design-questions.md:81,83"
+"24|24. AWS: billing outage drill, queued order processed (LIVE AWS, --aws, stops billing-app)|cloud-design-questions.md:87,89"
+"25|25. AWS: HTTPS, database inside the VPC, 401 without credentials, Cognito (LIVE AWS, --aws)|cloud-design-questions.md:115,117,119"
+"21|21. Non-automatable items and final summary (runs last)|cloud-design-questions.md:39,41,43,45,71"
 )
 
 if [ "${LIST_ONLY}" -eq 1 ]; then
   echo "Sections in scripts/run-audit-checks.sh:"
   printf '  %s\n' "${SECTIONS[@]}"
   echo
-  echo "Usage: ./scripts/run-audit-checks.sh [--static] [--section N] [--no-color]"
+  echo "Usage: ./scripts/run-audit-checks.sh [--static] [--aws] [--section N] [--no-color]"
   exit 0
 fi
 
 echo -e "${BLUE}============================================================${NC}"
-echo -e "${BLUE} cloud-design -- docs/audit.md automated verification${NC}"
+echo -e "${BLUE} cloud-design -- docs/cloud-design-questions.md automated verification${NC}"
+if [ "${AWS_MODE}" -eq 1 ]; then
+  echo -e "${BLUE} AWS mode: ON, sections 22-25 call the deployed stack (AWS_PROFILE=${AWS_PROFILE:-<unset>})${NC}"
+else
+  echo -e "${BLUE} AWS mode: off, sections 22-25 report INVALID (add --aws)${NC}"
+fi
 echo -e "${BLUE} root: ${ROOT_DIR}${NC}"
 echo -e "${BLUE} run marker: ${RUN_MARKER}    audit user_id: ${AUDIT_USER_ID}${NC}"
 echo -e "${BLUE}============================================================${NC}"
@@ -431,22 +459,23 @@ probe_environment
 report_preconditions
 
 # =============================================================================
-# SECTION 1 -- audit.md:11  "Are all the required files present?"
+# SECTION 1 -- cloud-design-questions.md:11  "Are all the required files present?"
 # Counts are DISCOVERED, never hardcoded, so this cannot rot.
 # =============================================================================
-if step "1" "Are all the required files present?" "audit.md:11"; then
+if step "1" "Are all the required files present?" "cloud-design-questions.md:11"; then
 
 note "The top-level Dockerfiles/ tree was DELETED and consolidated into srcs/<component>/Dockerfile. This checks the CURRENT layout and says so."
 note "audit.md moved into docs/. A root-level audit.md no longer exists -- that was the stale-path bug in test_cloud.sh."
+note "The rubric is docs/cloud-design-questions.md; docs/audit.md, its earlier version, is kept."
 
 show "find terraform -maxdepth 1 -name '*.tf' | wc -l" "${TF_COUNT}"
 
 MISSING=()
-for f in README.md docs/readme.md docs/audit.md docs/AUDIT_GUIDE.md docker-compose.yml Makefile .env.example; do
+for f in README.md docs/readme.md docs/cloud-design-questions.md docs/audit.md docs/AUDIT_GUIDE.md docker-compose.yml Makefile .env.example; do
   [ -e "${ROOT_DIR}/${f}" ] || MISSING+=("${f}")
 done
 if [ "${#MISSING[@]}" -eq 0 ]; then
-  pass "docs + root config present: README.md, docs/readme.md, docs/audit.md, docs/AUDIT_GUIDE.md, docker-compose.yml, Makefile, .env.example"
+  pass "docs + root config present: README.md, docs/readme.md, docs/cloud-design-questions.md, docs/audit.md, docs/AUDIT_GUIDE.md, docker-compose.yml, Makefile, .env.example"
 else
   fail "missing required root files: ${MISSING[*]}"
 fi
@@ -533,11 +562,11 @@ fi
 fi
 
 # =============================================================================
-# SECTION 2 -- audit.md:19-32 + 34,36,38,40
+# SECTION 2 -- cloud-design-questions.md:23-37 + 34,36,38,40
 # Graded human observations. Printed as NOTES. Deliberately NOT scored.
 # =============================================================================
-if step "2" "Stakeholder roleplay (14) and grader observations - NOT automatable" "audit.md:19-32,34,36,38,40"; then
-note "audit.md:34,36,38,40 ('answered correctly', 'thorough understanding', 'communicated effectively', 'critically evaluated') are GRADER OBSERVATIONS recorded live. A script cannot assert them and they are deliberately NOT scored here."
+if step "2" "Stakeholder roleplay (14) and grader observations - NOT automatable" "cloud-design-questions.md:23-37,39,41,43,45"; then
+note "cloud-design-questions.md:39,41,43,45 ('answered correctly', 'thorough understanding', 'communicated effectively', 'critically evaluated') are GRADER OBSERVATIONS recorded live. A script cannot assert them and they are deliberately NOT scored here."
 ROLEPLAY_MISSING=()
 for q in "Q1: What is the cloud and its associated benefits" \
          "Q2: Why is deploying the solution in the cloud preferred" \
@@ -565,9 +594,9 @@ note "That PASS asserts only that the ANSWERS EXIST. The quality of the spoken a
 fi
 
 # =============================================================================
-# SECTION 3 -- audit.md:46-50 the five Well-Architected pillars
+# SECTION 3 -- cloud-design-questions.md:51-57 the five Well-Architected pillars
 # =============================================================================
-if step "3" "Well-Architected pillars (5) - static evidence, prose is NOT automatable" "audit.md:46-50"; then
+if step "3" "Well-Architected pillars (5) - static evidence, prose is NOT automatable" "cloud-design-questions.md:51-57"; then
 note "The five pillars are a DESIGN REVIEW. Each has a prose defence in docs/AUDIT_GUIDE.md ## 3. Prose is not machine-checkable; the concrete IaC evidence behind each pillar IS, and is scored in the sections noted:"
 for p in "3.1 Scalability" "3.2 Availability" "3.3 Security" "3.4 Cost-Effectiveness" "3.5 Simplicity"; do
   if grep -q "### ${p}" "${ROOT_DIR}/docs/AUDIT_GUIDE.md" 2>/dev/null; then
@@ -581,11 +610,11 @@ note "                 Security -> S10/S18 | Cost -> S5 | Simplicity -> S11/S14"
 fi
 
 # =============================================================================
-# SECTION 4 -- audit.md:52  architecture aligns with requirements
+# SECTION 4 -- cloud-design-questions.md:59  architecture aligns with requirements
 # REAL port-consistency matrix: Dockerfile EXPOSE -> compose -> manifest
 # containerPort -> ECS portMappings -> ALB target group.
 # =============================================================================
-if step "4" "Architecture aligns with requirements - PORT CONSISTENCY MATRIX" "audit.md:52 (ports from docs/readme.md:70-83)"; then
+if step "4" "Architecture aligns with requirements - PORT CONSISTENCY MATRIX" "cloud-design-questions.md:59 (ports from docs/readme.md:70-83)"; then
 note "Required component ports (docs/readme.md:70-83):"
 note "  inventory-database=5432  billing-database=5432  inventory-app=8080"
 note "  billing-app=8080  RabbitMQ=5672  api-gateway=3000"
@@ -684,9 +713,9 @@ fi
 fi
 
 # =============================================================================
-# SECTION 5 -- audit.md:54  cost-effective architecture
+# SECTION 5 -- cloud-design-questions.md:61  cost-effective architecture
 # =============================================================================
-if step "5" "Cost-effectiveness architecture" "audit.md:54"; then
+if step "5" "Cost-effectiveness architecture" "cloud-design-questions.md:61"; then
 if tf_any budgets_budget; then pass "aws_budgets_budget is provisioned (a real cost guardrail)"
 else fail "no aws_budgets_budget -- nothing alerts on overspend"; fi
 if tf_any nat_gateway >/dev/null && tf_grep single_nat_gateway | grep -q .; then
@@ -790,9 +819,9 @@ fi
 fi
 
 # =============================================================================
-# SECTION 6 -- audit.md:58  README prerequisites/setup/configuration/usage
+# SECTION 6 -- cloud-design-questions.md:65  README prerequisites/setup/configuration/usage
 # =============================================================================
-if step "6" "README contains prerequisites, setup, configuration, usage" "audit.md:58"; then
+if step "6" "README contains prerequisites, setup, configuration, usage" "cloud-design-questions.md:65"; then
 show "README.md section headings" "$(grep -nE '^#{2,3} ' "${ROOT_DIR}/README.md" 2>/dev/null | head -30)"
 
 if grep -qiE '^#+[[:space:]]*prerequisites' "${ROOT_DIR}/README.md"; then
@@ -822,10 +851,10 @@ if grep -qiE 'usage|how to use|example|curl' "${ROOT_DIR}/README.md"; then
 else
   note "README has no explicitly titled 'Usage' section; it covers the equivalent ground under 'Deployment & Verification Commands'. Flagging for the doc owner rather than failing the rubric item."
 fi
-if grep -qE 'audit\.md|AUDIT_GUIDE' "${ROOT_DIR}/README.md"; then
+if grep -qE 'cloud-design-questions\.md|audit\.md|AUDIT_GUIDE' "${ROOT_DIR}/README.md"; then
   pass "README cross-references the audit rubric / defence guide"
 else
-  fail "README never references docs/audit.md or docs/AUDIT_GUIDE.md, so a reader cannot navigate from the README to the rubric"
+  fail "README never references docs/cloud-design-questions.md, docs/audit.md or docs/AUDIT_GUIDE.md, so a reader cannot navigate from the README to the rubric"
 fi
 # The README must not instruct a BROKEN command: `kubectl apply -f manifests/`
 # is known-broken now that kustomization.yaml exists.
@@ -839,9 +868,9 @@ fi
 fi
 
 # =============================================================================
-# SECTION 7 -- audit.md:60  clear docs, well-structured diagrams
+# SECTION 7 -- cloud-design-questions.md:67  clear docs, well-structured diagrams
 # =============================================================================
-if step "7" "Documentation clarity, diagrams, structure" "audit.md:60"; then
+if step "7" "Documentation clarity, diagrams, structure" "cloud-design-questions.md:67"; then
 TOTAL_MERMAID=0; BALANCED=0; UNBALANCED=()
 for d in "${ROOT_DIR}/README.md" "${ROOT_DIR}/docs"/*.md; do
   [ -f "$d" ] || continue
@@ -880,9 +909,9 @@ fi
 fi
 
 # =============================================================================
-# SECTION 8 -- audit.md:64  all microservices running, no errors / connectivity
+# SECTION 8 -- cloud-design-questions.md:73  all microservices running, no errors / connectivity
 # =============================================================================
-if step "8" "All microservices running, no errors or connectivity issues (LIVE)" "audit.md:64 - the rubric asks for 'docker ps'"; then
+if step "8" "All microservices running, no errors or connectivity issues (LIVE)" "cloud-design-questions.md:73 - the rubric asks for 'docker ps'"; then
 if [ "${COMPOSE_STACK_UP}" -eq 1 ]; then
   show "docker compose ps" "$(cd "${ROOT_DIR}" && docker compose ps 2>&1)"
   # Expected scale is READ FROM docker-compose.yml, and `ps -a` is used with
@@ -1003,9 +1032,9 @@ fi
 fi
 
 # =============================================================================
-# SECTION 9 -- audit.md:66  load balancing distributes traffic
+# SECTION 9 -- cloud-design-questions.md:75  load balancing distributes traffic
 # =============================================================================
-if step "9" "Load balancing distributes traffic (LIVE) + static ALB verification" "audit.md:66"; then
+if step "9" "Load balancing distributes traffic (LIVE) + static ALB verification" "cloud-design-questions.md:75"; then
 if [ "${COMPOSE_STACK_UP}" -eq 1 ] && [ "${CURL_OK}" -eq 1 ]; then
   LB_REPLICAS="$(cd "${ROOT_DIR}" && docker compose ps -q api-gateway 2>/dev/null | grep -c . | head -1)"
   show "docker compose ps -q api-gateway | wc -l" "${LB_REPLICAS} gateway replica(s)"
@@ -1052,9 +1081,9 @@ fi
 fi
 
 # =============================================================================
-# SECTION 10 -- audit.md:68  secure comms, auth + encryption
+# SECTION 10 -- cloud-design-questions.md:77  secure comms, auth + encryption
 # =============================================================================
-if step "10" "Services communicate securely: auth + encryption" "audit.md:68"; then
+if step "10" "Services communicate securely: auth + encryption" "cloud-design-questions.md:77"; then
 NROUTES="$(tf_res_in "${TF_DIR}/api_gateway.tf" apigatewayv2_route)"
 NAUTH="$(fcount 'authorizer_id[[:space:]]*=' "${TF_DIR}/api_gateway.tf")"
 show "routes vs authorizer_id" "aws_apigatewayv2_route=${NROUTES}  authorizer_id assignments=${NAUTH}"
@@ -1127,14 +1156,19 @@ else
   fail "manifests/network-policies.yaml is missing"
 fi
 
-if [ "${AWS_OK}" -eq 1 ]; then
-  API_URL="$(grep -rhoE 'https://[a-z0-9]+\.execute-api\.[a-z0-9-]+\.amazonaws\.com' "${ROOT_DIR}/docs/"*.md 2>/dev/null | head -1)"
-  if [ -n "${API_URL}" ]; then
-    show "curl -i (no Authorization header) ${API_URL}/api/movies" "$(curl -s -i -m 10 "${API_URL}/api/movies" 2>&1 | head -10)"
-    assert_eq "a credential-less request to the deployed API is rejected with 401" "401" "$(http_code GET "${API_URL}/api/movies")"
-  else
-    invalid "could not discover a deployed API Gateway invoke URL, so the 401 rejection cannot be proven -- INVALID"
-  fi
+if [ "${AWS_MODE}" -eq 0 ]; then
+  invalid "PROVING that a credential-less request is REJECTED needs the deployed API Gateway; AWS mode is off (add --aws). The static evidence above (authorizer_id on every non-health route) is what can be proven without it."
+elif [ "${AWS_OK}" -eq 1 ] && [ "${TERRAFORM_OK}" -eq 1 ]; then
+  # The invoke URL comes from the Terraform state of this checkout, so the call
+  # goes to the stack this repository deployed and nowhere else.
+  API_URL="$(terraform -chdir="${TF_DIR}" output -raw api_gateway_invoke_url 2>/dev/null)"
+  case "${API_URL}" in
+    https://*.execute-api.*.amazonaws.com*)
+      show "curl -i (no Authorization header) ${API_URL}/api/movies" "$(curl -s -i -m 10 "${API_URL}/api/movies" 2>&1 | head -10)"
+      assert_eq "a credential-less request to the deployed API is rejected with 401" "401" "$(http_code GET "${API_URL}/api/movies")" ;;
+    *)
+      invalid "terraform output api_gateway_invoke_url gave no API Gateway URL (is the stack deployed from this checkout?), so the 401 rejection cannot be proven, which makes it INVALID" ;;
+  esac
 else
   invalid "PROVING that a credential-less request is REJECTED requires calling a DEPLOYED API Gateway with curl/aws. No deployed endpoint is reachable here, so this is NOT claimed as a pass. The static evidence above (authorizer_id on every non-health route) is what can be proven locally."
 fi
@@ -1150,9 +1184,9 @@ fi
 fi
 
 # =============================================================================
-# SECTION 11 -- audit.md:72  Terraform used effectively
+# SECTION 11 -- cloud-design-questions.md:93  Terraform used effectively
 # =============================================================================
-if step "11" "Terraform used effectively" "audit.md:72"; then
+if step "11" "Terraform used effectively" "cloud-design-questions.md:93"; then
 TF_TOTAL="$(tf_types | grep -c . | head -1)"
 TF_DATA="$(grep -hE '^data ' "$TF_DIR"/*.tf 2>/dev/null | wc -l | tr -d ' ')"
 show "resource/data tallies" "${TF_TOTAL} resources, ${TF_DATA} data sources, ${TF_COUNT} .tf files"
@@ -1237,9 +1271,9 @@ fi
 fi
 
 # =============================================================================
-# SECTION 12 -- audit.md:74  infrastructure follows the architecture
+# SECTION 12 -- cloud-design-questions.md:95  infrastructure follows the architecture
 # =============================================================================
-if step "12" "Infrastructure follows the architecture & requirements" "audit.md:74"; then
+if step "12" "Infrastructure follows the architecture & requirements" "cloud-design-questions.md:95"; then
 # component : the token terraform really uses for it (the RDS instances are
 # labelled "inventory"/"billing", not "inventory-database"/"billing-database").
 MISSING_INFRA=()
@@ -1412,9 +1446,9 @@ fi
 fi
 
 # =============================================================================
-# SECTION 13 -- audit.md:78  Dockerfiles optimised (REAL analysis)
+# SECTION 13 -- cloud-design-questions.md:99  Dockerfiles optimised (REAL analysis)
 # =============================================================================
-if step "13" "Dockerfiles optimised (real per-image analysis)" "audit.md:78"; then
+if step "13" "Dockerfiles optimised (real per-image analysis)" "cloud-design-questions.md:99"; then
 note "This replaces the old existence-only check. Every column below is read out of each srcs/<c>/Dockerfile."
 printf "  %-19s %-28s %-6s %-9s %-12s %-8s %s\n" component "base image" stages non-root COPY--chmod cache-rn dockerignore
 printf "  %-19s %-28s %-6s %-9s %-12s %-8s %s\n" ------------------- ---------------------------- ------ -------- ------------ -------- ------------
@@ -1480,9 +1514,9 @@ fi
 fi
 
 # =============================================================================
-# SECTION 14 -- audit.md:80  orchestration configured correctly
+# SECTION 14 -- cloud-design-questions.md:101  orchestration configured correctly
 # =============================================================================
-if step "14" "Orchestration configured correctly (kustomize + server dry-run + ECS)" "audit.md:80"; then
+if step "14" "Orchestration configured correctly (kustomize + server dry-run + ECS)" "cloud-design-questions.md:101"; then
 if [ "${KUBECTL_OK}" -eq 1 ]; then
   show "kubectl kustomize manifests/ | tail -3" "$(kubectl kustomize "${MAN_DIR}/" 2>&1 | tail -3)"
   if kubectl kustomize "${MAN_DIR}/" >/dev/null 2>&1; then
@@ -1569,9 +1603,9 @@ fi
 fi
 
 # =============================================================================
-# SECTION 15 -- audit.md:84  monitoring & logging dashboards
+# SECTION 15 -- cloud-design-questions.md:105  monitoring & logging dashboards
 # =============================================================================
-if step "15" "Monitoring & logging dashboards" "audit.md:84"; then
+if step "15" "Monitoring & logging dashboards" "cloud-design-questions.md:105"; then
 if tf_any cloudwatch_dashboard; then
   WIDGETS="$(awk '/widgets[[:space:]]*=[[:space:]]*\[/{f=1} f && /^[[:space:]]*type[[:space:]]*=/{c++} f && /^    \}\)/{f=0} END{print c+0}' "${TF_DIR}/cloudwatch.tf" 2>/dev/null)"
   show "aws_cloudwatch_dashboard widget count" "${WIDGETS} widget(s)"
@@ -1606,9 +1640,9 @@ if [ "${BU:-0}" -ge 1 ]; then pass "AWS Budgets is provisioned (cost alerting)";
 fi
 
 # =============================================================================
-# SECTION 16 -- audit.md:88  auto-scaling configured correctly (per-target)
+# SECTION 16 -- cloud-design-questions.md:109  auto-scaling configured correctly (per-target)
 # =============================================================================
-if step "16" "Auto-scaling configured correctly (every target inspected)" "audit.md:88"; then
+if step "16" "Auto-scaling configured correctly (every target inspected)" "cloud-design-questions.md:109"; then
 TGT_CNT="$(tf_res appautoscaling_target)"
 POL_CNT="$(tf_res appautoscaling_policy)"
 show "appautoscaling targets / policies" "${TGT_CNT:-0} target(s), ${POL_CNT:-0} policy(ies)"
@@ -1793,9 +1827,9 @@ fi
 fi
 
 # =============================================================================
-# SECTION 17 -- audit.md:90  efficient under different load (LIVE)
+# SECTION 17 -- cloud-design-questions.md:111  efficient under different load (LIVE)
 # =============================================================================
-if step "17" "Efficient under different load (LIVE load test)" "audit.md:90"; then
+if step "17" "Efficient under different load (LIVE load test)" "cloud-design-questions.md:111"; then
 if [ "${COMPOSE_STACK_UP}" -eq 1 ] && [ "${CURL_OK}" -eq 1 ]; then
   note "Driving real concurrent load through gateway-lb. Every request carries the run marker."
   TOTAL=200; CONC=20
@@ -1881,9 +1915,9 @@ fi
 fi
 
 # =============================================================================
-# SECTION 18 -- audit.md:94  security best practices incl. vulnerability scanning
+# SECTION 18 -- cloud-design-questions.md:115  security best practices incl. vulnerability scanning
 # =============================================================================
-if step "18" "Security best practices incl. vulnerability scanning" "audit.md:94"; then
+if step "18" "Security best practices incl. vulnerability scanning" "cloud-design-questions.md:115"; then
 # The public edge is API Gateway, which AWS serves over HTTPS only; the ALB is
 # internal. The listener is HTTP :80 by default and HTTPS :443 with an ACM
 # certificate when enable_acm_certificate = true (terraform/alb.tf).
@@ -1903,6 +1937,58 @@ note "with the default enable_acm_certificate = false, the API Gateway -> ALB ho
 
 if tf_any apigatewayv2_authorizer; then pass "API Gateway authorizer is provisioned (managed JWT validation)"; else fail "no API Gateway authorizer"; fi
 if tf_any cognito_user_pool; then pass "Cognito user pool provides the managed authentication"; else fail "no Cognito user pool"; fi
+
+# Database access restricted to the VPC (cloud-design-questions.md:115), from
+# three angles: who may connect, whether a route leads out, which subnets.
+# Every ingress rule ATTACHED to the db security group (security_group_id =
+# aws_security_group.db.id; source_security_group_id is a different key) must
+# name the app security group as its source and carry no CIDR range.
+DB_SG_RULES="$(awk '
+  /^resource "aws_security_group_rule"/ { inb = 1; body = ""; name = $3; next }
+  inb && /^}/ {
+    inb = 0
+    if (body ~ /\n[ \t]*security_group_id[ \t]*=[ \t]*aws_security_group\.db\.id/ && body ~ /type[ \t]*=[ \t]*"ingress"/) {
+      src = "none"
+      if (match(body, /source_security_group_id[ \t]*=[ \t]*aws_security_group\.[a-z_]+\.id/)) { src = substr(body, RSTART, RLENGTH); sub(/.*=[ \t]*/, "", src) }
+      print name, src, ((body ~ /cidr_blocks|ipv6_cidr_blocks/) ? "cidr" : "no-cidr")
+    }
+    next
+  }
+  inb { body = body "\n" $0 }
+' "${TF_DIR}/security_groups.tf" 2>/dev/null)"
+DB_SG_INLINE="$(tf_block "${TF_DIR}/security_groups.tf" aws_security_group db | grep -cE '^[[:space:]]*ingress[[:space:]]*\{')"
+show "ingress rules attached to aws_security_group.db (name, source, cidr)" "${DB_SG_RULES:-<none found>}
+inline ingress blocks in aws_security_group.db: ${DB_SG_INLINE:-?}"
+if [ -z "${DB_SG_RULES}" ]; then
+  fail "no ingress rule is attached to the database security group, so the databases cannot be reached at all, or the parser found nothing"
+elif printf '%s\n' "${DB_SG_RULES}" | awk '$2 != "aws_security_group.app.id" || $3 != "no-cidr" {bad = 1} END {exit !bad}'; then
+  fail "a database ingress rule admits something other than the app security group: ${DB_SG_RULES}"
+elif [ "${DB_SG_INLINE:-1}" != 0 ]; then
+  fail "aws_security_group.db carries an inline ingress block next to the attached rules"
+else
+  pass "PostgreSQL (5432) is reachable only from the app tier: every ingress rule on the database security group names aws_security_group.app.id as its source, none carries a CIDR range"
+fi
+DB_RT_ROUTES="$(tf_block "${TF_DIR}/vpc.tf" aws_route_table private_db | grep -cE '^[[:space:]]*route[[:space:]]*\{')"
+DB_RT_EXTRA="$(awk '/^resource "aws_route" /{f = 1; b = ""} f {b = b $0 "\n"} f && /^}/ {f = 0; if (b ~ /aws_route_table\.private_db\./) c++} END {print c + 0}' "$TF_DIR"/*.tf 2>/dev/null)"
+show "routes in aws_route_table.private_db (inline / aws_route resources)" "${DB_RT_ROUTES:-?} / ${DB_RT_EXTRA:-?}"
+if [ "${DB_RT_ROUTES:-1}" = 0 ] && [ "${DB_RT_EXTRA:-1}" = 0 ]; then
+  pass "the database route table has no route besides the implicit local one: no NAT, no internet gateway, nothing leaves the VPC from the database subnets"
+else
+  fail "the database route table carries ${DB_RT_ROUTES} inline and ${DB_RT_EXTRA} separate route(s)"
+fi
+# Whichever .tf file declares the subnet group (it sits in vpc.tf, next to the subnets).
+DB_SUBNETS=0
+for f in "$TF_DIR"/*.tf; do
+  n="$(tf_block "$f" aws_db_subnet_group main | grep -cE 'subnet_ids[[:space:]]*=[[:space:]]*aws_subnet\.private_db')"
+  DB_SUBNETS=$((DB_SUBNETS + ${n:-0}))
+done
+DB_ATTACH="$(fcount -E 'vpc_security_group_ids[[:space:]]*=[[:space:]]*\[aws_security_group\.db\.id\]' "${TF_DIR}/rds.tf")"
+show "RDS subnet group on aws_subnet.private_db / instances using only the db security group" "${DB_SUBNETS:-0} / ${DB_ATTACH:-0} of $(tf_res db_instance)"
+if [ "${DB_SUBNETS:-0}" -ge 1 ] && count_ok "${DB_ATTACH}" && [ "${DB_ATTACH}" = "$(tf_res db_instance)" ]; then
+  pass "both RDS instances live in the private database subnets and use only the database security group"
+else
+  fail "an RDS instance is outside the private database subnets or uses another security group"
+fi
 
 if tf_any inspector2_enabler; then pass "aws_inspector2_enabler is provisioned: continuous vulnerability scanning is ON"
 else fail "no aws_inspector2_enabler -- nothing continuously scans for vulnerabilities, which the rubric asks for explicitly"; fi
@@ -2012,11 +2098,11 @@ else note ".gitignore does not exclude .env -- 'docker compose up' reads real cr
 fi
 
 # =============================================================================
-# SECTION 19 -- audit.md:98  BONUS: what is ACTUALLY implemented
+# SECTION 19 -- cloud-design-questions.md:123  BONUS: what is ACTUALLY implemented
 # Honest inventory. Explicitly confirms the headline bonus items that are NOT
 # implemented so nothing is overstated.
 # =============================================================================
-if step "19" "Bonus: what is ACTUALLY implemented (honest inventory)" "audit.md:98"; then
+if step "19" "Bonus: what is ACTUALLY implemented (honest inventory)" "cloud-design-questions.md:123"; then
 note "Bonus inventory. Each item is confirmed or denied against the real terraform/, never assumed."
 
 # ---- is the application source actually WIRED UP, and does it RUN? ---------
@@ -2143,10 +2229,10 @@ note "The rubric asks 'did the student add ANY optional bonus' -- that is alread
 fi
 
 # =============================================================================
-# SECTION 20 -- audit.md:100  BONUS: outstanding project -- evidence tally
+# SECTION 20 -- cloud-design-questions.md:125  BONUS: outstanding project -- evidence tally
 # =============================================================================
-if step "20" "Bonus: is this an outstanding project? (evidence tally, NOT a verdict)" "audit.md:100"; then
-note "audit.md:100 is a subjective grader judgement. A script cannot assign it. What follows is an evidence TALLY for the grader to weigh."
+if step "20" "Bonus: is this an outstanding project? (evidence tally, NOT a verdict)" "cloud-design-questions.md:125"; then
+note "cloud-design-questions.md:125 is a subjective grader judgement. A script cannot assign it. What follows is an evidence TALLY for the grader to weigh."
 echo -e "  ${BOLD}Evidence tally:${NC}"
 echo -e "    checks executed     : $(( PASS_COUNT + FAIL_COUNT + INVALID_COUNT ))"
 echo -e "    PASS                : ${PASS_COUNT}"
@@ -2191,22 +2277,94 @@ note "Also measured by this run: ${TF_ALARM_COUNT:-?} CloudWatch metric alarms a
 fi
 
 # =============================================================================
+# SECTIONS 22-25: the questions only the deployed AWS stack can answer.
+# Each runs one scripts/aws-demo.sh section; see "AWS MODE" in the header. They
+# run before section 21, which closes the walkthrough.
+# =============================================================================
+AWS_DEMO="${SCRIPT_DIR}/aws-demo.sh"
+AWS_DEMO_INT=0
+
+# aws_demo SECTION...: run scripts/aws-demo.sh SECTION..., show its output as it
+# comes, and turn its verdicts into this script's.
+aws_demo() {
+  if [ "${AWS_MODE}" -ne 1 ]; then
+    invalid "live AWS question, not run: AWS mode is off (add --aws, with the stack deployed and AWS_PROFILE=cloud-design)"
+    return 0
+  fi
+  if [ ! -x "${AWS_DEMO}" ]; then
+    fail "scripts/aws-demo.sh is missing or not executable"
+    return 0
+  fi
+  show "scripts/aws-demo.sh $*"
+  local line rc fatal="" checks=0
+  # Ctrl-C reaches aws-demo.sh too, and it restores what it changed. Keep
+  # reading its output until it exits, so the restore is shown.
+  trap 'AWS_DEMO_INT=1' INT
+  while :; do
+    IFS= read -r line
+    rc=$?
+    if [ "${rc}" -gt 128 ]; then continue; fi
+    if [ "${rc}" -ne 0 ] && [ -z "${line}" ]; then break; fi
+    case "${line}" in
+      "  [PASS] "*) pass "${line#"  [PASS] "}"; checks=$((checks + 1)) ;;
+      "  [FAIL] "*) fail "${line#"  [FAIL] "}"; checks=$((checks + 1)) ;;
+      "  [WARN] "*) invalid "not proven: ${line#"  [WARN] "}" ;;
+      "  [SKIP] "*) invalid "not run: ${line#"  [SKIP] "}" ;;
+      "[FATAL] "*)  fatal="${line#"[FATAL] "}"; printf '%s\n' "${line}" ;;
+      " Result: PASS="*) ;;   # aws-demo.sh's own tally; the summary below counts these checks
+      *) printf '%s\n' "${line}" ;;
+    esac
+    [ "${rc}" -ne 0 ] && break
+  done < <("${AWS_DEMO}" "$@" 2>&1)
+  trap - INT
+  if [ -n "${fatal}" ]; then
+    invalid "scripts/aws-demo.sh $* stopped: ${fatal}"
+  elif [ "${checks}" -eq 0 ]; then
+    invalid "scripts/aws-demo.sh $* reported no check at all"
+  fi
+  if [ "${AWS_DEMO_INT}" -eq 1 ]; then
+    echo -e "${YELLOW}Interrupted. scripts/aws-demo.sh has put back what it changed (see above).${NC}"
+    exit 130
+  fi
+  return 0
+}
+
+if step "22" "AWS: the deployment shown with aws cli and ECS commands (LIVE AWS)" "cloud-design-questions.md:69,71,73"; then
+note "Fargate has no container host to run 'docker ps' on: aws ecs list-tasks / describe-tasks are its equivalent, and 'docker ps' applies to the local stack (section 8)."
+aws_demo verify
+fi
+
+if step "23" "AWS: create and read movies through API Gateway (LIVE AWS)" "cloud-design-questions.md:81,83"; then
+aws_demo movies
+fi
+
+if step "24" "AWS: billing outage drill, the queued order is processed (LIVE AWS)" "cloud-design-questions.md:87,89"; then
+note "This section STOPS billing-app for a few minutes and creates one order. scripts/aws-demo.sh pauses and restores its auto scaling, also on failure or Ctrl-C."
+aws_demo billing
+fi
+
+if step "25" "AWS: HTTPS, database inside the VPC, 401 without credentials, Cognito (LIVE AWS)" "cloud-design-questions.md:115,117,119"; then
+aws_demo auth security
+fi
+
+# =============================================================================
 # SECTION 21 -- non-automatable rubric items, then the SUMMARY
 # =============================================================================
-if step "21" "Non-automatable items and final summary" "audit.md:34,36,38,40 + all"; then
+if step "21" "Non-automatable items and final summary" "cloud-design-questions.md:39,41,43,45 + all"; then
 note "The following rubric items are graded human observations and are deliberately NOT scored (there is no honest way for bash to grade prose or a spoken answer):"
-note "  audit.md:34 'able to answer all the questions correctly'   -> grader observation (answers at docs/AUDIT_GUIDE.md ## 2)"
-note "  audit.md:36 'thorough understanding of concepts'          -> grader observation (docs/AUDIT_GUIDE.md ## 2, ## 3)"
-note "  audit.md:38 'communicate effectively and justify decisions'-> grader observation"
-note "  audit.md:40 'critically evaluate the solution'             -> grader observation (docs/AUDIT_GUIDE.md Q11 / Q12)"
-note "  audit.md:19-32 the 14 stakeholder roleplay questions       -> live spoken session (docs/AUDIT_GUIDE.md ## 2)"
-note "  audit.md:46-50 the five Well-Architected pillars            -> design review (docs/AUDIT_GUIDE.md ## 3); the IaC evidence is scored in S3/S5/S10/S12/S16/S18"
-note "  audit.md:100 'Is this an outstanding project?'              -> subjective grader judgement (evidence tally in S20)"
+note "  cloud-design-questions.md:39 'able to answer all the questions correctly'   -> grader observation (answers at docs/AUDIT_GUIDE.md ## 2)"
+note "  cloud-design-questions.md:41 'thorough understanding of concepts'          -> grader observation (docs/AUDIT_GUIDE.md ## 2, ## 3)"
+note "  cloud-design-questions.md:43 'communicate effectively and justify decisions'-> grader observation"
+note "  cloud-design-questions.md:45 'critically evaluate the solution'             -> grader observation (docs/AUDIT_GUIDE.md Q11 / Q12)"
+note "  cloud-design-questions.md:71 'show the proper usage of the commands' -> the commands are printed and run in S22 (--aws); whether they were used properly is the grader's call"
+note "  cloud-design-questions.md:23-37 the 14 stakeholder roleplay questions       -> live spoken session (docs/AUDIT_GUIDE.md ## 2)"
+note "  cloud-design-questions.md:51-57 the five Well-Architected pillars            -> design review (docs/AUDIT_GUIDE.md ## 3); the IaC evidence is scored in S3/S5/S10/S12/S16/S18"
+note "  cloud-design-questions.md:125 'Is this an outstanding project?'              -> subjective grader judgement (evidence tally in S20)"
 
 fi
 
 if [ "${SECTIONS_RAN}" -eq 0 ]; then
-  echo -e "${YELLOW}No section matched '${ONLY_SECTION}' (valid: 0..21). Nothing was run.${NC}"
+  echo -e "${YELLOW}No section matched '${ONLY_SECTION}' (valid: 0..25). Nothing was run.${NC}"
   exit 2
 fi
 

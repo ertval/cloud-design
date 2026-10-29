@@ -1497,11 +1497,14 @@ scripts/aws-demo.sh verify lb security
 
 # --- the whole rubric, automatically, with real output
 bash scripts/run-audit-checks.sh
+bash scripts/run-audit-checks.sh --aws    # plus the live AWS sections 22-25
 bash scripts/test_cloud.sh
 ```
 
-`scripts/run-audit-checks.sh` walks all 22 rubric items in `docs/audit.md`,
-executing the real command for each and printing its real stdout/stderr. It
+`scripts/run-audit-checks.sh` walks the 29 questions of
+`docs/cloud-design-questions.md`, the current rubric, and every section cites
+the line it answers (`docs/audit.md`, the earlier version, is kept). It runs
+the real command for each and prints its real stdout/stderr. It
 reports three verdicts, never two: `[PASS]`, `[FAIL]`, and `[INVALID]` — the
 last meaning "cannot be determined here", counted separately and **never** as a
 pass.
@@ -1510,7 +1513,18 @@ Current real result on this machine: **PASS=203, FAIL=0, INVALID=1, NOTES=44**
 (run marker `audit-64485-1791054689`), with all eight compose containers healthy
 and the `cd-audit` k3d cluster live. The single INVALID is S10: the live API
 Gateway 401 proof, which cannot be produced without a deployed account and is
-deliberately not counted as a pass.
+deliberately not counted as a pass. That run predates the AWS sections 22-25
+described next; without `--aws`, each of them adds one INVALID.
+
+With `--aws`, sections 22-25 answer the questions only the deployed stack can:
+the deployment shown with `aws` and ECS commands (22), POST and GET of a movie
+through API Gateway (23), the billing outage drill (24), and HTTPS, database
+isolation, the 401 and Cognito (25). Each runs the matching
+`scripts/aws-demo.sh` section (see "Live AWS demo") and grades its checks:
+`[PASS]` and `[FAIL]` carry over, `[WARN]` and `[SKIP]` count as INVALID, and so
+does a stop before any check, such as no deployed stack or `AWS_PROFILE` not
+`cloud-design`. Section 24 stops billing-app for a few minutes. `--static --aws`
+runs the AWS sections without the local stack.
 
 **Do not skip the FAIL column.** An earlier run of this same suite reported
 `FAIL=2`, and both were real — the kind that a reader would have dismissed as
@@ -1769,7 +1783,7 @@ Claimed against `docs/readme.md`'s bonus list. Each item says exactly what exist
 | **AWS Inspector for vulnerability scanning** | **Done** | `terraform/inspector2.tf`: Inspector v2 enabler for ECR + a CRITICAL/HIGH filter with `action = "NONE"` (reported, not suppressed) |
 | **ECR with scan-on-push** | **Done** | `terraform/ecr.tf`: 3 repos, `scan_on_push = true`, AES256, lifecycle policy keeping the last 5 images, and an explicit account-local repository policy |
 | **AWS Cloud Map service discovery** | **Done** | `terraform/service_discovery.tf`: private DNS namespace, `MULTIVALUE` routing, `health_check_custom_config`, registered by all three ECS services. One ALB, **no second load balancer** for east–west |
-| **Reusable audit automation** | **Done** | `scripts/run-audit-checks.sh` walks all 22 rubric items with real commands and reports PASS / FAIL / **INVALID** separately |
+| **Reusable audit automation** | **Done** | `scripts/run-audit-checks.sh` walks the 29 questions of `docs/cloud-design-questions.md` with real commands (with `--aws`, also against the deployed stack) and reports PASS / FAIL / **INVALID** separately |
 | **A real load balancer in the demonstrable path** | **Done** | nginx `least_conn` in front of 2 `api-gateway` replicas, with `$upstream_addr` in the access log so the **561 / 539** distribution over 1100 requests is *measured* rather than asserted. Same algorithm family as the ALB target group |
 | **Retained, k3d-verified Kubernetes manifests** | **Done** | `manifests/` — 29 objects rendered by `kubectl kustomize`, applied to a live k3d cluster: 8 NetworkPolicies, 3 HPAs, 3 PDBs, topology spread, `preStop` drains, 3-tier split probes |
 | **Function as a Service (FaaS)** | **NOT implemented** | No `aws_lambda_function`. Future work |
@@ -1787,7 +1801,7 @@ Claimed against `docs/readme.md`'s bonus list. Each item says exactly what exist
 - [x] `manifests/` — 29 Kubernetes objects including `kustomization.yaml`
 - [x] `ecs-tasks/` — 6 standalone task-definition documents with placeholder ARNs (the authoritative ones are in `terraform/ecs_services.tf`)
 - [x] `scripts/` — `build_push.sh`, `deploy.sh`, `deploy-k3d.sh`, `destroy.sh`, `test_cloud.sh`, `run-audit-checks.sh`, `step_by_step_audit.py`
-- [x] `docs/` — the brief (`readme.md`), the rubric (`audit.md`) and the roleplay defence guide (`AUDIT_GUIDE.md`)
+- [x] `docs/` — the brief (`readme.md`), the rubric (`cloud-design-questions.md`, with its earlier version `audit.md`) and the roleplay defence guide (`AUDIT_GUIDE.md`)
 
 **Teardown / cost protection.** Run this immediately after the audit:
 
@@ -1896,9 +1910,9 @@ only because it now does.
 
 | Tool | What it does | Live result |
 |---|---|---|
-| `scripts/run-audit-checks.sh` | Walks all 22 rubric items in `docs/audit.md`, runs the real command for each, prints real stdout/stderr, and grades PASS / FAIL / **INVALID** / NOTE. Never hides a command | PASS=203, FAIL=0, INVALID=1, NOTES=44 |
+| `scripts/run-audit-checks.sh` | Walks the 29 questions of `docs/cloud-design-questions.md` (each section cites its line), runs the real command for each, prints real stdout/stderr, and grades PASS / FAIL / **INVALID** / NOTE. Never hides a command. `--aws` adds sections 22-25 against the deployed stack, through `scripts/aws-demo.sh` | PASS=203, FAIL=0, INVALID=1, NOTES=44 |
 | `scripts/test_cloud.sh` | Static-only suite: reads files, parses manifests, grades Dockerfiles / Terraform / manifests / scripts. Deliberately separate from the live suite so a reviewer can tell reading-based proof from running-based proof | 65 PASS / 0 FAIL / 1 WARN |
-| `scripts/step_by_step_audit.py` | Sends the literal rubric commands to a terminal pane one at a time, so the examiner watches each command typed and its real output. `--list`, `--dry-run`, `--only <section>`, `--section`, `--pane` | — |
+| `scripts/step_by_step_audit.py` | Sends the literal rubric commands to a terminal pane one at a time, so the examiner watches each command typed and its real output. Each step cites its line of `docs/cloud-design-questions.md`. `--aws` adds section 14, the AWS steps (deployment, target health, the 401, then `aws-demo.sh` for the movies, the billing drill and the security evidence). `--list`, `--dry-run`, `--only <section>`, `--section`, `--pane` | — |
 | `scripts/build_push.sh` | Builds all six images as `:local`, verifies each one exists, optionally pushes the three application images to ECR with `PUSH=1` (as `:latest` and the git short SHA), prints the real size table | — |
 | `scripts/deploy.sh` | AWS path (ECS, no `kubectl`): `sts get-caller-identity` → `init`/`validate`/`plan`, stops there unless `AUTO_APPROVE=true` → ECR repositories (`-target`) → build+push → full `plan`/`apply` → `update-service --force-new-deployment` per service → `wait services-stable` → outputs. `--static-only` makes no AWS call | — |
 | `scripts/aws-demo.sh` | Live AWS demo for the audit, one section per question (`verify`, `lb`, `lb-split`, `auth`, `movies`, `billing`, `load`, `scaling`, `security`, `all`). Prints each `aws` / `curl` command before it runs it, grades the result, never prints a secret. Requires `AWS_PROFILE=cloud-design`. See "Live AWS demo" | needs a deployed stack |

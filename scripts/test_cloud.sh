@@ -59,6 +59,41 @@ else
     fail "Missing audit rubric: docs/audit.md"
 fi
 
+# docs/cloud-design-questions.md is the rubric the audit scripts follow;
+# docs/audit.md above is its earlier version, kept. Every rubric line the two
+# scripts cite must land on a heading, a question or a list item of the new
+# file, so a citation cannot drift onto prose or past the end of the file.
+QFILE="$ROOT_DIR/docs/cloud-design-questions.md"
+QSCRIPTS=("$ROOT_DIR/scripts/run-audit-checks.sh" "$ROOT_DIR/scripts/step_by_step_audit.py")
+if [ -f "$QFILE" ]; then
+    NQ2="$(grep -c '^######' "$QFILE" 2>/dev/null | head -1)"
+    pass "current audit rubric present at docs/cloud-design-questions.md (${NQ2:-?} '######' questions)"
+    BADREF=""; NREF=0
+    for ref in $(grep -ohE 'cloud-design-questions\.md:[0-9][0-9,-]*' "${QSCRIPTS[@]}" 2>/dev/null \
+                 | sed 's/.*://' | tr ',' '\n' | tr '-' '\n' | grep -E '^[0-9]+$' | sort -nu); do
+        NREF=$((NREF + 1))
+        case "$(sed -n "${ref}p" "$QFILE")" in
+            '#'*|'- '*|[0-9]'. '*) ;;
+            *) BADREF="$BADREF $ref" ;;
+        esac
+    done
+    if [ "$NREF" -eq 0 ]; then
+        fail "run-audit-checks.sh and step_by_step_audit.py cite no line of docs/cloud-design-questions.md"
+    elif [ -n "$BADREF" ]; then
+        fail "rubric citations that land on no question or heading of docs/cloud-design-questions.md: line(s)$BADREF"
+    else
+        pass "all $NREF distinct rubric lines cited by run-audit-checks.sh and step_by_step_audit.py land on a question or heading of docs/cloud-design-questions.md"
+    fi
+    OLDREF="$(grep -hoE 'audit\.md:[0-9]+' "${QSCRIPTS[@]}" 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "${OLDREF:-1}" = 0 ]; then
+        pass "the audit scripts cite no docs/audit.md line number any more (its numbering differs from the current rubric)"
+    else
+        fail "${OLDREF} docs/audit.md line citation(s) remain in the audit scripts; cite docs/cloud-design-questions.md instead"
+    fi
+else
+    fail "Missing audit rubric: docs/cloud-design-questions.md"
+fi
+
 for f in README.md docs/readme.md docs/AUDIT_GUIDE.md docker-compose.yml Makefile .env.example; do
     if [ -f "$ROOT_DIR/$f" ]; then pass "Required file exists: $f"; else fail "Missing required file: $f"; fi
 done
