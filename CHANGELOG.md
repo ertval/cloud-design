@@ -850,3 +850,24 @@ walks the 29 questions of `docs/cloud-design-questions.md` with real commands an
 
 **Next**
 - T37 and the other live tasks still wait for T26 and T29; in that session `bash scripts/run-audit-checks.sh --static --aws` grades sections 22-25 against the real stack.
+
+## 2026-10-30 00:48 EET: T25 and T26 ticked, the AWS profile and billing alerts are in place
+
+**What**
+- `tasklist.md`: T25 (a dedicated AWS profile) and T26 (Receive CloudWatch Billing Alerts) ticked and crossed out, at the user's request.
+
+**Why**
+The user did both in the AWS console and asked for them to be ticked. T29 (`terraform/terraform.tfvars`) is still open, so T30 (deploy) has not started.
+
+**Verified**
+- T25: `aws --profile cloud-design sts get-caller-identity` answers with the project's IAM user.
+- T26: `aws cloudwatch list-metrics --namespace AWS/Billing --region us-east-1` lists 18 `EstimatedCharges` metrics (before: 0), including the account-wide `Currency=USD` total that `aws_cloudwatch_metric_alarm.billing_estimated_charges` (`terraform/cloudwatch.tf:604`) watches; its first datapoint is 0.00 USD.
+
+**Sources**
+- [Create a billing alarm to monitor your estimated AWS charges, Amazon CloudWatch User Guide](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/monitor_estimated_charges_with_cloudwatch.html): the T26 steps, about 15 minutes until data appears, the data in us-east-1, and that data collection can't be turned off once enabled.
+- [Access control for Billing](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/control-access-billing.html): IAM users can't open the Billing console by default, even with policies that grant Billing actions.
+- [Getting started with Billing, activating IAM access](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/billing-getting-started.html): the root user's "Activate IAM access" steps.
+- For the T27 install steps given in chat (nothing installed): [Install the Session Manager plugin on Debian Server and Ubuntu Server](https://docs.aws.amazon.com/systems-manager/latest/userguide/install-plugin-debian-and-ubuntu.html), [Install the Session Manager plugin for the AWS CLI](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html) (plugin 1.2.764.0 or later, AWS CLI 1.16.12 or later), [Verify the Session Manager plugin installation](https://docs.aws.amazon.com/systems-manager/latest/userguide/install-plugin-verify.html), [Install and Set Up kubectl on Linux](https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/), [k3d installation](https://k3d.io/stable/#installation) (Docker 20.10.5 or later).
+
+**Next**
+- The user: T29, then T30. T27 is optional.

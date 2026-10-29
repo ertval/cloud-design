@@ -105,8 +105,8 @@ The biggest saving of all costs nothing: deploy shortly before the audit and des
 
 ## Phase 4: Deploy and verify on AWS
 
-- [ ] **T25 [YOU]** Create AWS credentials for this project in a dedicated profile (not `code-keeper`) and `export AWS_PROFILE=...`. (4.1)
-- [ ] **T26 [YOU]** Enable "Receive CloudWatch billing alerts" in the Billing console; keep the region `us-east-1` for the `EstimatedCharges` alarm. (4.1)
+- [x] ~~**T25 [YOU]** Create AWS credentials for this project in a dedicated profile (not `code-keeper`) and `export AWS_PROFILE=...`. (4.1)~~
+- [x] ~~**T26 [YOU]** Enable "Receive CloudWatch billing alerts" in the Billing console; keep the region `us-east-1` for the `EstimatedCharges` alarm. (4.1)~~
 - [ ] **T27 [YOU]** Install the Session Manager plugin (free, for `aws ecs execute-command`). Optional: `kubectl` + `k3d` (free) for the Kubernetes bonus path. (4.1)
 - **T28** Skipped: D1 chose the free option, so no domain or hosted zone is needed.
 - [ ] **T29 [YOU]** Create `terraform/terraform.tfvars`: `alarm_email`, `allowed_origins`, `enable_acm_certificate = false`; confirm the SNS subscription email after apply. (4.1)
