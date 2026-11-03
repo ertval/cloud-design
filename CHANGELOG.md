@@ -871,3 +871,18 @@ The user did both in the AWS console and asked for them to be ticked. T29 (`terr
 
 **Next**
 - The user: T29, then T30. T27 is optional.
+
+## 2026-10-30 01:06 EET: kubectl v1.37.2 installed for the optional part of T27
+
+**What**
+- `~/.local/bin/kubectl` (outside the repository): kubectl v1.37.2 (Kustomize v5.8.1) installed from the binary the user had downloaded to `/tmp`; the two downloads in `/tmp` were then removed. No repository file changed besides this entry.
+
+**Why**
+The user's kubectl install had not finished: the binary and its checksum were in `/tmp` and matched, but `~/.local/bin/kubectl` did not exist. The most likely cause is that the commands ran from the project folder rather than `/tmp` (a `cd /tmp` does not carry over to the next `!` command), or that copying them from the terminal split the wrapped curl lines. The README asks for kubectl 1.28 or later for the Kubernetes path.
+
+**Verified**
+- `sha256sum --check` against `kubectl.sha256` from dl.k8s.io: `kubectl: OK`; the installed file has the same SHA-256 (`c0448752...`).
+- `command -v kubectl` gives `~/.local/bin/kubectl`; `kubectl version --client` gives v1.37.2.
+
+**Next**
+- The Session Manager plugin, the required part of T27, is already installed by the user: `/usr/local/bin/session-manager-plugin` 1.2.896.0 (AWS asks for 1.2.764.0 or later), and it reports "installed successfully". k3d, optional, is not installed. T27 is left unticked until the user confirms.

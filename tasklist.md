@@ -108,7 +108,7 @@ The biggest saving of all costs nothing: deploy shortly before the audit and des
 - [x] ~~**T25 [YOU]** Create AWS credentials for this project in a dedicated profile (not `code-keeper`) and `export AWS_PROFILE=...`. (4.1)~~
 - [x] ~~**T26 [YOU]** Enable "Receive CloudWatch billing alerts" in the Billing console; keep the region `us-east-1` for the `EstimatedCharges` alarm. (4.1)~~
 - [ ] **T27 [YOU]** Install the Session Manager plugin (free, for `aws ecs execute-command`). Optional: `kubectl` + `k3d` (free) for the Kubernetes bonus path. (4.1)
-- **T28** Skipped: D1 chose the free option, so no domain or hosted zone is needed.
+- [ ] **T28** Skipped: D1 chose the free option, so no domain or hosted zone is needed.
 - [ ] **T29 [YOU]** Create `terraform/terraform.tfvars`: `alarm_email`, `allowed_origins`, `enable_acm_certificate = false`; confirm the SNS subscription email after apply. (4.1)
 - [ ] **T30 [AWS]** `terraform init`, `plan -out=tfplan`, `apply tfplan`; push images; force new deployments; wait for stable. (4.2)
 - [ ] **T31 [AWS]** Fix anything the first apply reveals; check the lower-confidence items: Cloud Map `container_port` with A records, the MQ console port (15671 vs another), RDS 16.9 availability. (5.5)
